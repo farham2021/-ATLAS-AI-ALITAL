@@ -1,0 +1,23 @@
+name: ATLAS AI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-atlas:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run ATLAS
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        run: |
+          python bot.py
