@@ -7,30 +7,12 @@ from zoneinfo import ZoneInfo
 
 
 # =========================================================
-# ATLAS AI v2.1
-# MULTI-SOURCE DATA ENGINE
+# ATLAS AI v3 — SNIPER CORE
+# Multi-source data + 4H technical engine
 # =========================================================
-#
-# Primary:
-#   Binance public market data
-#
-# Backup:
-#   Kraken public OHLC
-#
-# Validation:
-#   CoinMarketCap Keyless Public API
-#   CoinPaprika
-#   Optional CoinGecko Demo API
-#
-# IMPORTANT:
-#   No trade signal is produced when required market data
-#   is unavailable or unreliable.
-# =========================================================
-
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
 COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY", "").strip()
 
 
@@ -46,7 +28,6 @@ WATCHLIST = {
         "paprika": "btc-bitcoin",
         "cmc": "BTC",
     },
-
     "ETHUSDT": {
         "name": "ETH",
         "kraken": "ETHUSD",
@@ -54,7 +35,6 @@ WATCHLIST = {
         "paprika": "eth-ethereum",
         "cmc": "ETH",
     },
-
     "XRPUSDT": {
         "name": "XRP",
         "kraken": "XRPUSD",
@@ -62,7 +42,6 @@ WATCHLIST = {
         "paprika": "xrp-xrp",
         "cmc": "XRP",
     },
-
     "SOLUSDT": {
         "name": "SOL",
         "kraken": "SOLUSD",
@@ -70,7 +49,6 @@ WATCHLIST = {
         "paprika": "sol-solana",
         "cmc": "SOL",
     },
-
     "TONUSDT": {
         "name": "TON",
         "kraken": "TONUSD",
@@ -78,7 +56,6 @@ WATCHLIST = {
         "paprika": "ton-toncoin",
         "cmc": "TON",
     },
-
     "UNIUSDT": {
         "name": "UNI",
         "kraken": "UNIUSD",
@@ -86,7 +63,6 @@ WATCHLIST = {
         "paprika": "uni-uniswap",
         "cmc": "UNI",
     },
-
     "ETHFIUSDT": {
         "name": "ETHFI",
         "kraken": "ETHFIUSD",
@@ -98,7 +74,7 @@ WATCHLIST = {
 
 
 # =========================================================
-# BINANCE ENDPOINTS
+# BINANCE
 # =========================================================
 
 BINANCE_HOSTS = [
@@ -113,13 +89,13 @@ BINANCE_HOSTS = [
 
 
 # =========================================================
-# HTTP ENGINE
+# HTTP
 # =========================================================
 
 def http_get(url, timeout=15, headers=None):
 
     request_headers = {
-        "User-Agent": "ATLAS-AI/2.1",
+        "User-Agent": "ATLAS-AI/3.0",
         "Accept": "application/json",
     }
 
@@ -128,21 +104,20 @@ def http_get(url, timeout=15, headers=None):
 
     request = urllib.request.Request(
         url,
-        headers=request_headers
+        headers=request_headers,
     )
 
     with urllib.request.urlopen(
         request,
-        timeout=timeout
+        timeout=timeout,
     ) as response:
 
         status = response.getcode()
+
         raw = response.read().decode("utf-8")
 
         if status < 200 or status >= 300:
-            raise RuntimeError(
-                f"HTTP {status}"
-            )
+            raise RuntimeError(f"HTTP {status}")
 
         return json.loads(raw)
 
@@ -207,7 +182,7 @@ def get_binance_24h(symbol):
 
             if price is None:
                 raise RuntimeError(
-                    "Invalid Binance lastPrice"
+                    "Invalid Binance price"
                 )
 
             return {
@@ -235,18 +210,19 @@ def get_binance_24h(symbol):
             )
 
     raise RuntimeError(
-        " | ".join(errors[-3:])
+        "Binance 24H unavailable | "
+        + " | ".join(errors[-3:])
     )
 
 
 # =========================================================
-# BINANCE 4H CANDLES
+# BINANCE 4H
 # =========================================================
 
 def get_binance_klines(
     symbol,
     interval="4h",
-    limit=80
+    limit=100,
 ):
 
     errors = []
@@ -262,14 +238,17 @@ def get_binance_klines(
                 f"&limit={limit}"
             )
 
-            data = http_get(url, timeout=15)
+            data = http_get(
+                url,
+                timeout=15,
+            )
 
             if not isinstance(data, list):
                 raise RuntimeError(
-                    "Invalid Binance kline response"
+                    "Invalid kline response"
                 )
 
-            if len(data) < 55:
+            if len(data) < 60:
                 raise RuntimeError(
                     f"Insufficient candles: {len(data)}"
                 )
@@ -287,12 +266,13 @@ def get_binance_klines(
             )
 
     raise RuntimeError(
-        " | ".join(errors[-4:])
+        "Binance 4H unavailable | "
+        + " | ".join(errors[-4:])
     )
 
 
 # =========================================================
-# KRAKEN 4H BACKUP
+# KRAKEN BACKUP
 # =========================================================
 
 def get_kraken_ohlc(pair):
@@ -305,7 +285,7 @@ def get_kraken_ohlc(pair):
 
     data = http_get(
         url,
-        timeout=15
+        timeout=15,
     )
 
     if data.get("error"):
@@ -314,7 +294,10 @@ def get_kraken_ohlc(pair):
             + str(data["error"])
         )
 
-    result = data.get("result", {})
+    result = data.get(
+        "result",
+        {},
+    )
 
     pair_key = None
 
@@ -326,24 +309,19 @@ def get_kraken_ohlc(pair):
 
     if not pair_key:
         raise RuntimeError(
-            "Kraken OHLC pair not found"
+            "Kraken pair not found"
         )
 
     raw_candles = result[pair_key]
 
-    if len(raw_candles) < 55:
+    if len(raw_candles) < 60:
         raise RuntimeError(
-            f"Kraken insufficient candles: "
-            f"{len(raw_candles)}"
+            "Kraken insufficient candles"
         )
 
     candles = []
 
     for row in raw_candles:
-
-        # Kraken:
-        # [time, open, high, low, close,
-        #  vwap, volume, count]
 
         candles.append([
             int(row[0]) * 1000,
@@ -364,7 +342,7 @@ def get_kraken_ohlc(pair):
 
 
 # =========================================================
-# COINPAPRIKA PRICE
+# COINPAPRIKA
 # =========================================================
 
 def get_coinpaprika_price(coin_id):
@@ -376,7 +354,7 @@ def get_coinpaprika_price(coin_id):
 
     data = http_get(
         url,
-        timeout=12
+        timeout=12,
     )
 
     usd = (
@@ -395,7 +373,7 @@ def get_coinpaprika_price(coin_id):
 
     if price is None:
         raise RuntimeError(
-            "CoinPaprika price unavailable"
+            "CoinPaprika unavailable"
         )
 
     return {
@@ -406,91 +384,7 @@ def get_coinpaprika_price(coin_id):
 
 
 # =========================================================
-# COINMARKETCAP KEYLESS PRICE
-# =========================================================
-
-def get_cmc_price(symbol):
-
-    url = (
-        "https://pro-api.coinmarketcap.com"
-        "/public-api/v3/cryptocurrency/quotes/latest"
-        "?symbol="
-        + urllib.parse.quote(symbol)
-        + "&convert=USD"
-    )
-
-    data = http_get(
-        url,
-        timeout=15
-    )
-
-    records = data.get("data", [])
-
-    if isinstance(records, dict):
-
-        # Some response formats return:
-        # {"BTC": [...]}
-
-        if symbol in records:
-            item = records[symbol]
-
-            if isinstance(item, list):
-                item = item[0]
-
-        else:
-            item = None
-
-            for value in records.values():
-
-                if isinstance(value, list) and value:
-                    item = value[0]
-                    break
-
-                if isinstance(value, dict):
-                    item = value
-                    break
-
-    elif isinstance(records, list):
-
-        item = records[0] if records else None
-
-    else:
-
-        item = None
-
-    if not item:
-        raise RuntimeError(
-            "CoinMarketCap data unavailable"
-        )
-
-    quote = (
-        item
-        .get("quote", {})
-        .get("USD", {})
-    )
-
-    price = safe_float(
-        quote.get("price")
-    )
-
-    change = safe_float(
-        quote.get("percent_change_24h")
-    )
-
-    if price is None:
-        raise RuntimeError(
-            "CoinMarketCap price unavailable"
-        )
-
-    return {
-        "price": price,
-        "change": change,
-        "source": "CoinMarketCap",
-    }
-
-
-# =========================================================
-# COINGECKO OPTIONAL
+# COINGECKO
 # =========================================================
 
 def get_coingecko_price(coin_id):
@@ -506,21 +400,21 @@ def get_coingecko_price(coin_id):
 
     if COINGECKO_API_KEY:
 
-        headers[
-            "x-cg-demo-api-key"
-        ] = COINGECKO_API_KEY
+        headers["x-cg-demo-api-key"] = (
+            COINGECKO_API_KEY
+        )
 
     data = http_get(
         url,
         timeout=15,
-        headers=headers
+        headers=headers,
     )
 
     coin = data.get(coin_id)
 
     if not coin:
         raise RuntimeError(
-            "CoinGecko coin unavailable"
+            "CoinGecko unavailable"
         )
 
     price = safe_float(
@@ -544,88 +438,146 @@ def get_coingecko_price(coin_id):
 
 
 # =========================================================
+# CMC OPTIONAL
+# =========================================================
+
+def get_cmc_price(symbol):
+
+    url = (
+        "https://pro-api.coinmarketcap.com"
+        "/public-api/v3/cryptocurrency/quotes/latest"
+        "?symbol="
+        + urllib.parse.quote(symbol)
+        + "&convert=USD"
+    )
+
+    data = http_get(
+        url,
+        timeout=15,
+    )
+
+    records = data.get(
+        "data",
+        {}
+    )
+
+    item = None
+
+    if isinstance(records, dict):
+
+        if symbol in records:
+
+            item = records[symbol]
+
+            if isinstance(item, list) and item:
+                item = item[0]
+
+        else:
+
+            for value in records.values():
+
+                if isinstance(value, list) and value:
+                    item = value[0]
+                    break
+
+                if isinstance(value, dict):
+                    item = value
+                    break
+
+    elif isinstance(records, list):
+
+        if records:
+            item = records[0]
+
+    if not item:
+        raise RuntimeError(
+            "CoinMarketCap unavailable"
+        )
+
+    quote = (
+        item
+        .get("quote", {})
+        .get("USD", {})
+    )
+
+    price = safe_float(
+        quote.get("price")
+    )
+
+    change = safe_float(
+        quote.get("percent_change_24h")
+    )
+
+    if price is None:
+        raise RuntimeError(
+            "CMC price unavailable"
+        )
+
+    return {
+        "price": price,
+        "change": change,
+        "source": "CoinMarketCap",
+    }
+
+
+# =========================================================
 # PRICE CONSENSUS
 # =========================================================
 
-def get_price_consensus(symbol, info):
+def get_price_consensus(
+    symbol,
+    info,
+):
 
     sources = []
     errors = []
 
-    # -----------------------------------------------------
-    # Binance
-    # -----------------------------------------------------
-
     try:
-
-        result = get_binance_24h(symbol)
-        sources.append(result)
-
+        sources.append(
+            get_binance_24h(symbol)
+        )
     except Exception as e:
-
         errors.append(
             "Binance: " + str(e)
         )
 
-    # -----------------------------------------------------
-    # CoinPaprika
-    # -----------------------------------------------------
-
     try:
-
-        result = get_coinpaprika_price(
-            info["paprika"]
+        sources.append(
+            get_coinpaprika_price(
+                info["paprika"]
+            )
         )
-
-        sources.append(result)
-
     except Exception as e:
-
         errors.append(
             "CoinPaprika: " + str(e)
         )
 
-    # -----------------------------------------------------
-    # CoinMarketCap
-    # -----------------------------------------------------
-
     try:
-
-        result = get_cmc_price(
-            info["cmc"]
+        sources.append(
+            get_coingecko_price(
+                info["gecko"]
+            )
         )
-
-        sources.append(result)
-
     except Exception as e:
-
-        errors.append(
-            "CMC: " + str(e)
-        )
-
-    # -----------------------------------------------------
-    # CoinGecko
-    # -----------------------------------------------------
-
-    try:
-
-        result = get_coingecko_price(
-            info["gecko"]
-        )
-
-        sources.append(result)
-
-    except Exception as e:
-
         errors.append(
             "CoinGecko: " + str(e)
         )
 
-    if not sources:
+    # CMC is optional.
+    try:
+        sources.append(
+            get_cmc_price(
+                info["cmc"]
+            )
+        )
+    except Exception as e:
+        errors.append(
+            "CMC: " + str(e)
+        )
 
+    if not sources:
         raise RuntimeError(
-            "No price source available | "
-            + " | ".join(errors)
+            "No price source available"
         )
 
     prices = [
@@ -634,8 +586,15 @@ def get_price_consensus(symbol, info):
         if x.get("price") is not None
     ]
 
-    median_price = sorted(prices)[
-        len(prices) // 2
+    if not prices:
+        raise RuntimeError(
+            "No valid prices"
+        )
+
+    ordered = sorted(prices)
+
+    median_price = ordered[
+        len(ordered) // 2
     ]
 
     max_difference = 0
@@ -644,25 +603,22 @@ def get_price_consensus(symbol, info):
 
         diff = percent_difference(
             price,
-            median_price
+            median_price,
         )
 
         if diff is not None:
             max_difference = max(
                 max_difference,
-                diff
+                diff,
             )
 
     if max_difference <= 0.50:
-
         confidence = "HIGH"
 
     elif max_difference <= 1.50:
-
         confidence = "MEDIUM"
 
     else:
-
         confidence = "LOW"
 
     return {
@@ -678,14 +634,16 @@ def get_price_consensus(symbol, info):
 # REMOVE INCOMPLETE CANDLE
 # =========================================================
 
-def remove_incomplete_last_candle(candles):
+def remove_incomplete_last_candle(
+    candles
+):
 
     if len(candles) < 2:
         return candles
 
     try:
 
-        last_open_time = int(
+        last_open = int(
             candles[-1][0]
         )
 
@@ -695,43 +653,41 @@ def remove_incomplete_last_candle(candles):
             ).timestamp() * 1000
         )
 
-        # 4H = 14,400,000 ms
-        candle_length = 4 * 60 * 60 * 1000
-
-        candle_close_time = (
-            last_open_time
-            + candle_length
+        candle_length = (
+            4 * 60 * 60 * 1000
         )
 
-        if candle_close_time > now_ms:
+        if (
+            last_open
+            + candle_length
+            > now_ms
+        ):
 
             return candles[:-1]
 
     except Exception:
-
         pass
 
     return candles
 
 
 # =========================================================
-# SELECT 4H DATA SOURCE
+# SELECT 4H ENGINE
 # =========================================================
 
-def get_4h_candles(symbol, info):
+def get_4h_candles(
+    symbol,
+    info,
+):
 
     errors = []
-
-    # -----------------------------------------------------
-    # Binance
-    # -----------------------------------------------------
 
     try:
 
         result = get_binance_klines(
             symbol,
-            interval="4h",
-            limit=80
+            "4h",
+            100,
         )
 
         candles = (
@@ -740,7 +696,7 @@ def get_4h_candles(symbol, info):
             )
         )
 
-        if len(candles) >= 55:
+        if len(candles) >= 60:
 
             return {
                 "candles": candles,
@@ -751,12 +707,8 @@ def get_4h_candles(symbol, info):
     except Exception as e:
 
         errors.append(
-            "Binance 4H: " + str(e)
+            "Binance: " + str(e)
         )
-
-    # -----------------------------------------------------
-    # Kraken
-    # -----------------------------------------------------
 
     try:
 
@@ -770,7 +722,7 @@ def get_4h_candles(symbol, info):
             )
         )
 
-        if len(candles) >= 55:
+        if len(candles) >= 60:
 
             return {
                 "candles": candles,
@@ -781,7 +733,7 @@ def get_4h_candles(symbol, info):
     except Exception as e:
 
         errors.append(
-            "Kraken 4H: " + str(e)
+            "Kraken: " + str(e)
         )
 
     raise RuntimeError(
@@ -791,24 +743,51 @@ def get_4h_candles(symbol, info):
 
 
 # =========================================================
-# EXTRACT CLOSES
+# CANDLE EXTRACTION
 # =========================================================
 
-def extract_closes(candles):
+def extract_ohlcv(candles):
 
+    opens = []
+    highs = []
+    lows = []
     closes = []
+    volumes = []
 
     for candle in candles:
 
         try:
+
+            opens.append(
+                float(candle[1])
+            )
+
+            highs.append(
+                float(candle[2])
+            )
+
+            lows.append(
+                float(candle[3])
+            )
+
             closes.append(
                 float(candle[4])
+            )
+
+            volumes.append(
+                float(candle[5])
             )
 
         except Exception:
             continue
 
-    return closes
+    return (
+        opens,
+        highs,
+        lows,
+        closes,
+        volumes,
+    )
 
 
 # =========================================================
@@ -820,8 +799,8 @@ def ema(values, period):
     if len(values) < period:
         return None
 
-    multiplier = 2 / (
-        period + 1
+    multiplier = (
+        2 / (period + 1)
     )
 
     result = (
@@ -829,15 +808,48 @@ def ema(values, period):
         / period
     )
 
-    for price in values[period:]:
+    for value in values[period:]:
 
         result = (
-            (price - result)
+            (value - result)
             * multiplier
             + result
         )
 
     return result
+
+
+# =========================================================
+# EMA SERIES
+# =========================================================
+
+def ema_series(values, period):
+
+    if len(values) < period:
+        return []
+
+    multiplier = (
+        2 / (period + 1)
+    )
+
+    result = (
+        sum(values[:period])
+        / period
+    )
+
+    series = [result]
+
+    for value in values[period:]:
+
+        result = (
+            (value - result)
+            * multiplier
+            + result
+        )
+
+        series.append(result)
+
+    return series
 
 
 # =========================================================
@@ -854,7 +866,7 @@ def rsi(values, period=14):
 
     for i in range(
         1,
-        len(values)
+        len(values),
     ):
 
         change = (
@@ -886,7 +898,7 @@ def rsi(values, period=14):
 
     for i in range(
         period,
-        len(gains)
+        len(gains),
     ):
 
         avg_gain = (
@@ -923,59 +935,285 @@ def rsi(values, period=14):
 
 
 # =========================================================
-# TECHNICAL ANALYSIS
+# MACD
+# =========================================================
+
+def macd(values):
+
+    fast = ema_series(
+        values,
+        12,
+    )
+
+    slow = ema_series(
+        values,
+        26,
+    )
+
+    if not fast or not slow:
+        return None
+
+    # Align series from the latest values.
+    length = min(
+        len(fast),
+        len(slow),
+    )
+
+    fast = fast[-length:]
+    slow = slow[-length:]
+
+    macd_line = []
+
+    for i in range(length):
+
+        macd_line.append(
+            fast[i] - slow[i]
+        )
+
+    signal_series = ema_series(
+        macd_line,
+        9,
+    )
+
+    if not signal_series:
+        return None
+
+    macd_value = macd_line[-1]
+    signal_value = signal_series[-1]
+
+    histogram = (
+        macd_value
+        - signal_value
+    )
+
+    return {
+        "macd": macd_value,
+        "signal": signal_value,
+        "histogram": histogram,
+    }
+
+
+# =========================================================
+# ATR
+# =========================================================
+
+def atr(
+    highs,
+    lows,
+    closes,
+    period=14,
+):
+
+    if len(closes) < period + 1:
+        return None
+
+    true_ranges = []
+
+    for i in range(
+        1,
+        len(closes),
+    ):
+
+        high = highs[i]
+        low = lows[i]
+        previous_close = closes[i - 1]
+
+        tr = max(
+            high - low,
+            abs(
+                high
+                - previous_close
+            ),
+            abs(
+                low
+                - previous_close
+            ),
+        )
+
+        true_ranges.append(tr)
+
+    if len(true_ranges) < period:
+        return None
+
+    value = (
+        sum(
+            true_ranges[:period]
+        )
+        / period
+    )
+
+    for tr in true_ranges[period:]:
+
+        value = (
+            (
+                value
+                * (period - 1)
+            )
+            + tr
+        ) / period
+
+    return value
+
+
+# =========================================================
+# SUPPORT / RESISTANCE
+# =========================================================
+
+def support_resistance(
+    highs,
+    lows,
+    closes,
+    lookback=30,
+):
+
+    if len(closes) < lookback:
+        lookback = len(closes)
+
+    recent_highs = highs[-lookback:]
+    recent_lows = lows[-lookback:]
+
+    resistance = max(
+        recent_highs
+    )
+
+    support = min(
+        recent_lows
+    )
+
+    return support, resistance
+
+
+# =========================================================
+# VOLUME ANALYSIS
+# =========================================================
+
+def volume_analysis(
+    volumes,
+    period=20,
+):
+
+    if len(volumes) < period + 1:
+        return None
+
+    average = (
+        sum(
+            volumes[-period - 1:-1]
+        )
+        / period
+    )
+
+    current = volumes[-1]
+
+    if average <= 0:
+        return None
+
+    ratio = (
+        current / average
+    )
+
+    if ratio >= 1.30:
+        state = "CONFIRMED"
+
+    elif ratio >= 0.90:
+        state = "NORMAL"
+
+    else:
+        state = "WEAK"
+
+    return {
+        "current": current,
+        "average": average,
+        "ratio": ratio,
+        "state": state,
+    }
+
+
+# =========================================================
+# TECHNICAL ENGINE
 # =========================================================
 
 def technical_analysis(
     symbol,
-    info
+    info,
 ):
 
     market = get_price_consensus(
         symbol,
-        info
+        info,
     )
 
     candles_info = get_4h_candles(
         symbol,
-        info
+        info,
     )
 
     candles = candles_info[
         "candles"
     ]
 
-    closes = extract_closes(
+    (
+        opens,
+        highs,
+        lows,
+        closes,
+        volumes,
+    ) = extract_ohlcv(
         candles
     )
 
-    if len(closes) < 55:
-
+    if len(closes) < 60:
         raise RuntimeError(
-            "Insufficient 4H closes"
+            "Insufficient 4H data"
         )
 
     current = closes[-1]
 
     ema20 = ema(
         closes,
-        20
+        20,
     )
 
     ema50 = ema(
         closes,
-        50
+        50,
     )
 
     rsi14 = rsi(
         closes,
-        14
+        14,
+    )
+
+    macd_data = macd(
+        closes
+    )
+
+    atr14 = atr(
+        highs,
+        lows,
+        closes,
+        14,
+    )
+
+    support, resistance = (
+        support_resistance(
+            highs,
+            lows,
+            closes,
+            30,
+        )
+    )
+
+    volume_data = (
+        volume_analysis(
+            volumes,
+            20,
+        )
     )
 
     score = 0
 
     # -----------------------------------------------------
-    # Price vs EMA20
+    # Trend
     # -----------------------------------------------------
 
     if ema20 is not None:
@@ -985,20 +1223,12 @@ def technical_analysis(
         else:
             score -= 1
 
-    # -----------------------------------------------------
-    # Price vs EMA50
-    # -----------------------------------------------------
-
     if ema50 is not None:
 
         if current > ema50:
             score += 1
         else:
             score -= 1
-
-    # -----------------------------------------------------
-    # EMA20 vs EMA50
-    # -----------------------------------------------------
 
     if (
         ema20 is not None
@@ -1017,90 +1247,374 @@ def technical_analysis(
     if rsi14 is not None:
 
         if 50 <= rsi14 < 70:
-
             score += 1
 
         elif rsi14 >= 70:
-
             score -= 1
 
         elif 30 < rsi14 < 50:
-
             score -= 1
 
         elif rsi14 <= 30:
-
             score += 1
 
     # -----------------------------------------------------
-    # Signal
+    # MACD
     # -----------------------------------------------------
 
-    if score >= 4:
+    macd_state = "N/A"
 
-        signal = "🟢 BUY BIAS"
+    if macd_data:
 
-    elif score >= 2:
+        if (
+            macd_data["macd"]
+            > macd_data["signal"]
+        ):
 
-        signal = "🟢 BULLISH"
+            score += 2
+            macd_state = "BULLISH"
 
-    elif score <= -4:
+        else:
 
-        signal = "🔴 SELL BIAS"
+            score -= 2
+            macd_state = "BEARISH"
 
-    elif score <= -2:
+    # -----------------------------------------------------
+    # Volume
+    # -----------------------------------------------------
 
-        signal = "🟠 BEARISH"
+    volume_state = "N/A"
+
+    if volume_data:
+
+        volume_state = (
+            volume_data["state"]
+        )
+
+        if (
+            volume_data["ratio"]
+            >= 1.30
+        ):
+
+            if score > 0:
+                score += 1
+            elif score < 0:
+                score -= 1
+
+    # -----------------------------------------------------
+    # Trend label
+    # -----------------------------------------------------
+
+    if (
+        ema20 is not None
+        and ema50 is not None
+        and current > ema20
+        and ema20 > ema50
+    ):
+
+        trend = "BULLISH"
+
+    elif (
+        ema20 is not None
+        and ema50 is not None
+        and current < ema20
+        and ema20 < ema50
+    ):
+
+        trend = "BEARISH"
 
     else:
 
-        signal = "⚪ NEUTRAL"
+        trend = "MIXED"
+
+    # -----------------------------------------------------
+    # ATR risk levels
+    # -----------------------------------------------------
+
+    entry = market["price"]
+
+    if atr14:
+
+        if score >= 2:
+
+            stop = entry - (
+                atr14 * 1.5
+            )
+
+            tp1 = entry + (
+                atr14 * 2.5
+            )
+
+            tp2 = entry + (
+                atr14 * 4.0
+            )
+
+        elif score <= -2:
+
+            stop = entry + (
+                atr14 * 1.5
+            )
+
+            tp1 = entry - (
+                atr14 * 2.5
+            )
+
+            tp2 = entry - (
+                atr14 * 4.0
+            )
+
+        else:
+
+            stop = None
+            tp1 = None
+            tp2 = None
+
+    else:
+
+        stop = None
+        tp1 = None
+        tp2 = None
+
+    # -----------------------------------------------------
+    # Resistance / support filter
+    # -----------------------------------------------------
+
+    near_resistance = False
+    near_support = False
+
+    if resistance and entry > 0:
+
+        distance = (
+            resistance - entry
+        ) / entry * 100
+
+        if (
+            0 <= distance <= 1.5
+        ):
+            near_resistance = True
+
+    if support and entry > 0:
+
+        distance = (
+            entry - support
+        ) / entry * 100
+
+        if (
+            0 <= distance <= 1.5
+        ):
+            near_support = True
+
+    # -----------------------------------------------------
+    # Action
+    # -----------------------------------------------------
+
+    action = "NO TRADE"
+
+    if (
+        market["confidence"]
+        == "LOW"
+        or market["max_difference"]
+        > 5.0
+    ):
+
+        action = "NO TRADE"
+
+    elif (
+        score >= 7
+        and not near_resistance
+        and volume_state != "WEAK"
+    ):
+
+        action = "BUY"
+
+    elif (
+        score <= -7
+        and not near_support
+        and volume_state != "WEAK"
+    ):
+
+        action = "SELL"
+
+    elif score >= 4:
+
+        action = "BULLISH WATCH"
+
+    elif score <= -4:
+
+        action = "BEARISH WATCH"
+
+    else:
+
+        action = "NO TRADE"
+
+    # -----------------------------------------------------
+    # Confidence
+    # -----------------------------------------------------
+
+    confidence = 50
+
+    confidence += min(
+        abs(score) * 5,
+        30,
+    )
+
+    if trend in [
+        "BULLISH",
+        "BEARISH",
+    ]:
+        confidence += 5
+
+    if volume_state == "CONFIRMED":
+        confidence += 5
+
+    elif volume_state == "WEAK":
+        confidence -= 10
+
+    if macd_state != "N/A":
+        confidence += 5
+
+    if (
+        market["confidence"]
+        == "MEDIUM"
+    ):
+        confidence -= 8
+
+    elif (
+        market["confidence"]
+        == "LOW"
+    ):
+        confidence -= 20
+
+    if near_resistance and score > 0:
+        confidence -= 10
+
+    if near_support and score < 0:
+        confidence -= 10
+
+    confidence = max(
+        0,
+        min(
+            100,
+            int(confidence),
+        ),
+    )
+
+    # -----------------------------------------------------
+    # Risk / Reward
+    # -----------------------------------------------------
+
+    rr = None
+
+    if (
+        action == "BUY"
+        and stop is not None
+        and tp1 is not None
+    ):
+
+        risk = (
+            entry - stop
+        )
+
+        reward = (
+            tp1 - entry
+        )
+
+        if risk > 0:
+            rr = reward / risk
+
+    elif (
+        action == "SELL"
+        and stop is not None
+        and tp1 is not None
+    ):
+
+        risk = (
+            stop - entry
+        )
+
+        reward = (
+            entry - tp1
+        )
+
+        if risk > 0:
+            rr = reward / risk
 
     return {
         "market": market,
         "ema20": ema20,
         "ema50": ema50,
         "rsi": rsi14,
+        "macd": macd_data,
+        "macd_state": macd_state,
+        "atr": atr14,
+        "volume": volume_data,
+        "volume_state": volume_state,
+        "support": support,
+        "resistance": resistance,
+        "trend": trend,
         "score": score,
-        "signal": signal,
-        "technical_source":
-            candles_info["source"],
-        "technical_endpoint":
-            candles_info["endpoint"],
+        "action": action,
+        "confidence": confidence,
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "rr": rr,
+        "technical_source": candles_info[
+            "source"
+        ],
+        "technical_endpoint": candles_info[
+            "endpoint"
+        ],
     }
 
 
 # =========================================================
-# DATA QUALITY LABEL
+# DATA QUALITY
 # =========================================================
 
-def data_quality_label(analysis):
+def data_quality_label(
+    analysis
+):
 
-    market = analysis["market"]
-
-    confidence = market[
-        "confidence"
-    ]
-
-    technical_source = analysis[
-        "technical_source"
+    market = analysis[
+        "market"
     ]
 
     if (
-        confidence == "HIGH"
-        and technical_source == "Binance"
+        market["confidence"]
+        == "HIGH"
+        and analysis[
+            "technical_source"
+        ]
+        == "Binance"
     ):
 
         return "🟢 HIGH"
 
-    if confidence in [
+    if market["confidence"] in [
         "HIGH",
-        "MEDIUM"
+        "MEDIUM",
     ]:
 
         return "🟡 MEDIUM"
 
     return "🟠 LOW"
+
+
+# =========================================================
+# TELEGRAM FORMAT
+# =========================================================
+
+def format_number(
+    value,
+    decimals=2,
+):
+
+    if value is None:
+        return "N/A"
+
+    return f"{value:,.{decimals}f}"
 
 
 # =========================================================
@@ -1120,7 +1634,7 @@ def atlas_report():
     )
 
     lines.append(
-        "🤖 ATLAS AI — SNIPER"
+        "🤖 ATLAS AI — SNIPER v3"
     )
 
     lines.append(
@@ -1142,6 +1656,7 @@ def atlas_report():
 
     bullish = 0
     bearish = 0
+    no_trade = 0
     unavailable = 0
 
     for symbol, info in WATCHLIST.items():
@@ -1150,23 +1665,76 @@ def atlas_report():
 
         try:
 
-            analysis = technical_analysis(
-                symbol,
-                info
+            analysis = (
+                technical_analysis(
+                    symbol,
+                    info,
+                )
             )
 
             market = analysis[
                 "market"
             ]
 
-            price = market[
-                "price"
+            score = analysis[
+                "score"
             ]
+
+            action = analysis[
+                "action"
+            ]
+
+            confidence = analysis[
+                "confidence"
+            ]
+
+            quality = (
+                data_quality_label(
+                    analysis
+                )
+            )
+
+            if score >= 2:
+                bullish += 1
+
+            elif score <= -2:
+                bearish += 1
+
+            if action in [
+                "NO TRADE",
+                "BULLISH WATCH",
+                "BEARISH WATCH",
+            ]:
+                no_trade += 1
+
+            source_names = [
+                x["source"]
+                for x in market[
+                    "sources"
+                ]
+            ]
+
+            source_text = (
+                ", ".join(
+                    source_names
+                )
+                if source_names
+                else "None"
+            )
+
+            lines.append(
+                f"🔹 {name}"
+            )
+
+            lines.append(
+                "Price: "
+                + format_price(
+                    market["price"]
+                )
+            )
 
             change = None
 
-            # Prefer Binance 24H change
-            # when available.
             for source in market[
                 "sources"
             ]:
@@ -1198,52 +1766,6 @@ def atlas_report():
 
                         break
 
-            rsi14 = analysis[
-                "rsi"
-            ]
-
-            score = analysis[
-                "score"
-            ]
-
-            signal = analysis[
-                "signal"
-            ]
-
-            if score >= 2:
-                bullish += 1
-
-            elif score <= -2:
-                bearish += 1
-
-            quality = data_quality_label(
-                analysis
-            )
-
-            source_names = [
-                x["source"]
-                for x in market[
-                    "sources"
-                ]
-            ]
-
-            source_text = (
-                ", ".join(
-                    source_names
-                )
-                if source_names
-                else "None"
-            )
-
-            lines.append(
-                f"🔹 {name}"
-            )
-
-            lines.append(
-                "Price: "
-                + format_price(price)
-            )
-
             if change is not None:
 
                 lines.append(
@@ -1251,12 +1773,72 @@ def atlas_report():
                     f"{change:+.2f}%"
                 )
 
-            if rsi14 is not None:
+            lines.append(
+                "Trend: "
+                + (
+                    "🟢 "
+                    if analysis[
+                        "trend"
+                    ] == "BULLISH"
+                    else
+                    "🔴 "
+                    if analysis[
+                        "trend"
+                    ] == "BEARISH"
+                    else
+                    "🟡 "
+                )
+                + analysis[
+                    "trend"
+                ]
+            )
+
+            if analysis["rsi"] is not None:
 
                 lines.append(
                     f"RSI14: "
-                    f"{rsi14:.1f}"
+                    f"{analysis['rsi']:.1f}"
                 )
+
+            lines.append(
+                "MACD: "
+                + (
+                    "🟢 "
+                    if analysis[
+                        "macd_state"
+                    ] == "BULLISH"
+                    else
+                    "🔴 "
+                    if analysis[
+                        "macd_state"
+                    ] == "BEARISH"
+                    else
+                    "⚪ "
+                )
+                + analysis[
+                    "macd_state"
+                ]
+            )
+
+            lines.append(
+                "Volume: "
+                + (
+                    "🟢 "
+                    if analysis[
+                        "volume_state"
+                    ] == "CONFIRMED"
+                    else
+                    "🟡 "
+                    if analysis[
+                        "volume_state"
+                    ] == "NORMAL"
+                    else
+                    "🔴 "
+                )
+                + analysis[
+                    "volume_state"
+                ]
+            )
 
             lines.append(
                 f"4H Score: "
@@ -1264,30 +1846,111 @@ def atlas_report():
             )
 
             lines.append(
-                f"Signal: "
-                f"{signal}"
+                f"Confidence: "
+                f"{confidence}%"
+            )
+
+            if analysis[
+                "support"
+            ] is not None:
+
+                lines.append(
+                    "Support: "
+                    + format_price(
+                        analysis[
+                            "support"
+                        ]
+                    )
+                )
+
+            if analysis[
+                "resistance"
+            ] is not None:
+
+                lines.append(
+                    "Resistance: "
+                    + format_price(
+                        analysis[
+                            "resistance"
+                        ]
+                    )
+                )
+
+            lines.append(
+                "🎯 ACTION: "
+                + action
+            )
+
+            if action in [
+                "BUY",
+                "SELL",
+            ]:
+
+                lines.append(
+                    "Entry: "
+                    + format_price(
+                        analysis[
+                            "entry"
+                        ]
+                    )
+                )
+
+                lines.append(
+                    "Stop: "
+                    + format_price(
+                        analysis[
+                            "stop"
+                        ]
+                    )
+                )
+
+                lines.append(
+                    "TP1: "
+                    + format_price(
+                        analysis[
+                            "tp1"
+                        ]
+                    )
+                )
+
+                lines.append(
+                    "TP2: "
+                    + format_price(
+                        analysis[
+                            "tp2"
+                        ]
+                    )
+                )
+
+                if analysis[
+                    "rr"
+                ] is not None:
+
+                    lines.append(
+                        "R/R: "
+                        f"1:{analysis['rr']:.2f}"
+                    )
+
+            lines.append(
+                "Data: "
+                + quality
             )
 
             lines.append(
-                f"Data: "
-                f"{quality}"
+                "Sources: "
+                + source_text
             )
 
             lines.append(
-                f"Sources: "
-                f"{source_text}"
+                "4H Engine: "
+                + analysis[
+                    "technical_source"
+                ]
             )
 
-            lines.append(
-                f"4H Engine: "
-                f"{analysis['technical_source']}"
-            )
-
-            if (
-                market[
-                    "max_difference"
-                ] > 1.5
-            ):
+            if market[
+                "max_difference"
+            ] > 1.5:
 
                 lines.append(
                     "⚠️ DATA CONFLICT: "
@@ -1299,6 +1962,7 @@ def atlas_report():
         except Exception as e:
 
             unavailable += 1
+            no_trade += 1
 
             lines.append(
                 f"🔹 {name}"
@@ -1309,28 +1973,27 @@ def atlas_report():
             )
 
             lines.append(
-                "Action: NO TRADE"
+                "🎯 ACTION: NO TRADE"
             )
 
-            # Keep the real reason visible
-            # but short enough for Telegram.
             reason = str(e)
 
-            if len(reason) > 240:
+            if len(reason) > 220:
 
                 reason = (
-                    reason[:240]
+                    reason[:220]
                     + "..."
                 )
 
             lines.append(
-                f"Reason: {reason}"
+                "Reason: "
+                + reason
             )
 
             lines.append("")
 
     # =====================================================
-    # MARKET SUMMARY
+    # MARKET BIAS
     # =====================================================
 
     if unavailable == len(
@@ -1388,8 +2051,14 @@ def atlas_report():
     )
 
     lines.append(
+        f"No-trade/watch: "
+        f"{no_trade}"
+    )
+
+    lines.append(
         f"Data unavailable: "
-        f"{unavailable}/{len(WATCHLIST)}"
+        f"{unavailable}/"
+        f"{len(WATCHLIST)}"
     )
 
     lines.append("")
@@ -1401,13 +2070,6 @@ def atlas_report():
             "PARTIAL / DEGRADED"
         )
 
-        lines.append(
-            "⚫ No-trade protection "
-            "active for unavailable assets."
-        )
-
-        lines.append("")
-
     else:
 
         lines.append(
@@ -1415,7 +2077,7 @@ def atlas_report():
             "ALL ASSETS AVAILABLE"
         )
 
-        lines.append("")
+    lines.append("")
 
     lines.append(
         "🎯 ATLAS SNIPER MODE: ACTIVE"
@@ -1424,9 +2086,10 @@ def atlas_report():
     lines.append("")
 
     lines.append(
-        "⚠️ این گزارش تحلیلی است؛ "
-        "تصمیم نهایی خرید/فروش باید "
-        "با مدیریت ریسک انجام شود."
+        "⚠️ این گزارش نسخه آزمایشی "
+        "SNIPER v3 است؛ "
+        "سیگنال‌ها قبل از استفاده واقعی "
+        "باید با مدیریت ریسک تأیید شوند."
     )
 
     return "\n".join(lines)
@@ -1438,7 +2101,7 @@ def atlas_report():
 
 def send_message(
     chat_id,
-    text
+    text,
 ):
 
     if not TOKEN:
@@ -1453,12 +2116,11 @@ def send_message(
             "TELEGRAM_CHAT_ID is missing."
         )
 
-    # Telegram message limit protection
     if len(text) > 4000:
 
-        text = text[:3950] + (
-            "\n\n"
-            "⚠️ Report truncated."
+        text = (
+            text[:3950]
+            + "\n\n⚠️ Report truncated."
         )
 
     url = (
@@ -1468,7 +2130,7 @@ def send_message(
 
     data = urllib.parse.urlencode({
         "chat_id": str(chat_id),
-        "text": text
+        "text": text,
     }).encode()
 
     request = urllib.request.Request(
@@ -1477,12 +2139,12 @@ def send_message(
         headers={
             "Content-Type":
             "application/x-www-form-urlencoded"
-        }
+        },
     )
 
     with urllib.request.urlopen(
         request,
-        timeout=20
+        timeout=20,
     ) as response:
 
         return response.read()
@@ -1495,15 +2157,10 @@ def send_message(
 def find_chat_id():
 
     if CHAT_ID:
-
         return CHAT_ID
 
     if not TOKEN:
-
         return None
-
-    # Fallback only.
-    # Normally GitHub Secret is used.
 
     try:
 
@@ -1515,7 +2172,7 @@ def find_chat_id():
 
         data = http_get(
             url,
-            timeout=10
+            timeout=10,
         )
 
         updates = data.get(
@@ -1524,7 +2181,6 @@ def find_chat_id():
         )
 
         if not updates:
-
             return None
 
         for update in reversed(
@@ -1553,7 +2209,7 @@ def find_chat_id():
 
         print(
             "Telegram update error:",
-            str(e)
+            str(e),
         )
 
     return None
@@ -1570,11 +2226,11 @@ def main():
     )
 
     print(
-        "🤖 ATLAS AI v2.1"
+        "🤖 ATLAS AI v3"
     )
 
     print(
-        "MULTI-SOURCE DATA ENGINE"
+        "SNIPER CORE"
     )
 
     print(
@@ -1611,7 +2267,7 @@ def main():
 
         send_message(
             chat_id,
-            report
+            report,
         )
 
         print(
