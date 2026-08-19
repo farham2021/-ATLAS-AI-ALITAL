@@ -422,18 +422,79 @@ def report():
     return text[:3950]+"\n\n⚠️ Telegram length protection." if len(text)>4000 else text
 
 def send(text):
-    if not TOKEN or not CHAT_ID: raise RuntimeError("Telegram secrets missing")
-    data=urllib.parse.urlencode({"chat_id":CHAT_ID,"text":text}).encode()
-    req=urllib.request.Request(
+    GROUP_CHAT_ID = "-1003961443232"
+
+
+def telegram_send(chat_id, text):
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": text,
+    }).encode()
+
+    req = urllib.request.Request(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data=data,headers={"Content-Type":"application/x-www-form-urlencoded"})
-    with urllib.request.urlopen(req,timeout=20) as r:return r.read()
+        data=data,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+    )
+
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read()
+
+GROUP_CHAT_ID = "-1003961443232"
+
+
+def telegram_send(chat_id, text):
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": text,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data=data,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+    )
+
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read()
+
+
+def send(text):
+    if not TOKEN or not CHAT_ID:
+        raise RuntimeError("Telegram secrets missing")
+
+    # ارسال اصلی
+    telegram_send(CHAT_ID, text)
+    print("ATLAS report sent to primary Telegram chat.")
+
+    # کپی دقیق همان پیام در سوپرگروه
+    try:
+        telegram_send(GROUP_CHAT_ID, text)
+        print("ATLAS report copied to Telegram supergroup.")
+
+    except Exception as e:
+        # شکست ارسال گروه نباید ارسال اصلی را مختل کند
+        print(
+            "WARNING: Telegram supergroup send failed: "
+            f"{type(e).__name__}: {e}"
+        )
 
 def main():
-    print(report())
-    send(report())
+    # گزارش فقط یک بار ساخته می‌شود
+    text = report()
+
+    print(text)
+
+    # ارسال به چت اصلی + کپی در سوپرگروه
+    send(text)
+
     print("ATLAS v7 sent.")
     return 0
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     raise SystemExit(main())
