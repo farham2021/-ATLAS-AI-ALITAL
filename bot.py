@@ -1,2620 +1,456 @@
 import os
+import time
 import json
-import math
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import ccxt
 
 # ============================================================
-# ATLAS AI v6
-# SNIPER + CORE RADAR + TOP 30 MARKET RADAR
+# ATLAS AI v8 — SIGNAL MEMORY + GOOGLE SHEETS + PRE-CHECK
+# ============================================================
+# v8 adds:
+# - Google Sheets persistent signal journal
+# - 30-minute pre-signal verification run
+# - Previous SIGNAL comparison by coin
+# - Alignment / divergence assessment before a new signal
+# - Main SIGNAL rows + PRECHECK rows stored in Sheets
+# - Telegram pre-check summary
+# - No order execution
+#
+# GitHub Actions should run this file in two modes:
+#   RUN_MODE=PRECHECK  -> 30 min before signal
+#   RUN_MODE=SIGNAL    -> actual signal time
 # ============================================================
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+GOOGLE_SHEETS_WEBHOOK_URL = os.environ.get("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
+GOOGLE_SHEETS_SECRET = os.environ.get("GOOGLE_SHEETS_SECRET", "").strip()
+COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY", "").strip()
+CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
+CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
+RUN_MODE = os.environ.get("RUN_MODE", "SIGNAL").strip().upper()
 
-COINGECKO_API_KEY = os.environ.get(
-    "COINGECKO_API_KEY", ""
-).strip()
+TEHRAN = ZoneInfo("Asia/Tehran")
+TIMEFRAME = "4h"
+RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "0.75"))
+MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "3.0"))
 
-COINMARKETCAP_API_KEY = os.environ.get(
-    "COINMARKETCAP_API_KEY", ""
-).strip()
-
-
-# ============================================================
-# ATLAS CORE
-# These assets NEVER disappear from the ATLAS radar
-# ============================================================
-
-CORE_ASSETS = [
-    "BTC",
-    "ETH",
-    "XRP",
-    "SOL",
-    "BNB",
-    "DOGE",
-    "ADA",
-    "TRX",
-    "LINK",
-    "XLM",
-    "SUI",
-    "AVAX",
-    "LTC",
-    "SHIB",
-    "HBAR",
-    "DOT",
-    "BCH",
-    "XMR",
-    "NEAR",
-    "ONDO",
-    "TAO",
-    "QNT",
-    "GRT",
-    "TON",
-    "UNI",
-    "ETHFI",
+STATIC = [
+    "BTC","ETH","XRP","SOL","BNB","TON","ADA","DOGE","TRX","LINK",
+    "XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR",
+    "QNT","GRT","TAO","ONDO","UNI","ETHFI","ATOM","FIL","AAVE","MKR",
+    "APT","ARB","OP","INJ","TIA","SEI","PEPE","FET","ICP","ETC",
 ]
 
-
-# ============================================================
-# Stablecoins / unsuitable assets excluded from dynamic Top 30
-# ============================================================
-
-EXCLUDED_SYMBOLS = {
-    "USDT",
-    "USDC",
-    "DAI",
-    "USDE",
-    "FDUSD",
-    "USDS",
-    "TUSD",
-    "USDD",
-    "PYUSD",
-    "BUSD",
-    "FRAX",
-    "LUSD",
-    "GUSD",
-    "USD0",
-    "EURC",
-    "WBTC",
-    "WETH",
-}
-
-
-# ============================================================
-# Binance endpoints
-# ============================================================
-
-BINANCE_HOSTS = [
-    "https://data-api.binance.vision",
-    "https://api-gcp.binance.com",
-    "https://api.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com",
-]
-
-
-# ============================================================
-# Known CoinGecko IDs
-# Dynamic Top 30 assets without an ID use other sources.
-# ============================================================
-
-GECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "XRP": "ripple",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-    "DOGE": "dogecoin",
-    "ADA": "cardano",
-    "TRX": "tron",
-    "LINK": "chainlink",
-    "XLM": "stellar",
-    "SUI": "sui",
-    "AVAX": "avalanche-2",
-    "LTC": "litecoin",
-    "SHIB": "shiba-inu",
-    "HBAR": "hedera-hashgraph",
-    "DOT": "polkadot",
-    "BCH": "bitcoin-cash",
-    "XMR": "monero",
-    "NEAR": "near",
-    "ONDO": "ondo-finance",
-    "TAO": "bittensor",
-    "QNT": "quant",
-    "GRT": "the-graph",
-    "TON": "the-open-network",
-    "UNI": "uniswap",
-    "ETHFI": "ether-fi",
-}
-
-
-# ============================================================
-# HTTP
-# ============================================================
-
-def http_get(url, timeout=15, headers=None):
-
-    request_headers = {
-        "User-Agent": "ATLAS-AI/6.0",
-        "Accept": "application/json",
-    }
-
-    if headers:
-        request_headers.update(headers)
-
-    request = urllib.request.Request(
-        url,
-        headers=request_headers
-    )
-
-    with urllib.request.urlopen(
-        request,
-        timeout=timeout
-    ) as response:
-
-        status = response.getcode()
-
-        raw = response.read().decode(
-            "utf-8"
-        )
-
-        if status < 200 or status >= 300:
-            raise RuntimeError(
-                f"HTTP {status}"
-            )
-
+# ---------------- HTTP ----------------
+def http_get(url, timeout=12, headers=None):
+    h = {"User-Agent":"ATLAS-AI/8.0","Accept":"application/json,application/xml,text/xml,*/*"}
+    if headers: h.update(headers)
+    req = urllib.request.Request(url, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+        ct = (r.headers.get("Content-Type") or "").lower()
+        if raw.lstrip().startswith("<") or "xml" in ct:
+            return ET.fromstring(raw)
         return json.loads(raw)
 
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def safe_float(value):
-
-    try:
-        return float(value)
-
-    except Exception:
-        return None
-
-
-def clamp(value, low, high):
-
-    return max(
-        low,
-        min(high, value)
-    )
-
-
-def percent_difference(a, b):
-
-    if a is None or b is None:
-        return None
-
-    if a == 0 or b == 0:
-        return None
-
-    return (
-        abs(a - b)
-        / ((a + b) / 2)
-        * 100
-    )
-
-
-def format_price(price):
-
-    if price is None:
-        return "N/A"
-
-    if price >= 1000:
-        return f"${price:,.2f}"
-
-    if price >= 1:
-        return f"${price:,.4f}"
-
-    return f"${price:,.6f}"
-
-
-def symbol_to_binance(symbol):
-
-    return symbol.upper() + "USDT"
-
-
-# ============================================================
-# COINPAPRIKA TOP MARKET
-# ============================================================
-
-def get_coinpaprika_top_market():
-
-    url = (
-        "https://api.coinpaprika.com/v1/tickers"
-        "?quotes=USD"
-        "&limit=50"
-    )
-
-    data = http_get(
-        url,
-        timeout=20
-    )
-
-    if not isinstance(data, list):
-        raise RuntimeError(
-            "Invalid CoinPaprika ticker response"
-        )
-
-    result = []
-
-    for item in data:
-
-        symbol = str(
-            item.get("symbol", "")
-        ).upper()
-
-        if not symbol:
-            continue
-
-        if symbol in EXCLUDED_SYMBOLS:
-            continue
-
-        quotes = item.get(
-            "quotes",
-            {}
-        )
-
-        usd = quotes.get(
-            "USD",
-            {}
-        )
-
-        price = safe_float(
-            usd.get("price")
-        )
-
-        change = safe_float(
-            usd.get("percent_change_24h")
-        )
-
-        market_cap = safe_float(
-            usd.get("market_cap")
-        )
-
-        rank = item.get(
-            "rank"
-        )
-
-        if price is None:
-            continue
-
-        result.append({
-            "symbol": symbol,
-            "name": item.get(
-                "name",
-                symbol
-            ),
-            "rank": rank,
-            "price": price,
-            "change": change,
-            "market_cap": market_cap,
-            "source": "CoinPaprika",
-        })
-
-        if len(result) >= 30:
-            break
-
-    return result
-
-
-# ============================================================
-# BINANCE 24H
-# ============================================================
-
-def get_binance_24h(symbol):
-
-    errors = []
-
-    for host in BINANCE_HOSTS:
-
-        try:
-
-            url = (
-                f"{host}/api/v3/ticker/24hr"
-                f"?symbol="
-                f"{urllib.parse.quote(symbol)}"
-            )
-
-            data = http_get(
-                url,
-                timeout=12
-            )
-
-            price = safe_float(
-                data.get(
-                    "lastPrice"
-                )
-            )
-
-            if price is None:
-                raise RuntimeError(
-                    "Invalid Binance price"
-                )
-
-            return {
-                "price": price,
-                "change": safe_float(
-                    data.get(
-                        "priceChangePercent"
-                    )
-                ),
-                "high": safe_float(
-                    data.get(
-                        "highPrice"
-                    )
-                ),
-                "low": safe_float(
-                    data.get(
-                        "lowPrice"
-                    )
-                ),
-                "volume": safe_float(
-                    data.get(
-                        "quoteVolume"
-                    )
-                ),
-                "source": "Binance",
-                "endpoint": host,
-            }
-
-        except Exception as e:
-
-            errors.append(
-                f"{host}: {str(e)}"
-            )
-
-    raise RuntimeError(
-        "Binance unavailable | "
-        + " | ".join(
-            errors[-3:]
-        )
-    )
-
-
-# ============================================================
-# BINANCE 4H
-# ============================================================
-
-def get_binance_klines(
-    symbol,
-    interval="4h",
-    limit=100
-):
-
-    errors = []
-
-    for host in BINANCE_HOSTS:
-
-        try:
-
-            url = (
-                f"{host}/api/v3/klines"
-                f"?symbol="
-                f"{urllib.parse.quote(symbol)}"
-                f"&interval={interval}"
-                f"&limit={limit}"
-            )
-
-            data = http_get(
-                url,
-                timeout=15
-            )
-
-            if not isinstance(
-                data,
-                list
-            ):
-
-                raise RuntimeError(
-                    "Invalid kline response"
-                )
-
-            if len(data) < 60:
-
-                raise RuntimeError(
-                    f"Only {len(data)} candles"
-                )
-
-            return {
-                "candles": data,
-                "source": "Binance",
-                "endpoint": host,
-            }
-
-        except Exception as e:
-
-            errors.append(
-                f"{host}: {str(e)}"
-            )
-
-    raise RuntimeError(
-        "Binance 4H unavailable | "
-        + " | ".join(
-            errors[-4:]
-        )
-    )
-
-
-# ============================================================
-# REMOVE INCOMPLETE CANDLE
-# ============================================================
-
-def remove_incomplete_candle(
-    candles
-):
-
-    if len(candles) < 2:
-        return candles
-
-    try:
-
-        last_open = int(
-            candles[-1][0]
-        )
-
-        now_ms = int(
-            datetime.now(
-                timezone.utc
-            ).timestamp()
-            * 1000
-        )
-
-        candle_length = (
-            4
-            * 60
-            * 60
-            * 1000
-        )
-
-        close_time = (
-            last_open
-            + candle_length
-        )
-
-        if close_time > now_ms:
-            return candles[:-1]
-
-    except Exception:
-        pass
-
-    return candles
-
-
-# ============================================================
-# COINGECKO
-# ============================================================
-
-def get_coingecko_price(
-    symbol
-):
-
-    coin_id = GECKO_IDS.get(
-        symbol
-    )
-
-    if not coin_id:
-        raise RuntimeError(
-            "CoinGecko ID unavailable"
-        )
-
-    url = (
-        "https://api.coingecko.com/api/v3/"
-        "simple/price"
-        f"?ids={urllib.parse.quote(coin_id)}"
-        "&vs_currencies=usd"
-        "&include_24hr_change=true"
-    )
-
-    headers = {}
-
-    if COINGECKO_API_KEY:
-
-        headers[
-            "x-cg-demo-api-key"
-        ] = COINGECKO_API_KEY
-
-    data = http_get(
-        url,
-        timeout=15,
-        headers=headers
-    )
-
-    coin = data.get(
-        coin_id
-    )
-
-    if not coin:
-        raise RuntimeError(
-            "CoinGecko unavailable"
-        )
-
-    price = safe_float(
-        coin.get("usd")
-    )
-
-    change = safe_float(
-        coin.get(
-            "usd_24h_change"
-        )
-    )
-
-    if price is None:
-        raise RuntimeError(
-            "CoinGecko price unavailable"
-        )
-
-    return {
-        "price": price,
-        "change": change,
-        "source": "CoinGecko",
-    }
-
-
-# ============================================================
-# COINMARKETCAP
-# Optional
-# ============================================================
-
-def get_cmc_price(
-    symbol
-):
-
-    if not COINMARKETCAP_API_KEY:
-        raise RuntimeError(
-            "CMC API key not configured"
-        )
-
-    url = (
-        "https://pro-api.coinmarketcap.com/"
-        "v2/cryptocurrency/quotes/latest"
-        f"?symbol={urllib.parse.quote(symbol)}"
-        "&convert=USD"
-    )
-
-    headers = {
-        "X-CMC_PRO_API_KEY":
-            COINMARKETCAP_API_KEY
-    }
-
-    data = http_get(
-        url,
-        timeout=15,
-        headers=headers
-    )
-
-    records = data.get(
-        "data",
-        {}
-    )
-
-    item = None
-
-    if isinstance(
-        records,
-        dict
-    ):
-
-        value = records.get(
-            symbol
-        )
-
-        if isinstance(
-            value,
-            list
-        ) and value:
-
-            item = value[0]
-
-        elif isinstance(
-            value,
-            dict
-        ):
-
-            item = value
-
-    if not item:
-
-        raise RuntimeError(
-            "CMC asset unavailable"
-        )
-
-    quote = (
-        item
-        .get(
-            "quote",
-            {}
-        )
-        .get(
-            "USD",
-            {}
-        )
-    )
-
-    price = safe_float(
-        quote.get(
-            "price"
-        )
-    )
-
-    change = safe_float(
-        quote.get(
-            "percent_change_24h"
-        )
-    )
-
-    if price is None:
-        raise RuntimeError(
-            "CMC price unavailable"
-        )
-
-    return {
-        "price": price,
-        "change": change,
-        "source": "CoinMarketCap",
-    }
-
-
-# ============================================================
-# PRICE CONSENSUS
-# ============================================================
-
-def get_price_consensus(
-    symbol,
-    paprika_item=None
-):
-
-    sources = []
-    errors = []
-
-    # Binance
-    try:
-
-        sources.append(
-            get_binance_24h(
-                symbol_to_binance(
-                    symbol
-                )
-            )
-        )
-
-    except Exception as e:
-
-        errors.append(
-            "Binance: "
-            + str(e)
-        )
-
-    # CoinPaprika
-    if paprika_item:
-
-        sources.append({
-            "price":
-                paprika_item["price"],
-            "change":
-                paprika_item["change"],
-            "source":
-                "CoinPaprika",
-        })
-
-    # CoinGecko
-    try:
-
-        sources.append(
-            get_coingecko_price(
-                symbol
-            )
-        )
-
-    except Exception as e:
-
-        errors.append(
-            "CoinGecko: "
-            + str(e)
-        )
-
-    # CoinMarketCap
-    if COINMARKETCAP_API_KEY:
-
-        try:
-
-            sources.append(
-                get_cmc_price(
-                    symbol
-                )
-            )
-
-        except Exception as e:
-
-            errors.append(
-                "CMC: "
-                + str(e)
-            )
-
-    prices = [
-        x["price"]
-        for x in sources
-        if x.get("price") is not None
-    ]
-
-    if not prices:
-
-        raise RuntimeError(
-            "NO VALID PRICE SOURCE"
-        )
-
-    sorted_prices = sorted(
-        prices
-    )
-
-    middle = len(
-        sorted_prices
-    ) // 2
-
-    if len(sorted_prices) % 2:
-
-        median = sorted_prices[
-            middle
-        ]
-
-    else:
-
-        median = (
-            sorted_prices[
-                middle - 1
-            ]
-            + sorted_prices[
-                middle
-            ]
-        ) / 2
-
-    max_difference = 0
-
-    for price in prices:
-
-        diff = percent_difference(
-            price,
-            median
-        )
-
-        if diff is not None:
-
-            max_difference = max(
-                max_difference,
-                diff
-            )
-
-    # Hard data gates
-    if max_difference <= 0.75:
-
-        confidence = "HIGH"
-
-    elif max_difference <= 1.50:
-
-        confidence = "MEDIUM"
-
-    elif max_difference <= 3.00:
-
-        confidence = "LOW"
-
-    else:
-
-        confidence = "INVALID"
-
-    return {
-        "price": median,
-        "sources": sources,
-        "errors": errors,
-        "confidence":
-            confidence,
-        "max_difference":
-            max_difference,
-    }
-
-
-# ============================================================
-# TECHNICAL HELPERS
-# ============================================================
-
-def closes_from_candles(
-    candles
-):
-
-    return [
-        float(c[4])
-        for c in candles
-    ]
-
-
-def volumes_from_candles(
-    candles
-):
-
-    return [
-        float(c[5])
-        for c in candles
-    ]
-
-
-def ema(
-    values,
-    period
-):
-
-    if len(values) < period:
-        return None
-
-    multiplier = (
-        2
-        / (period + 1)
-    )
-
-    result = (
-        sum(
-            values[:period]
-        )
-        / period
-    )
-
-    for value in values[period:]:
-
-        result = (
-            (
-                value
-                - result
-            )
-            * multiplier
-            + result
-        )
-
-    return result
-
-
-def rsi(
-    values,
-    period=14
-):
-
-    if len(values) <= period:
-        return None
-
-    gains = []
-    losses = []
-
-    for i in range(
-        1,
-        len(values)
-    ):
-
-        change = (
-            values[i]
-            - values[i - 1]
-        )
-
-        if change >= 0:
-
-            gains.append(
-                change
-            )
-
-            losses.append(0)
-
-        else:
-
-            gains.append(0)
-
-            losses.append(
-                abs(change)
-            )
-
-    avg_gain = (
-        sum(
-            gains[:period]
-        )
-        / period
-    )
-
-    avg_loss = (
-        sum(
-            losses[:period]
-        )
-        / period
-    )
-
-    for i in range(
-        period,
-        len(gains)
-    ):
-
-        avg_gain = (
-            (
-                avg_gain
-                * (period - 1)
-            )
-            + gains[i]
-        ) / period
-
-        avg_loss = (
-            (
-                avg_loss
-                * (period - 1)
-            )
-            + losses[i]
-        ) / period
-
-    if avg_loss == 0:
-        return 100.0
-
-    rs = (
-        avg_gain
-        / avg_loss
-    )
-
-    return (
-        100
-        - (
-            100
-            / (1 + rs)
-        )
-    )
-
-
-# ============================================================
-# MACD
-# ============================================================
-
-def macd(
-    values
-):
-
-    if len(values) < 35:
-        return None
-
-    ema12_series = []
-    ema26_series = []
-
-    def ema_series(
-        data,
-        period
-    ):
-
-        if len(data) < period:
-            return []
-
-        multiplier = (
-            2
-            / (period + 1)
-        )
-
-        result = (
-            sum(
-                data[:period]
-            )
-            / period
-        )
-
-        output = [
-            result
-        ]
-
-        for value in data[period:]:
-
-            result = (
-                (
-                    value
-                    - result
-                )
-                * multiplier
-                + result
-            )
-
-            output.append(
-                result
-            )
-
-        return output
-
-    e12 = ema_series(
-        values,
-        12
-    )
-
-    e26 = ema_series(
-        values,
-        26
-    )
-
-    if not e12 or not e26:
-        return None
-
-    # Align final EMA values
-    offset = (
-        len(e12)
-        - len(e26)
-    )
-
-    e12_aligned = e12[
-        offset:
-    ]
-
-    macd_line = [
-        a - b
-        for a, b
-        in zip(
-            e12_aligned,
-            e26
-        )
-    ]
-
-    if len(macd_line) < 9:
-        return None
-
-    signal_line = ema(
-        macd_line,
-        9
-    )
-
-    if signal_line is None:
-        return None
-
-    histogram = (
-        macd_line[-1]
-        - signal_line
-    )
-
-    return {
-        "line":
-            macd_line[-1],
-        "signal":
-            signal_line,
-        "histogram":
-            histogram,
-        "bullish":
-            macd_line[-1]
-            > signal_line,
-    }
-
-
-# ============================================================
-# SUPPORT / RESISTANCE
-# ============================================================
-
-def support_resistance(
-    candles,
-    lookback=30
-):
-
-    recent = candles[
-        -lookback:
-    ]
-
-    highs = [
-        float(c[2])
-        for c in recent
-    ]
-
-    lows = [
-        float(c[3])
-        for c in recent
-    ]
-
-    if not highs or not lows:
-
-        return None, None
-
-    resistance = max(
-        highs
-    )
-
-    support = min(
-        lows
-    )
-
-    return support, resistance
-
-
-# ============================================================
-# VOLUME ANALYSIS
-# ============================================================
-
-def volume_state(
-    candles
-):
-
-    volumes = volumes_from_candles(
-        candles
-    )
-
-    if len(volumes) < 21:
-        return "UNKNOWN", 0
-
-    current = volumes[-1]
-
-    average = (
-        sum(
-            volumes[-21:-1]
-        )
-        / 20
-    )
-
-    if average <= 0:
-        return "UNKNOWN", 0
-
-    ratio = (
-        current
-        / average
-    )
-
-    if ratio >= 1.50:
-
-        return "🟢 STRONG", ratio
-
-    if ratio >= 1.05:
-
-        return "🟡 NORMAL", ratio
-
-    return "🔴 WEAK", ratio
-
-
-# ============================================================
-# TREND
-# ============================================================
-
-def trend_state(
-    current,
-    ema20_value,
-    ema50_value
-):
-
-    if (
-        ema20_value is None
-        or ema50_value is None
-    ):
-
-        return "🟡 MIXED"
-
-    if (
-        current > ema20_value
-        and ema20_value > ema50_value
-    ):
-
-        return "🟢 BULLISH"
-
-    if (
-        current < ema20_value
-        and ema20_value < ema50_value
-    ):
-
-        return "🔴 BEARISH"
-
-    return "🟡 MIXED"
-
-
-# ============================================================
-# TECHNICAL ANALYSIS
-# ============================================================
-
-def analyze_asset(
-    symbol,
-    paprika_item=None
-):
-
-    market = get_price_consensus(
-        symbol,
-        paprika_item
-    )
-
-    kline = get_binance_klines(
-        symbol_to_binance(
-            symbol
-        ),
-        "4h",
-        100
-    )
-
-    candles = remove_incomplete_candle(
-        kline["candles"]
-    )
-
-    if len(candles) < 60:
-
-        raise RuntimeError(
-            "INSUFFICIENT 4H DATA"
-        )
-
-    closes = closes_from_candles(
-        candles
-    )
-
-    current = closes[-1]
-
-    ema20_value = ema(
-        closes,
-        20
-    )
-
-    ema50_value = ema(
-        closes,
-        50
-    )
-
-    rsi_value = rsi(
-        closes,
-        14
-    )
-
-    macd_value = macd(
-        closes
-    )
-
-    volume_label, volume_ratio = (
-        volume_state(
-            candles
-        )
-    )
-
-    trend = trend_state(
-        current,
-        ema20_value,
-        ema50_value
-    )
-
-    support, resistance = (
-        support_resistance(
-            candles,
-            30
-        )
-    )
-
-    # ========================================================
-    # SCORE
-    # ========================================================
-
-    score = 0
-
-    # Trend
-    if trend == "🟢 BULLISH":
-        score += 3
-
-    elif trend == "🔴 BEARISH":
-        score -= 3
-
-    # Price / EMA20
-    if (
-        ema20_value
-        and current > ema20_value
-    ):
-
-        score += 1
-
-    elif ema20_value:
-
-        score -= 1
-
-    # EMA20 / EMA50
-    if (
-        ema20_value
-        and ema50_value
-    ):
-
-        if ema20_value > ema50_value:
-
-            score += 2
-
-        else:
-
-            score -= 2
-
-    # RSI
-    if rsi_value is not None:
-
-        if 52 <= rsi_value < 68:
-
-            score += 1
-
-        elif 68 <= rsi_value < 75:
-
-            score += 0
-
-        elif rsi_value >= 75:
-
-            score -= 1
-
-        elif 45 <= rsi_value < 52:
-
-            score += 0
-
-        elif 30 < rsi_value < 45:
-
-            score -= 1
-
-        elif rsi_value <= 30:
-
-            score += 1
-
-    # MACD
-    if macd_value:
-
-        if macd_value["bullish"]:
-
-            score += 2
-
-        else:
-
-            score -= 2
-
-    # Volume
-    if volume_label == "🟢 STRONG":
-
-        score += 2
-
-    elif volume_label == "🟡 NORMAL":
-
-        score += 1
-
-    elif volume_label == "🔴 WEAK":
-
-        score -= 1
-
-    # ========================================================
-    # STRUCTURE
-    # ========================================================
-
-    breakout = False
-    pullback = False
-
-    if resistance:
-
-        breakout = (
-            current > resistance
-        )
-
-    if support:
-
-        distance_to_support = (
-            abs(current - support)
-            / current
-            * 100
-        )
-
-        pullback = (
-            distance_to_support <= 2.0
-            and trend
-            == "🟢 BULLISH"
-        )
-
-    # ========================================================
-    # DATA QUALITY
-    # ========================================================
-
-    conflict = market[
-        "max_difference"
-    ]
-
-    confidence = 100
-
-    if market[
-        "confidence"
-    ] == "HIGH":
-
-        confidence -= 0
-
-    elif market[
-        "confidence"
-    ] == "MEDIUM":
-
-        confidence -= 15
-
-    elif market[
-        "confidence"
-    ] == "LOW":
-
-        confidence -= 30
-
-    else:
-
-        confidence -= 50
-
-    if volume_label == "🔴 WEAK":
-
-        confidence -= 10
-
-    if trend == "🟡 MIXED":
-
-        confidence -= 10
-
-    if not macd_value:
-
-        confidence -= 15
-
-    if conflict > 1.5:
-
-        confidence -= 10
-
-    if conflict > 3:
-
-        confidence -= 20
-
-    confidence = int(
-        clamp(
-            confidence,
-            0,
-            100
-        )
-    )
-
-    # ========================================================
-    # HARD DATA GATE
-    # ========================================================
-
-    data_trade_allowed = True
-
-    if market[
-        "confidence"
-    ] in [
-        "LOW",
-        "INVALID"
-    ]:
-
-        data_trade_allowed = False
-
-    if conflict > 3:
-
-        data_trade_allowed = False
-
-    # ========================================================
-    # ENTRY ENGINE
-    # ========================================================
-
-    entry = None
-    sl = None
-    tp1 = None
-    tp2 = None
-    rr = None
-
-    action = "⚪ NO TRADE"
-
-    confirmation_reason = []
-
-    # Bullish setup
-    bullish_setup = (
-        trend == "🟢 BULLISH"
-        and macd_value
-        and macd_value["bullish"]
-        and rsi_value is not None
-        and 50 <= rsi_value < 70
-        and score >= 6
-    )
-
-    # Strong confirmation
-    confirmed_breakout = (
-        bullish_setup
-        and breakout
-        and volume_label
-        in [
-            "🟢 STRONG",
-            "🟡 NORMAL"
-        ]
-        and data_trade_allowed
-    )
-
-    if confirmed_breakout:
-
-        entry = current
-
-        if support:
-
-            sl = support * 0.995
-
-        else:
-
-            sl = current * 0.95
-
-        risk = (
-            entry - sl
-        )
-
-        if risk > 0:
-
-            tp1 = (
-                entry
-                + risk * 2
-            )
-
-            tp2 = (
-                entry
-                + risk * 3
-            )
-
-            rr = 3.0
-
-        if rr and rr >= 2:
-
-            action = "🟢 BUY"
-
-    # Potential breakout
-    elif bullish_setup:
-
-        if not data_trade_allowed:
-
-            action = (
-                "⚫ NO TRADE — DATA"
-            )
-
-        elif not breakout:
-
-            action = (
-                "🟡 BUY ON CONFIRMATION"
-            )
-
-            if resistance:
-
-                confirmation_reason.append(
-                    "4H close above resistance"
-                )
-
-            if volume_label == "🔴 WEAK":
-
-                confirmation_reason.append(
-                    "volume confirmation"
-                )
-
-        else:
-
-            action = (
-                "🟡 WAIT — VOLUME"
-            )
-
-            confirmation_reason.append(
-                "volume confirmation"
-            )
-
-    # Bearish setup
-    bearish_setup = (
-        trend == "🔴 BEARISH"
-        and score <= -5
-    )
-
-    if bearish_setup:
-
-        if data_trade_allowed:
-
-            action = "🔴 SELL WATCH"
-
-        else:
-
-            action = (
-                "⚫ NO TRADE — DATA"
-            )
-
-    # ========================================================
-    # Pullback watch
-    # ========================================================
-
-    if (
-        action == "🟡 BUY ON CONFIRMATION"
-        and pullback
-        and not breakout
-    ):
-
-        action = "🟡 PULLBACK WATCH"
-
-    return {
-        "symbol": symbol,
-        "market": market,
-        "candles": candles,
-        "current": current,
-        "ema20": ema20_value,
-        "ema50": ema50_value,
-        "rsi": rsi_value,
-        "macd": macd_value,
-        "volume": volume_label,
-        "volume_ratio": volume_ratio,
-        "trend": trend,
-        "support": support,
-        "resistance": resistance,
-        "score": score,
-        "confidence": confidence,
-        "breakout": breakout,
-        "pullback": pullback,
-        "action": action,
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "rr": rr,
-        "confirmation_reason":
-            confirmation_reason,
-        "technical_source":
-            kline["source"],
-    }
-
-
-# ============================================================
-# BTC MARKET REGIME
-# ============================================================
-
-def get_btc_regime(
-    paprika_map
-):
-
-    try:
-
-        analysis = analyze_asset(
-            "BTC",
-            paprika_map.get(
-                "BTC"
-            )
-        )
-
-        score = analysis[
-            "score"
-        ]
-
-        trend = analysis[
-            "trend"
-        ]
-
-        if (
-            trend == "🟢 BULLISH"
-            and score >= 5
-        ):
-
-            return "🟢 BULLISH"
-
-        if (
-            trend == "🔴 BEARISH"
-            and score <= -5
-        ):
-
-            return "🔴 BEARISH"
-
-        return "🟡 MIXED"
-
-    except Exception:
-
-        return "⚪ UNKNOWN"
-
-
-# ============================================================
-# ACTION PRIORITY
-# ============================================================
-
-def action_priority(
-    action
-):
-
-    priorities = {
-        "🟢 BUY": 100,
-        "🟡 BUY ON CONFIRMATION": 80,
-        "🟡 PULLBACK WATCH": 75,
-        "🟡 WAIT — VOLUME": 70,
-        "🟡 WATCH": 60,
-        "🔴 SELL WATCH": 50,
-        "⚪ NO TRADE": 10,
-        "⚫ NO TRADE — DATA": 0,
-    }
-
-    return priorities.get(
-        action,
-        0
-    )
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def atlas_report():
-
-    tehran = ZoneInfo(
-        "Asia/Tehran"
-    )
-
-    now = datetime.now(
-        tehran
-    )
-
-    # ========================================================
-    # TOP 30
-    # ========================================================
-
-    top30 = []
-
-    try:
-
-        top30 = (
-            get_coinpaprika_top_market()
-        )
-
-    except Exception as e:
-
-        print(
-            "Top30 error:",
-            str(e)
-        )
-
-    top30_symbols = [
-        x["symbol"]
-        for x in top30
-    ]
-
-    paprika_map = {
-        x["symbol"]: x
-        for x in top30
-    }
-
-    # ========================================================
-    # UNIVERSE
-    # ========================================================
-
-    universe = []
-
-    for symbol in CORE_ASSETS:
-
-        if symbol not in universe:
-
-            universe.append(
-                symbol
-            )
-
-    for symbol in top30_symbols:
-
-        if symbol not in universe:
-
-            universe.append(
-                symbol
-            )
-
-    # ========================================================
-    # HEADER
-    # ========================================================
-
-    lines = []
-
-    lines.append(
-        "🤖 ATLAS AI — SNIPER v6"
-    )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        now.strftime(
-            "%Y/%m/%d  %H:%M"
-        )
-        + " 🇮🇷"
-    )
-
-    lines.append(
-        "Timeframe: 4H"
-    )
-
-    lines.append("")
-
-    btc_regime = get_btc_regime(
-        paprika_map
-    )
-
-    lines.append(
-        "🌎 BTC REGIME: "
-        + btc_regime
-    )
-
-    lines.append("")
-
-    lines.append(
-        f"📡 UNIVERSE: "
-        f"{len(universe)} assets"
-    )
-
-    lines.append(
-        f"⭐ CORE: "
-        f"{len(CORE_ASSETS)}"
-    )
-
-    lines.append(
-        f"🏆 TOP 30: "
-        f"{len(top30)}"
-    )
-
-    lines.append("")
-
-    # ========================================================
-    # ANALYSIS
-    # ========================================================
-
-    analyses = []
-    unavailable = []
-
-    for symbol in universe:
-
-        try:
-
-            result = analyze_asset(
-                symbol,
-                paprika_map.get(
-                    symbol
-                )
-            )
-
-            analyses.append(
-                result
-            )
-
-        except Exception as e:
-
-            unavailable.append({
-                "symbol": symbol,
-                "reason": str(e)
-            })
-
-    # ========================================================
-    # TOP OPPORTUNITIES
-    # ========================================================
-
-    opportunities = [
-        x
-        for x in analyses
-        if x["action"]
-        in [
-            "🟢 BUY",
-            "🟡 BUY ON CONFIRMATION",
-            "🟡 PULLBACK WATCH",
-            "🟡 WAIT — VOLUME",
-            "🔴 SELL WATCH",
-        ]
-    ]
-
-    opportunities.sort(
-        key=lambda x: (
-            action_priority(
-                x["action"]
-            ),
-            x["confidence"],
-            abs(x["score"])
-        ),
-        reverse=True
-    )
-
-    lines.append(
-        "🔥 TOP ATLAS OPPORTUNITIES"
-    )
-
-    if not opportunities:
-
-        lines.append(
-            "No high-quality setup."
-        )
-
-    else:
-
-        for item in opportunities[:8]:
-
-            lines.append(
-                f"{item['symbol']} "
-                f"{item['action']} "
-                f"| Score "
-                f"{item['score']:+d} "
-                f"| Conf "
-                f"{item['confidence']}%"
-            )
-
-    lines.append("")
-
-    # ========================================================
-    # MARKET STATISTICS
-    # ========================================================
-
-    bullish = sum(
-        1
-        for x in analyses
-        if x["score"] >= 5
-    )
-
-    bearish = sum(
-        1
-        for x in analyses
-        if x["score"] <= -5
-    )
-
-    buy_count = sum(
-        1
-        for x in analyses
-        if x["action"]
-        == "🟢 BUY"
-    )
-
-    confirmation_count = sum(
-        1
-        for x in analyses
-        if x["action"]
-        in [
-            "🟡 BUY ON CONFIRMATION",
-            "🟡 PULLBACK WATCH",
-            "🟡 WAIT — VOLUME",
-        ]
-    )
-
-    sell_count = sum(
-        1
-        for x in analyses
-        if x["action"]
-        == "🔴 SELL WATCH"
-    )
-
-    no_trade = sum(
-        1
-        for x in analyses
-        if x["action"]
-        in [
-            "⚪ NO TRADE",
-            "⚫ NO TRADE — DATA",
-        ]
-    )
-
-    if (
-        btc_regime
-        == "🔴 BEARISH"
-    ):
-
-        market_status = (
-            "🔴 MARKET DEFENSIVE"
-        )
-
-    elif buy_count >= 3:
-
-        market_status = (
-            "🟢 MARKET ACTIVE"
-        )
-
-    elif confirmation_count >= 3:
-
-        market_status = (
-            "🟡 BUY CONFIRMATION ZONE"
-        )
-
-    elif bearish > bullish:
-
-        market_status = (
-            "🔴 MARKET WEAK"
-        )
-
-    else:
-
-        market_status = (
-            "🟡 MARKET MIXED"
-        )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "MARKET STATUS: "
-        + market_status
-    )
-
-    lines.append(
-        f"🟢 BUY: {buy_count}"
-    )
-
-    lines.append(
-        f"🟡 CONFIRMATION/WATCH: "
-        f"{confirmation_count}"
-    )
-
-    lines.append(
-        f"⚪ NO TRADE: {no_trade}"
-    )
-
-    lines.append(
-        f"🔴 SELL WATCH: {sell_count}"
-    )
-
-    lines.append(
-        f"⚫ DATA UNAVAILABLE: "
-        f"{len(unavailable)}/"
-        f"{len(universe)}"
-    )
-
-    lines.append("")
-
-    # ========================================================
-    # DETAILED CORE
-    # ========================================================
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "⭐ ATLAS CORE RADAR"
-    )
-
-    for symbol in CORE_ASSETS:
-
-        matches = [
-            x
-            for x in analyses
-            if x["symbol"]
-            == symbol
-        ]
-
-        if not matches:
-
-            lines.append(
-                f"{symbol}: ⚫ DATA UNAVAILABLE"
-            )
-
-            continue
-
-        x = matches[0]
-
-        lines.append(
-            f"{symbol} | "
-            f"{x['action']} | "
-            f"S{x['score']:+d} | "
-            f"RSI "
-            f"{x['rsi']:.1f} | "
-            f"{x['trend']}"
-        )
-
-    lines.append("")
-
-    # ========================================================
-    # TOP 30 RADAR
-    # ========================================================
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "🏆 TOP 30 MARKET RADAR"
-    )
-
-    top_results = []
-
-    for item in top30:
-
-        symbol = item[
-            "symbol"
-        ]
-
-        matches = [
-            x
-            for x in analyses
-            if x["symbol"]
-            == symbol
-        ]
-
-        if matches:
-
-            x = matches[0]
-
-            top_results.append(
-                (
-                    item.get(
-                        "rank"
-                    ),
-                    x
-                )
-            )
-
-    top_results.sort(
-        key=lambda z:
-            z[0]
-            if z[0]
-            else 999
-    )
-
-    for rank, x in top_results:
-
-        lines.append(
-            f"#{rank} "
-            f"{x['symbol']} | "
-            f"{x['action']} | "
-            f"S{x['score']:+d} | "
-            f"RSI "
-            f"{x['rsi']:.1f}"
-        )
-
-    lines.append("")
-
-    # ========================================================
-    # SNIPER DETAILS
-    # ========================================================
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "🎯 SNIPER DETAILS"
-    )
-
-    sniper_items = [
-        x
-        for x in analyses
-        if x["action"]
-        in [
-            "🟢 BUY",
-            "🟡 BUY ON CONFIRMATION",
-            "🟡 PULLBACK WATCH",
-            "🔴 SELL WATCH",
-        ]
-    ]
-
-    sniper_items.sort(
-        key=lambda x: (
-            action_priority(
-                x["action"]
-            ),
-            x["confidence"],
-            abs(x["score"])
-        ),
-        reverse=True
-    )
-
-    for x in sniper_items[:10]:
-
-        lines.append("")
-
-        lines.append(
-            f"🔹 {x['symbol']}"
-        )
-
-        lines.append(
-            "Price: "
-            + format_price(
-                x["current"]
-            )
-        )
-
-        lines.append(
-            f"Trend: {x['trend']}"
-        )
-
-        if x["rsi"] is not None:
-
-            lines.append(
-                f"RSI14: "
-                f"{x['rsi']:.1f}"
-            )
-
-        if x["macd"]:
-
-            macd_state = (
-                "🟢 BULLISH"
-                if x["macd"]["bullish"]
-                else "🔴 BEARISH"
-            )
-
-            lines.append(
-                f"MACD: "
-                f"{macd_state}"
-            )
-
-        lines.append(
-            f"Volume: "
-            f"{x['volume']}"
-        )
-
-        lines.append(
-            f"4H Score: "
-            f"{x['score']:+d}"
-        )
-
-        lines.append(
-            f"Confidence: "
-            f"{x['confidence']}%"
-        )
-
-        if x["support"]:
-
-            lines.append(
-                "Support: "
-                + format_price(
-                    x["support"]
-                )
-            )
-
-        if x["resistance"]:
-
-            lines.append(
-                "Resistance: "
-                + format_price(
-                    x["resistance"]
-                )
-            )
-
-        if x["breakout"]:
-
-            lines.append(
-                "🚀 BREAKOUT: CONFIRMED"
-            )
-
-        if x["pullback"]:
-
-            lines.append(
-                "↩️ PULLBACK: ACTIVE"
-            )
-
-        if x["entry"]:
-
-            lines.append(
-                "Entry: "
-                + format_price(
-                    x["entry"]
-                )
-            )
-
-        if x["sl"]:
-
-            lines.append(
-                "SL: "
-                + format_price(
-                    x["sl"]
-                )
-            )
-
-        if x["tp1"]:
-
-            lines.append(
-                "TP1: "
-                + format_price(
-                    x["tp1"]
-                )
-            )
-
-        if x["tp2"]:
-
-            lines.append(
-                "TP2: "
-                + format_price(
-                    x["tp2"]
-                )
-            )
-
-        if x["rr"]:
-
-            lines.append(
-                f"R:R: 1:{x['rr']:.1f}"
-            )
-
-        lines.append(
-            "🎯 ACTION: "
-            + x["action"]
-        )
-
-        if x[
-            "confirmation_reason"
-        ]:
-
-            lines.append(
-                "Trigger: "
-                + ", ".join(
-                    x[
-                        "confirmation_reason"
-                    ]
-                )
-            )
-
-        lines.append(
-            "Data: "
-            + x["market"][
-                "confidence"
-            ]
-        )
-
-        if x[
-            "market"
-        ][
-            "max_difference"
-        ] > 1.5:
-
-            lines.append(
-                "⚠️ DATA CONFLICT: "
-                f"{x['market']['max_difference']:.2f}%"
-            )
-
-    # ========================================================
-    # DATA ENGINE
-    # ========================================================
-
-    lines.append("")
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "🛡️ ATLAS DATA ENGINE"
-    )
-
-    lines.append(
-        f"Assets scanned: "
-        f"{len(universe)}"
-    )
-
-    lines.append(
-        f"Successful: "
-        f"{len(analyses)}"
-    )
-
-    lines.append(
-        f"Unavailable: "
-        f"{len(unavailable)}"
-    )
-
-    lines.append(
-        "Data conflict >3% = NO TRADE"
-    )
-
-    lines.append(
-        "Incomplete 4H candles excluded"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "🎯 ATLAS SNIPER v6: ACTIVE"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "⚠️ این گزارش تحلیلی است؛ "
-        "سیگنال قطعی نیست و قبل از "
-        "معامله باید ریسک کل سبد، "
-        "نقدشوندگی و شرایط بازار بررسی شود."
-    )
-
-    return "\n".join(
-        lines
-    )
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def send_message(
-    chat_id,
-    text
-):
-
-    if not TOKEN:
-
-        raise RuntimeError(
-            "TELEGRAM_TOKEN missing"
-        )
-
-    if not chat_id:
-
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID missing"
-        )
-
-    # Telegram safe chunk size
-    max_length = 3900
-
-    chunks = []
-
-    while len(text) > max_length:
-
-        cut = text.rfind(
-            "\n",
-            0,
-            max_length
-        )
-
-        if cut <= 0:
-            cut = max_length
-
-        chunks.append(
-            text[:cut]
-        )
-
-        text = text[
-            cut:
-        ].lstrip()
-
-    if text:
-        chunks.append(
-            text
-        )
-
-    for chunk in chunks:
-
-        url = (
-            f"https://api.telegram.org/"
-            f"bot{TOKEN}/sendMessage"
-        )
-
-        data = urllib.parse.urlencode({
-            "chat_id":
-                str(chat_id),
-            "text":
-                chunk
-        }).encode()
-
-        request = (
-            urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    "Content-Type":
-                    "application/"
-                    "x-www-form-urlencoded"
-                }
-            )
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=20
-        ) as response:
-
-            response.read()
-
-
-# ============================================================
-# CHAT ID
-# ============================================================
-
-def find_chat_id():
-
-    if CHAT_ID:
-        return CHAT_ID
-
-    if not TOKEN:
-        return None
-
-    try:
-
-        url = (
-            f"https://api.telegram.org/"
-            f"bot{TOKEN}/getUpdates"
-            "?timeout=5"
-        )
-
-        data = http_get(
-            url,
-            timeout=10
-        )
-
-        updates = data.get(
-            "result",
-            []
-        )
-
-        for update in reversed(
-            updates
-        ):
-
-            message = update.get(
-                "message"
-            )
-
-            if not message:
-                continue
-
-            chat = message.get(
-                "chat"
-            )
-
-            if (
-                chat
-                and chat.get("id")
-            ):
-
-                return chat["id"]
-
-    except Exception as e:
-
-        print(
-            "Telegram error:",
-            str(e)
-        )
-
+def http_post_json(url, payload, timeout=15):
+    raw = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=raw,
+        headers={"Content-Type":"application/json","User-Agent":"ATLAS-AI/8.0"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", errors="replace"))
+
+def f(x):
+    try: return float(x)
+    except Exception: return None
+
+def fmt(x):
+    if x is None: return "N/A"
+    if x >= 1000: return f"${x:,.2f}"
+    if x >= 1: return f"${x:,.4f}"
+    return f"${x:,.6f}"
+
+def spread(a,b):
+    if a is None or b is None or a == 0 or b == 0: return None
+    return abs(a-b)/((abs(a)+abs(b))/2)*100
+
+# ---------------- CCXT ----------------
+def make_exchange(exchange_id):
+    cls = getattr(ccxt, exchange_id)
+    return cls({"enableRateLimit": True, "timeout": 15000})
+
+EX = {}
+for eid in ("binance","xt","lbank"):
+    try: EX[eid] = make_exchange(eid)
+    except Exception: pass
+
+MARKETS = {}
+for eid, ex in EX.items():
+    try: MARKETS[eid] = ex.load_markets()
+    except Exception: MARKETS[eid] = {}
+
+def symbol_for(eid, coin):
+    markets = MARKETS.get(eid,{})
+    for s in (f"{coin}/USDT", f"{coin}/USDT:USDT"):
+        if s in markets: return s
     return None
 
+def exchange_ticker(eid, coin):
+    ex = EX[eid]; sym = symbol_for(eid, coin)
+    if not sym: raise RuntimeError(f"{eid}: pair unavailable")
+    t = ex.fetch_ticker(sym)
+    return {"source":eid.upper(),"price":f(t.get("last")),"change":f(t.get("percentage")),"quoteVolume":f(t.get("quoteVolume"))}
 
-# ============================================================
-# MAIN
-# ============================================================
+def exchange_ohlcv(eid, coin):
+    ex = EX[eid]; sym = symbol_for(eid, coin)
+    if not sym: raise RuntimeError(f"{eid}: 4H pair unavailable")
+    rows = ex.fetch_ohlcv(sym, timeframe=TIMEFRAME, limit=120)
+    if len(rows) < 60: raise RuntimeError(f"{eid}: insufficient 4H candles")
+    now = int(time.time()*1000)
+    if rows and rows[-1][0] + 4*60*60*1000 > now: rows = rows[:-1]
+    return rows
 
-def main():
+# ---------------- external validation ----------------
+def gecko_markets():
+    headers={}
+    if COINGECKO_API_KEY: headers["x-cg-demo-api-key"]=COINGECKO_API_KEY
+    url="https://api.coingecko.com/api/v3/coins/markets?"+urllib.parse.urlencode({"vs_currency":"usd","order":"market_cap_desc","per_page":"30","page":"1","sparkline":"false"})
+    try: return http_get(url,headers=headers)
+    except Exception: return []
 
-    print(
-        "=========================================="
-    )
+def paprika_slug(coin):
+    return {
+        "BTC":"btc-bitcoin","ETH":"eth-ethereum","XRP":"xrp-xrp","SOL":"sol-solana","BNB":"bnb-binance-coin",
+        "TON":"ton-toncoin","ADA":"ada-cardano","DOGE":"doge-dogecoin","TRX":"trx-tron","LINK":"link-chainlink",
+        "SUI":"sui-sui","AVAX":"avax-avalanche","LTC":"ltc-litecoin","DOT":"dot-polkadot","NEAR":"near-near-protocol",
+        "TAO":"tao-bittensor","ONDO":"ondo-ondo-finance","UNI":"uni-uniswap","ETHFI":"ethfi-ether-fi",
+    }.get(coin)
 
-    print(
-        "🤖 ATLAS AI v6"
-    )
+def paprika_price(coin):
+    slug=paprika_slug(coin)
+    if not slug: raise RuntimeError("Paprika slug unavailable")
+    d=http_get("https://api.coinpaprika.com/v1/tickers/"+slug)
+    p=f(d.get("quotes",{}).get("USD",{}).get("price"))
+    if p is None: raise RuntimeError("CoinPaprika unavailable")
+    return p
 
-    print(
-        "CORE + TOP 30 + SNIPER ENGINE"
-    )
+def cmc_price(coin):
+    if not CMC_API_KEY: raise RuntimeError("CMC key not configured")
+    d=http_get("https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?"+urllib.parse.urlencode({"symbol":coin,"convert":"USD"}),headers={"X-CMC_PRO_API_KEY":CMC_API_KEY})
+    x=d.get("data",{}).get(coin)
+    if isinstance(x,list): x=x[0] if x else None
+    p=f((x or {}).get("quote",{}).get("USD",{}).get("price"))
+    if p is None: raise RuntimeError("CMC unavailable")
+    return p
 
-    print(
-        "=========================================="
-    )
-
-    if not TOKEN:
-
-        print(
-            "ERROR: TELEGRAM_TOKEN missing"
-        )
-
-        return 1
-
+def price_consensus(coin):
+    vals=[];sources=[];errors=[]
+    for eid in EX:
+        try:
+            x=exchange_ticker(eid,coin)
+            if x["price"] is not None: vals.append(x["price"]);sources.append(x)
+        except Exception as e: errors.append(str(e))
     try:
+        rows=gecko_markets(); gx=next((x for x in rows if (x.get("symbol") or "").upper()==coin),None)
+        if gx and f(gx.get("current_price")):
+            vals.append(f(gx["current_price"]));sources.append({"source":"CoinGecko","price":f(gx["current_price"])})
+    except Exception as e: errors.append("CoinGecko: "+str(e))
+    try:
+        p=paprika_price(coin);vals.append(p);sources.append({"source":"CoinPaprika","price":p})
+    except Exception: pass
+    if CMC_API_KEY:
+        try:
+            p=cmc_price(coin);vals.append(p);sources.append({"source":"CMC","price":p})
+        except Exception: pass
+    if not vals: raise RuntimeError("NO PRICE DATA")
+    med=sorted(vals)[len(vals)//2]
+    sp=max([(spread(x,med) or 0) for x in vals],default=0)
+    quality="HIGH" if len(vals)>=4 and sp<=1.5 else "MEDIUM" if len(vals)>=3 and sp<=3 else "LOW"
+    return med,sources,quality,sp,errors
 
-        report = atlas_report()
+# ---------------- indicators ----------------
+def ema(v,n):
+    if len(v)<n:return None
+    a=2/(n+1);e=sum(v[:n])/n
+    for x in v[n:]: e=(x-e)*a+e
+    return e
 
-        print("")
-        print(report)
-        print("")
+def rsi(v,n=14):
+    if len(v)<=n:return None
+    g=[];l=[]
+    for i in range(1,len(v)):
+        d=v[i]-v[i-1];g.append(max(d,0));l.append(max(-d,0))
+    ag=sum(g[:n])/n;al=sum(l[:n])/n
+    for i in range(n,len(g)):
+        ag=((n-1)*ag+g[i])/n;al=((n-1)*al+l[i])/n
+    return 100 if al==0 else 100-100/(1+ag/al)
 
-        chat_id = find_chat_id()
+def macd(v):
+    vals=[]
+    for i in range(26,len(v)+1):
+        a=ema(v[:i],12);b=ema(v[:i],26)
+        if a is not None and b is not None: vals.append(a-b)
+    if len(vals)<9:return None,None
+    return vals[-1],ema(vals,9)
 
-        if not chat_id:
+def atr(rows,n=14):
+    if len(rows)<n+1:return None
+    tr=[]
+    for i in range(1,len(rows)):
+        h,l,pc=rows[i][2],rows[i][3],rows[i-1][4]
+        tr.append(max(h-l,abs(h-pc),abs(l-pc)))
+    return sum(tr[-n:])/n
 
-            print(
-                "ERROR: TELEGRAM_CHAT_ID missing"
-            )
+def vol_state(rows):
+    vols=[f(x[5]) for x in rows if f(x[5]) is not None]
+    if len(vols)<21:return "UNKNOWN",0
+    avg=sum(vols[-21:-1])/20;ratio=vols[-1]/avg if avg else 0
+    return ("STRONG",ratio) if ratio>=1.35 else ("WEAK",ratio) if ratio<=.75 else ("NORMAL",ratio)
 
-            return 1
+# ---------------- context / news ----------------
+def context():
+    out={}
+    try:
+        d=http_get("https://api.alternative.me/fng/?limit=1");x=d["data"][0];out["fg"]=f(x["value"]);out["fg_label"]=x["value_classification"]
+    except Exception: pass
+    try:
+        d=http_get("https://api.coingecko.com/api/v3/global");out["btc_dom"]=f(d["data"]["market_cap_percentage"]["btc"])
+    except Exception: pass
+    try:
+        d=http_get("https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1");out["funding"]=f(d[-1]["fundingRate"])
+    except Exception: pass
+    try:
+        d=http_get("https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT");out["oi"]=f(d["openInterest"])
+    except Exception: pass
+    return out
 
-        send_message(
-            chat_id,
-            report
-        )
+RSS=["https://www.coindesk.com/arc/outboundfeeds/rss/","https://cointelegraph.com/rss","https://www.theblock.co/rss.xml"]
+def news():
+    items=[]
+    for url in RSS:
+        try:
+            root=http_get(url,timeout=10)
+            for x in root.findall(".//item")[:5]:
+                title=(x.findtext("title") or "").strip()
+                if title: items.append(title)
+        except Exception: pass
+    if CRYPTOPANIC_TOKEN:
+        try:
+            d=http_get("https://cryptopanic.com/api/developer/v2/posts/?"+urllib.parse.urlencode({"auth_token":CRYPTOPANIC_TOKEN,"public":"true","kind":"news","regions":"en","limit":"10"}))
+            items += [x.get("title","") for x in d.get("results",[])]
+        except Exception: pass
+    neg=("hack","exploit","lawsuit","ban","delist","liquidation","fraud","sec","investigation","outflow","stolen","sanction","war","attack")
+    pos=("approval","approved","etf","inflow","partnership","launch","adoption","upgrade","listing","integration","record","institutional")
+    score=0
+    for t in items:
+        tl=t.lower();score += sum(1 for w in pos if w in tl);score -= sum(1 for w in neg if w in tl)
+    label="NEGATIVE" if score<=-3 else "POSITIVE" if score>=3 else "MIXED/LIMITED"
+    return label,items[:8]
 
-        print(
-            "✅ ATLAS v6 report sent"
-        )
+def btc_regime():
+    try:
+        rows=exchange_ohlcv("binance","BTC");c=[f(x[4]) for x in rows];e20,e50=ema(c,20),ema(c,50);rr=rsi(c)
+        s=(2 if c[-1]>e20 else -2)+(2 if c[-1]>e50 else -2)+(2 if e20>e50 else -2)+(1 if rr and rr>=50 else -1)
+        return ("BULLISH" if s>=4 else "BEARISH" if s<=-4 else "NEUTRAL"),s
+    except Exception:return "UNKNOWN",0
 
-        return 0
+# ---------------- analysis ----------------
+def analyze(coin,regime):
+    price,sources,quality,sp,errors=price_consensus(coin)
+    rows=None;engine=None
+    for eid in ("binance","xt","lbank"):
+        try: rows=exchange_ohlcv(eid,coin);engine=eid.upper();break
+        except Exception: pass
+    if not rows: raise RuntimeError("4H DATA UNAVAILABLE")
+    c=[f(x[4]) for x in rows];e20,e50=ema(c,20),ema(c,50);rr=rsi(c);ml,ms=macd(c);av=atr(rows);vs,vr=vol_state(rows)
+    sup=min(f(x[3]) for x in rows[-30:]);res=max(f(x[2]) for x in rows[-30:])
+    score=(2 if price>e20 else -2)+(2 if price>e50 else -2)+(2 if e20>e50 else -2)
+    if rr is not None: score += 2 if 52<=rr<68 else 1 if 68<=rr<75 else -1 if rr<48 else -1
+    if ml is not None and ms is not None: score += 2 if ml>ms and ml>0 else 1 if ml>ms else -2 if ml<ms and ml<0 else -1
+    score += 1 if vs=="STRONG" else -1 if vs=="WEAK" else 0
+    if coin!="BTC": score += 1 if regime=="BULLISH" else -1 if regime=="BEARISH" else 0
+    conf=max(25,min(92,50+abs(score)*3+(8 if quality=="HIGH" else -3 if quality=="MEDIUM" else -15)))
+    long_ok=score>=9 and quality!="LOW" and vs!="WEAK" and rr is not None and rr<72
+    short_ok=score<=-9 and quality!="LOW" and rr is not None and rr>28
+    if long_ok: action="BUY CONFIRMATION";direction="LONG"
+    elif short_ok: action="SHORT CONFIRMATION";direction="SHORT"
+    elif score>=6: action="BULLISH WATCH";direction="WATCH_LONG"
+    elif score<=-6: action="SELL WATCH";direction="WATCH_SHORT"
+    else: action="NO TRADE";direction="NONE"
+    if quality=="LOW": action="NO TRADE";direction="NONE"
+    entry=sl=tp1=tp2=None
+    if direction=="LONG":
+        entry=max(price,res*1.002);sl=min(sup*.995,entry-1.5*(av or entry*.03));risk=max(entry-sl,entry*.005);tp1=entry+2*risk;tp2=entry+3*risk
+    elif direction=="SHORT":
+        entry=min(price,sup*.998);sl=max(res*1.005,entry+1.5*(av or entry*.03));risk=max(sl-entry,entry*.005);tp1=entry-2*risk;tp2=entry-3*risk
+    return {"coin":coin,"price":price,"change":next((x.get("change") for x in sources if x["source"]=="BINANCE"),None),"trend":"BULLISH" if price>e20 and e20>e50 else "BEARISH" if price<e20 and e20<e50 else "MIXED","rsi":rr,"macd":"BULLISH" if ml is not None and ms is not None and ml>ms else "BEARISH","volume":vs,"score":score,"confidence":int(conf),"support":sup,"resistance":res,"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"action":action,"direction":direction,"quality":quality,"spread":sp,"sources":[x["source"] for x in sources],"engine":engine}
 
-    except Exception as e:
+# ---------------- Google Sheets signal memory ----------------
+def sheets_call(payload):
+    if not GOOGLE_SHEETS_WEBHOOK_URL or not GOOGLE_SHEETS_SECRET: return {"ok":False,"disabled":True}
+    p=dict(payload);p["secret"]=GOOGLE_SHEETS_SECRET
+    try: return http_post_json(GOOGLE_SHEETS_WEBHOOK_URL,p,timeout=15)
+    except Exception as e: return {"ok":False,"error":str(e)}
 
-        print("")
-        print(
-            "❌ ATLAS ERROR:"
-        )
+def previous_signal(coin):
+    r=sheets_call({"action":"get_previous","coin":coin})
+    if r.get("ok") and r.get("found"): return r.get("row") or {}
+    return None
 
-        print(
-            str(e)
-        )
+def direction_of(action):
+    if not action: return "NONE"
+    a=str(action).upper()
+    if "BUY" in a or "BULLISH" in a: return "LONG"
+    if "SHORT" in a or "SELL" in a: return "SHORT"
+    return "NONE"
 
-        return 1
+def compare_signal(current, previous):
+    if not previous: return {"alignment":"NO_PREVIOUS_SIGNAL","note":"First stored signal for this coin."}
+    pa=str(previous.get("action", "")); ps=f(previous.get("score")); pc=f(previous.get("confidence"))
+    cd=direction_of(current["action"]); pd=direction_of(pa)
+    if cd==pd and cd!="NONE": alignment="ALIGNED"
+    elif cd!="NONE" and pd!="NONE" and cd!=pd: alignment="CONTRADICTED"
+    else: alignment="NEUTRAL/UNCHANGED"
+    score_delta=current["score"]-(ps or 0)
+    if alignment=="ALIGNED" and ((cd=="LONG" and score_delta>=0) or (cd=="SHORT" and score_delta<=0)):
+        note="Trend and prior signal remain aligned."
+    elif alignment=="CONTRADICTED":
+        note="New signal conflicts with the previous stored signal: confirmation required."
+    else:
+        note="Signal changed or remains neutral; avoid treating it as confirmation by itself."
+    return {"alignment":alignment,"note":note,"previous_action":pa,"previous_score":ps,"previous_confidence":pc,"score_delta":score_delta}
 
+def apply_confirmation_gate(r, cmp, regime):
+    """Protect the official signal when the pre-check/history disagrees with it."""
+    original = r["action"]
+    d = direction_of(original)
+    blocked = False
+    reason = []
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
+    if r["quality"] == "LOW":
+        blocked = True; reason.append("low data quality")
+    if r["spread"] is not None and r["spread"] > 3:
+        blocked = True; reason.append("price conflict >3%")
+    if cmp.get("alignment") == "CONTRADICTED":
+        blocked = True; reason.append("previous SIGNAL contradicted")
+    if d == "LONG":
+        if r["trend"] != "BULLISH":
+            blocked = True; reason.append("trend not bullish")
+        if regime == "BEARISH":
+            blocked = True; reason.append("BTC regime bearish")
+    elif d == "SHORT":
+        if r["trend"] != "BEARISH":
+            blocked = True; reason.append("trend not bearish")
+        if regime == "BULLISH":
+            blocked = True; reason.append("BTC regime bullish")
 
-if __name__ == "__main__":
+    if blocked and original == "BUY CONFIRMATION":
+        r["action"] = "BULLISH WATCH"
+        r["direction"] = "WATCH_LONG"
+    elif blocked and original == "SHORT CONFIRMATION":
+        r["action"] = "SELL WATCH"
+        r["direction"] = "WATCH_SHORT"
 
-    raise SystemExit(
-        main()
-    )
+    if blocked:
+        r["gate"] = "BLOCKED"
+        r["gate_reason"] = "; ".join(reason)
+    else:
+        r["gate"] = "PASSED"
+        r["gate_reason"] = "Trend, BTC regime, data quality and previous-signal check passed."
+    r["raw_action"] = original
+    return r
+
+def row_for_sheet(r,run_type,regime,news_bias,cmp):
+    return {
+        "timestamp":datetime.now(TEHRAN).strftime("%Y-%m-%d %H:%M:%S"),"run_type":run_type,"coin":r["coin"],"action":r["action"],"direction":direction_of(r["action"]),"score":r["score"],"confidence":r["confidence"],"price":r["price"],"trend":r["trend"],"rsi":r["rsi"],"macd":r["macd"],"volume":r["volume"],"support":r["support"],"resistance":r["resistance"],"entry":r["entry"],"sl":r["sl"],"tp1":r["tp1"],"tp2":r["tp2"],"data_quality":r["quality"],"spread_pct":r["spread"],"exchanges":",".join(r["sources"]),"btc_regime":regime,"news_bias":news_bias,"previous_action":cmp.get("previous_action",""),"previous_score":cmp.get("previous_score",""),"previous_confidence":cmp.get("previous_confidence",""),"alignment":cmp.get("alignment",""),"notes":(cmp.get("note","") + " | Gate: " + r.get("gate","N/A") + " | " + r.get("gate_reason",""))
+    }
+
+# ---------------- build analysis set ----------------
+def universe():
+    dynamic=gecko_markets()
+    u=list(dict.fromkeys(STATIC+[(x.get("symbol") or "").upper() for x in dynamic]))
+    return [x for x in u if x and x not in {"USDT","USDC"}][:50]
+
+def run_analysis():
+    regime,_=btc_regime();ctx=context();news_bias,_=news();results=[];failed=0
+    for coin in universe():
+        try: results.append(analyze(coin,regime))
+        except Exception: failed+=1
+        time.sleep(.08)
+    results.sort(key=lambda x:(x["action"] in ("BUY CONFIRMATION","SHORT CONFIRMATION"),x["confidence"],abs(x["score"])),reverse=True)
+    return results,failed,regime,ctx,news_bias
+
+# ---------------- Telegram report ----------------
+def build_report(results,failed,regime,ctx,news_bias,mode,comparisons=None):
+    now=datetime.now(TEHRAN)
+    L=["🤖 ATLAS AI — SNIPER v8","━━━━━━━━━━━━━━━━━━",now.strftime("%Y/%m/%d  %H:%M")+" 🇮🇷","Timeframe: 4H","",f"🌎 BTC REGIME: {'🟢' if regime=='BULLISH' else '🔴' if regime=='BEARISH' else '🟡'} {regime}"]
+    if ctx.get("fg") is not None:L.append(f"😨 Fear & Greed: {ctx['fg']:.0f} — {ctx.get('fg_label','')}")
+    if ctx.get("btc_dom") is not None:L.append(f"₿ BTC Dominance: {ctx['btc_dom']:.2f}%")
+    if ctx.get("funding") is not None:L.append(f"BTC Funding: {ctx['funding']*100:.4f}%")
+    L += [f"📰 NEWS: {news_bias}",f"⏱️ RUN MODE: {mode}",""]
+    if mode=="PRECHECK":
+        L += ["🛡️ 30-MINUTE PRE-SIGNAL CHECK","Comparing current market structure with the previous stored SIGNAL.",""]
+    for r in results:
+        cmp=(comparisons or {}).get(r["coin"],{})
+        L += [f"🔹 {r['coin']}",f"Price: {fmt(r['price'])}",f"Trend: {'🟢' if r['trend']=='BULLISH' else '🔴' if r['trend']=='BEARISH' else '🟡'} {r['trend']}",f"RSI14: {r['rsi']:.1f}" if r["rsi"] is not None else "RSI14: N/A",f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴'} {r['macd']}",f"Volume: {r['volume']}",f"4H Score: {r['score']:+d}",f"Confidence: {r['confidence']}%",f"🎯 ACTION: {r['action']}",f"Data: {r['quality']}"]
+        if mode=="PRECHECK":
+            L.append(f"🔎 PRECHECK: {cmp.get('alignment','NO_PREVIOUS_SIGNAL')}")
+            if cmp.get("previous_action"): L.append(f"Previous: {cmp['previous_action']} | ΔScore: {cmp.get('score_delta',0):+.0f}")
+            L.append(f"Check: {cmp.get('note','')}")
+        if r["spread"]>3:L.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
+        L.append("")
+    L += ["━━━━━━━━━━━━━━━━━━"]
+    if mode=="PRECHECK":
+        aligned=sum(1 for c in (comparisons or {}).values() if c.get("alignment")=="ALIGNED")
+        contrad=sum(1 for c in (comparisons or {}).values() if c.get("alignment")=="CONTRADICTED")
+        L += [f"🧭 PRECHECK RESULT: ALIGNED {aligned} | CONTRADICTED {contrad}","If a new signal contradicts the previous signal, ATLAS will require confirmation rather than treating the change as a clean continuation."]
+    else:
+        picks=[r for r in results if r["action"] in ("BUY CONFIRMATION","SHORT CONFIRMATION")]
+        L += ["🏆 TOP OPPORTUNITIES"]
+        if picks:
+            for i,r in enumerate(picks[:8],1): L.append(f"{i}. {'🟢' if r['action'].startswith('BUY') else '🔴'} {r['coin']} — {r['action']} — {r['confidence']}%")
+        else: L.append("⛔ No high-quality actionable setup.")
+    L += ["","🛡️ ATLAS CAPITAL PROTECTION",f"Risk cap/trade: {RISK_PER_TRADE:.2f}%",f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%","No automatic orders. No leverage by default.","", "📡 DATA ENGINE",f"Assets scanned: {len(universe())} | Successful: {len(results)} | Unavailable: {failed}","Incomplete 4H candles excluded.","Conflicting/low-quality data => NO TRADE.","",f"🎯 ATLAS SNIPER v8: {mode}","", "⚠️ هدف 3x تضمین‌شدنی نیست؛ اولویت ATLAS حفظ سرمایه و شکار معاملات با نسبت ریسک/بازده مناسب است."]
+    text="\n".join(L)
+    return text[:3950]+"\n\n⚠️ Telegram length protection." if len(text)>4000 else text
+
+def send(text):
+    if not TOKEN or not CHAT_ID: raise RuntimeError("Telegram secrets missing")
+    data=urllib.parse.urlencode({"chat_id":CHAT_ID,"text":text}).encode()
+    req=urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/sendMessage",data=data,headers={"Content-Type":"application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req,timeout=20) as r:return r.read()
+
+# ---------------- main ----------------
+def main():
+    results,failed,regime,ctx,news_bias=run_analysis()
+    comparisons={}
+    for r in results:
+        prev=previous_signal(r["coin"])
+        comparisons[r["coin"]]=compare_signal(r,prev)
+    # Persist PRECHECK rows but do not make them the official previous SIGNAL.
+    if RUN_MODE=="PRECHECK":
+        rows=[row_for_sheet(r,"PRECHECK",regime,news_bias,comparisons[r["coin"]]) for r in results]
+        sheets_call({"action":"append_batch","rows":rows})
+        text=build_report(results,failed,regime,ctx,news_bias,"PRECHECK",comparisons)
+        send(text)
+        print(text);return 0
+
+    # Official signal run: apply the confirmation gate using the 30-minute/history check.
+    for r in results:
+        apply_confirmation_gate(r, comparisons[r["coin"]], regime)
+
+    rows=[row_for_sheet(r,"SIGNAL",regime,news_bias,comparisons[r["coin"]]) for r in results]
+    sheets_call({"action":"append_batch","rows":rows})
+    text=build_report(results,failed,regime,ctx,news_bias,"SIGNAL",comparisons)
+    send(text);print(text);return 0
+
+if __name__=="__main__": raise SystemExit(main())
