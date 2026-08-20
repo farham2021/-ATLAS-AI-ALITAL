@@ -85,6 +85,7 @@ COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY", "").strip()
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "").strip()
 CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
+COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
 MAX_PORTFOLIO_RISK = float(
@@ -2412,6 +2413,200 @@ def asset_block(r):
     return "\n".join(lines)
 
 
+# ============================================================
+# MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
+# ============================================================
+
+def coingecko_headers():
+    if COINGECKO_API_KEY:
+        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
+    return {}
+
+
+def global_market_intelligence():
+    """Fetch one compact daily market snapshot from CoinGecko + F&G.
+
+    Uses /global for aggregate market regime and /coins/markets for the
+    top-300 universe so gainers/losers are calculated locally rather than
+    depending on the paid top_gainers_losers endpoint.
+    """
+    out = {
+        "market_cap": None, "volume_24h": None, "market_change_24h": None,
+        "volume_change_24h": None, "btc_dominance": None,
+        "eth_dominance": None, "stablecoin_dominance": None,
+        "altcoin_dominance": None, "fear_greed": None,
+        "fear_greed_label": None, "fear_greed_ts": None,
+        "top_gainers": [], "top_losers": [], "heatmap": [],
+        "source": "CoinGecko + Alternative.me + optional CoinGlass",
+    }
+
+    global_data = safe_http_get(
+        "https://api.coingecko.com/api/v3/global",
+        headers=coingecko_headers(), default={}
+    )
+    if isinstance(global_data, dict):
+        d = global_data.get("data") or {}
+        cap = d.get("total_market_cap") or {}
+        vol = d.get("total_volume") or {}
+        dom = d.get("market_cap_percentage") or {}
+        out["market_cap"] = f(cap.get("usd"))
+        out["volume_24h"] = f(vol.get("usd"))
+        out["market_change_24h"] = f(d.get("market_cap_change_percentage_24h_usd"))
+        out["volume_change_24h"] = f(d.get("volume_change_percentage_24h_usd"))
+        out["btc_dominance"] = f(dom.get("btc"))
+        out["eth_dominance"] = f(dom.get("eth"))
+        # Stablecoin dominance is approximated from the principal stablecoins
+        # exposed by CoinGecko. This avoids double-counting non-stable assets.
+        stable_ids = ("usdt", "usdc", "usde", "dai", "fdusd", "usds", "usdd")
+        stable_dom = sum(f(dom.get(k), 0) or 0 for k in stable_ids)
+        out["stablecoin_dominance"] = stable_dom if stable_dom > 0 else None
+        btc = out["btc_dominance"] or 0
+        stable = out["stablecoin_dominance"] or 0
+        out["altcoin_dominance"] = max(0.0, 100.0 - btc - stable)
+
+    # Top 300 market-cap snapshot. Two calls are enough because CoinGecko
+    # supports up to 250 records per page on the markets endpoint.
+    markets = []
+    for page, per_page in ((1, 250), (2, 50)):
+        url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
+            "vs_currency": "usd", "order": "market_cap_desc",
+            "per_page": str(per_page), "page": str(page), "sparkline": "false",
+            "price_change_percentage": "1h,24h,7d",
+        })
+        rows = safe_http_get(url, headers=coingecko_headers(), default=[])
+        if isinstance(rows, list):
+            markets.extend(rows)
+        if len(markets) >= 300:
+            break
+        time.sleep(0.15)
+
+    clean = []
+    for x in markets[:300]:
+        if not isinstance(x, dict):
+            continue
+        sym = (x.get("symbol") or "").upper()
+        if not sym or is_stable(sym):
+            continue
+        ch = f(x.get("price_change_percentage_24h"))
+        price = f(x.get("current_price"))
+        vol = f(x.get("total_volume"))
+        rank = x.get("market_cap_rank")
+        if ch is None or price is None:
+            continue
+        clean.append({
+            "symbol": sym, "name": x.get("name") or sym,
+            "rank": rank, "price": price, "volume": vol,
+            "change_24h": ch, "high_24h": f(x.get("high_24h")),
+            "low_24h": f(x.get("low_24h")),
+            "change_1h": f(x.get("price_change_percentage_1h_in_currency")),
+            "change_7d": f(x.get("price_change_percentage_7d_in_currency")),
+        })
+    clean.sort(key=lambda x: x["change_24h"], reverse=True)
+    out["top_gainers"] = clean[:7]
+    out["top_losers"] = list(reversed(clean[-7:])) if clean else []
+
+    fg = safe_http_get("https://api.alternative.me/fng/?limit=1", default={})
+    if isinstance(fg, dict):
+        try:
+            item = (fg.get("data") or [])[0]
+            out["fear_greed"] = int(item.get("value"))
+            out["fear_greed_label"] = item.get("value_classification")
+            out["fear_greed_ts"] = item.get("timestamp")
+        except (IndexError, TypeError, ValueError):
+            pass
+
+    out["heatmap"] = liquidation_heatmap_summary(("BTC", "ETH"))
+    return out
+
+
+def liquidation_heatmap_summary(symbols=("BTC", "ETH")):
+    """Optional CoinGlass heatmap summary.
+
+    CoinGlass currently requires an API key for API access. Therefore the
+    module is deliberately non-blocking: without a key it returns an empty
+    list and never prevents the core ATLAS report from running.
+    """
+    if not COINGLASS_API_KEY:
+        return []
+    headers = {"CG-API-KEY": COINGLASS_API_KEY, "accept": "application/json"}
+    result = []
+    for symbol in symbols:
+        url = "https://open-api-v4.coinglass.com/api/futures/liquidation/aggregated-heatmap/model1?" + urllib.parse.urlencode({
+            "symbol": symbol, "range": "24h"
+        })
+        d = safe_http_get(url, timeout=15, headers=headers, default={})
+        if not isinstance(d, dict) or d.get("code") not in (None, "0", 0):
+            continue
+        data = d.get("data") or {}
+        y_axis = data.get("y_axis") or []
+        cells = data.get("liquidation_leverage_data") or []
+        price = None
+        candles = data.get("price_candlesticks") or []
+        if candles and isinstance(candles[-1], (list, tuple)) and len(candles[-1]) >= 5:
+            price = f(candles[-1][4])
+        levels = []
+        for cell in cells:
+            if not isinstance(cell, (list, tuple)) or len(cell) < 3:
+                continue
+            yi, intensity = safe_float(cell[1]), safe_float(cell[2])
+            if yi is None or intensity is None:
+                continue
+            yi = int(yi)
+            if 0 <= yi < len(y_axis):
+                lvl = f(y_axis[yi])
+                if lvl and lvl > 0:
+                    levels.append((lvl, intensity))
+        above = sorted([x for x in levels if price is not None and x[0] > price], key=lambda z: z[1], reverse=True)
+        below = sorted([x for x in levels if price is not None and x[0] < price], key=lambda z: z[1], reverse=True)
+        result.append({
+            "symbol": symbol, "price": price,
+            "above": above[:3], "below": below[:3],
+        })
+    return result
+
+
+def market_intelligence_block(mi):
+    lines = ["━━━━━━━━━━━━━━━━━━", "🌐 GLOBAL MARKET PULSE"]
+    if mi.get("market_cap") is not None:
+        lines.append(f"Total Market Cap: ${mi['market_cap']/1e12:.2f}T")
+    if mi.get("volume_24h") is not None:
+        lines.append(f"24H Market Volume: ${mi['volume_24h']/1e9:.2f}B")
+    if mi.get("market_change_24h") is not None:
+        lines.append(f"Market Cap 24H: {pct(mi['market_change_24h'])}")
+    if mi.get("volume_change_24h") is not None:
+        lines.append(f"Volume 24H Change: {pct(mi['volume_change_24h'])}")
+    if mi.get("fear_greed") is not None:
+        lines.append(f"😨 Fear & Greed: {mi['fear_greed']} — {mi.get('fear_greed_label','N/A')} (Alternative.me)")
+    dom = []
+    if mi.get("btc_dominance") is not None: dom.append(f"BTC {mi['btc_dominance']:.2f}%")
+    if mi.get("eth_dominance") is not None: dom.append(f"ETH {mi['eth_dominance']:.2f}%")
+    if mi.get("altcoin_dominance") is not None: dom.append(f"ALT* {mi['altcoin_dominance']:.2f}%")
+    if dom: lines.append("Dominance: " + " | ".join(dom))
+    if mi.get("stablecoin_dominance") is not None:
+        lines.append(f"Stablecoin dominance: {mi['stablecoin_dominance']:.2f}%")
+
+    gainers = mi.get("top_gainers") or []
+    losers = mi.get("top_losers") or []
+    if gainers:
+        lines.append("🚀 TOP GAINERS — Top 300: " + " | ".join(f"{x['symbol']} {pct(x['change_24h'])}" for x in gainers[:5]))
+    if losers:
+        lines.append("🔻 TOP LOSERS — Top 300: " + " | ".join(f"{x['symbol']} {pct(x['change_24h'])}" for x in losers[:5]))
+
+    hm = mi.get("heatmap") or []
+    if hm:
+        lines.append("🔥 LIQUIDATION HEATMAP — CoinGlass")
+        for x in hm:
+            above = x.get("above") or []
+            below = x.get("below") or []
+            a = fmt(above[0][0]) if above else "N/A"
+            b = fmt(below[0][0]) if below else "N/A"
+            lines.append(f"{x['symbol']}: price {fmt(x.get('price'))} | strongest above {a} | strongest below {b}")
+    else:
+        lines.append("🔥 Liquidation Heatmap: N/A (COINGLASS_API_KEY not configured or endpoint unavailable)")
+    lines.append("* ALT = total crypto dominance excluding BTC and the principal stablecoins; ETH remains inside ALT.")
+    return "\n".join(lines)
+
+
 def market_summary(results, macro, news):
     tradable = [
         x for x in results
@@ -2519,7 +2714,7 @@ def atlas_conclusion(results):
     return "\n".join(lines)
 
 
-def build_report(results, top10, dynamic30, macro, news):
+def build_report(results, top10, dynamic30, macro, news, market_info):
     # Most useful assets first, but the complete radar is still retained.
     results.sort(
         key=lambda x: (
@@ -2575,6 +2770,7 @@ def build_report(results, top10, dynamic30, macro, news):
     return "\n\n".join([
         "\n".join(header),
         "\n\n".join(blocks),
+        market_intelligence_block(market_info),
         market_summary(results, macro, news),
         atlas_conclusion(results),
         "\n".join(footer),
@@ -2585,15 +2781,15 @@ def build_report(results, top10, dynamic30, macro, news):
 # CONTEXT PERSISTENCE
 # ============================================================
 
-def save_context(macro, news, liquidity):
+def save_context(macro, news, liquidity, market_info=None):
     STORE.insert(
         "atlas_market_context",
         {
             "timestamp": now_utc().isoformat(),
             "timeframe": "4h",
-            "fear_greed": None,
-            "fear_greed_label": None,
-            "btc_dominance": None,
+            "fear_greed": (market_info or {}).get("fear_greed"),
+            "fear_greed_label": (market_info or {}).get("fear_greed_label"),
+            "btc_dominance": (market_info or {}).get("btc_dominance"),
             "btc_funding": None,
             "btc_open_interest": None,
             "news_bias": news["bias"],
@@ -2606,6 +2802,13 @@ def save_context(macro, news, liquidity):
             "wti": macro.get("WTI"),
             "brent": macro.get("BRENT"),
             "market_summary": news["bias"],
+            "eth_dominance": (market_info or {}).get("eth_dominance"),
+            "altcoin_dominance": (market_info or {}).get("altcoin_dominance"),
+            "stablecoin_dominance": (market_info or {}).get("stablecoin_dominance"),
+            "global_market_cap": (market_info or {}).get("market_cap"),
+            "global_volume_24h": (market_info or {}).get("volume_24h"),
+            "global_market_change_24h": (market_info or {}).get("market_change_24h"),
+            "global_volume_change_24h": (market_info or {}).get("volume_change_24h"),
         },
     )
 
@@ -2652,6 +2855,7 @@ def report():
     weights = get_weights()
     news = news_feed()
     macro = macro_snapshot()
+    market_info = global_market_intelligence()
     results = []
     unavailable = 0
     for coin in universe:
@@ -2665,19 +2869,20 @@ def report():
         time.sleep(REQUEST_SLEEP_SECONDS)
     for r in results:
         store_signal(r)
-    text = build_report(results, top10, dynamic30, macro, news)
-    return text, results, macro, news, unavailable
+    text = build_report(results, top10, dynamic30, macro, news, market_info)
+    return text, results, macro, news, market_info, unavailable
 
 
 def main():
     try:
-        text, results, macro, news, unavailable = report()
+        text, results, macro, news, market_info, unavailable = report()
         parts, sent, errors = send_report(text)
 
         save_context(
             macro,
             news,
             market_liquidity_index(results),
+            market_info,
         )
         save_run(results, parts, macro, news)
 
