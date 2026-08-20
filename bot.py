@@ -1513,9 +1513,11 @@ def analyze_coin(coin, market_news, weights):
         sr_fallback = True
 
     mom30, _ = momentum_30m(coin)
-    trigger = candle_trigger_state(tf4.get("rows", []), direction,
-                                   effective_levels.get("support") if effective_levels else None,
-                                   effective_levels.get("resistance") if effective_levels else None)
+
+    # Direction must be resolved BEFORE any trigger calculation uses it.
+    # v8.6.1 accidentally evaluated candle_trigger_state(..., direction, ...)
+    # before direction was assigned, causing every asset analysis to raise
+    # UnboundLocalError and leaving the report with Total scanned: 0.
 
     # --------------------------------------------------------
     # Confidence components
@@ -1571,6 +1573,14 @@ def analyze_coin(coin, market_news, weights):
     # monthly contradiction blocks the setup; a weekly contradiction
     # requires an unusually strong confidence score.
     regime_conflict = False
+
+    # Candle trigger is calculated only after direction has been resolved.
+    trigger = candle_trigger_state(
+        tf4.get("rows", []),
+        direction,
+        effective_levels.get("support") if effective_levels else None,
+        effective_levels.get("resistance") if effective_levels else None,
+    )
     if direction == "LONG" and m1 == "BEARISH":
         regime_conflict = True
     elif direction == "SHORT" and m1 == "BULLISH":
@@ -2744,7 +2754,7 @@ def atlas_conclusion(results):
     return "\n".join(lines)
 
 
-def build_report(results, top10, dynamic30, macro, news, market_info):
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0):
     # Most useful assets first, but the complete radar is still retained.
     results.sort(
         key=lambda x: (
@@ -2774,6 +2784,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info):
         f"Dynamic Top 30: {len(dynamic30)}",
         f"ATLAS Static Radar: {len(ATLAS_STATIC)}",
         f"Total scanned: {len(results)}",
+        f"Unavailable/failed: {unavailable}",
         "",
     ]
 
@@ -2783,7 +2794,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info):
         "━━━━━━━━━━━━━━━━━━",
         "🛡️ ATLAS DATA ENGINE",
         f"Assets scanned: {len(results)}",
-        f"Successful: {len(results)}",
+        f"Successful: {len(results)} | Unavailable: {unavailable}",
         "Only CLOSED candles used for signals; incomplete candles excluded",
         "Stablecoins excluded",
         "Data conflict >3% = NO TRADE",
@@ -2899,7 +2910,7 @@ def report():
         time.sleep(REQUEST_SLEEP_SECONDS)
     for r in results:
         store_signal(r)
-    text = build_report(results, top10, dynamic30, macro, news, market_info)
+    text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable)
     return text, results, macro, news, market_info, unavailable
 
 
