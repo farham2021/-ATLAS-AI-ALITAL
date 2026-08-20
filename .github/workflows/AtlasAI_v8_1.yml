@@ -1,0 +1,92 @@
+name: ATLAS AI v8.1
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Tehran 12:00 / 16:00 / 22:00
+    # GitHub Actions cron uses UTC; Tehran is UTC+03:30.
+    - cron: "30 8 * * *"
+    - cron: "30 12 * * *"
+    - cron: "30 18 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-v8-1
+  cancel-in-progress: false
+
+jobs:
+  run-atlas:
+    name: ATLAS v8.1 Market Supervisor
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout ATLAS
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install ATLAS dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade ccxt
+
+      - name: Verify ATLAS v8.1 files
+        run: |
+          test -f bot_v8_1.py
+          python -m py_compile bot_v8_1.py
+          echo "ATLAS v8.1 syntax check: OK"
+
+      - name: Run ATLAS v8.1
+        env:
+          # Telegram
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          # Supabase
+          SUPABASE_URL: "https://tmnfhsuwtqfpglckfxwg.supabase.co"
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          # Market / news APIs
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          # ATLAS risk / decision configuration
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MIN_CONFIDENCE: "60"
+          ATLAS_MAX_LEVERAGE: "10"
+
+          # Mandatory historical validation / self-healing
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+
+          # Local fallback/audit files
+          ATLAS_SQLITE_FILE: "atlas_v81.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+
+          PYTHONUNBUFFERED: "1"
+
+        run: |
+          python bot_v8_1.py
+
+      - name: Upload local ATLAS audit files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-v8-1-audit-${{ github.run_id }}
+          path: |
+            atlas_v81.sqlite3
+            changelog.txt
+          if-no-files-found: ignore
+          retention-days: 14
