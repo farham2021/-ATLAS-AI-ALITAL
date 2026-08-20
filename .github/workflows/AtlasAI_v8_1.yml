@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
 
   schedule:
-    # Tehran 12:00 / 16:00 / 22:00
-    # UTC = Tehran - 3:30
     - cron: "30 8 * * *"
     - cron: "30 12 * * *"
     - cron: "30 18 * * *"
@@ -18,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run-atlas:
+  atlas:
     name: ATLAS v8.6.1 Market Supervisor
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -26,62 +24,42 @@ jobs:
     steps:
 
       - name: Checkout ATLAS
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: "pip"
 
       - name: Install ATLAS dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           python -m pip install --upgrade ccxt
 
-      - name: Verify ATLAS v8.6.1
+      - name: Verify ATLAS source
         run: |
           test -f bot.py
           python -m py_compile bot.py
-          echo "ATLAS v8.6.1 syntax check: OK"
+          echo "ATLAS v8.6.1 syntax: OK"
 
       - name: Run ATLAS v8.6.1
         env:
-
-          # =========================
-          # Telegram
-          # =========================
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # =========================
-          # Supabase
-          # =========================
           SUPABASE_URL: "https://tmnfhsuwtqfpglckfxwg.supabase.co"
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-          # =========================
-          # Market / Crypto APIs
-          # =========================
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
 
-          # =========================
-          # Macro / News
-          # =========================
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-          # =========================
-          # CoinGlass
-          # =========================
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # =========================
-          # ATLAS
-          # =========================
           ATLAS_VERSION: "8.6.1"
           ATLAS_TIMEFRAME: "4H"
 
@@ -91,16 +69,10 @@ jobs:
           ATLAS_MIN_CONFIDENCE: "60"
           ATLAS_MAX_LEVERAGE: "10"
 
-          # =========================
-          # Backtest / Self-Healing
-          # =========================
           ATLAS_BACKTEST_DAYS: "180"
           ATLAS_SIGNAL_HORIZON_BARS: "36"
           ATLAS_BACKTEST_IMPROVEMENT: "10"
 
-          # =========================
-          # Local persistence
-          # =========================
           ATLAS_SQLITE_FILE: "atlas_v861.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
 
@@ -111,7 +83,7 @@ jobs:
 
       - name: Upload ATLAS diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: atlas-v8-6-1-diagnostics-${{ github.run_id }}
           path: |
