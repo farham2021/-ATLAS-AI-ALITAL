@@ -204,8 +204,8 @@ def safe_float(x, default=None):
         return default
 
 
-def f(x):
-    return safe_float(x)
+def f(x, default=None):
+    return safe_float(x, default)
 
 
 def safe_mean(values, default=None):
@@ -259,7 +259,7 @@ def safe_json(value):
 
 def http_get(url, timeout=15, headers=None):
     h = {
-        "User-Agent": "ATLAS-AI/8.4",
+        "User-Agent": "ATLAS-AI/8.6.1",
         "Accept": "application/json,application/xml,text/xml,*/*",
     }
     if headers:
