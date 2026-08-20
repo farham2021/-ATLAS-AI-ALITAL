@@ -1,7 +1,7 @@
 # ============================================================
-# ATLAS AI v8.5 — SELF-HEALING MARKET SUPERVISOR
+# ATLAS AI v8.6.1 — SELF-HEALING MARKET SUPERVISOR
 # ============================================================
-# v8.5 hardening:
+# v8.6.1 hardening:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
 # - Daily S/R primary with high-confidence H4 fallback for continuity
@@ -58,7 +58,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v8.5"
+VERSION = "ATLAS v8.6.1"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -2249,12 +2249,27 @@ def evaluate_open_outcomes():
 # TELEGRAM
 # ============================================================
 
+def telegram_api_get_me():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN missing")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
+        headers={"User-Agent": "ATLAS-AI/8.6.1"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+    data = json.loads(raw)
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram getMe failed: {data}")
+    return data.get("result") or {}
+
+
 def telegram_send_one(chat_id, text):
     if not TELEGRAM_TOKEN or not chat_id:
         raise RuntimeError("Telegram secrets missing")
 
     data = urllib.parse.urlencode({
-        "chat_id": chat_id,
+        "chat_id": str(chat_id),
         "text": text,
         "disable_web_page_preview": "true",
     }).encode()
@@ -2265,7 +2280,25 @@ def telegram_send_one(chat_id, text):
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read()
+        raw = r.read().decode("utf-8", errors="replace")
+    data = json.loads(raw)
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram sendMessage failed: {data}")
+    return data
+
+
+def telegram_preflight():
+    """Validate Telegram credentials before the expensive market run."""
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN is missing from GitHub Secrets")
+    if not TELEGRAM_CHAT_ID and not TELEGRAM_GROUP_CHAT_ID:
+        raise RuntimeError("No Telegram destination configured: TELEGRAM_CHAT_ID / TELEGRAM_GROUP_CHAT_ID")
+    me = telegram_api_get_me()
+    append_changelog(
+        "TELEGRAM_PREFLIGHT", None, None,
+        f"Telegram API reachable as @{me.get('username') or me.get('first_name') or 'bot'}"
+    )
+    return me
 
 
 def split_telegram(text, max_chars=3900):
@@ -2301,10 +2334,7 @@ def split_telegram(text, max_chars=3900):
 
 
 def send_report(text):
-    """Deliver once per configured destination, with independent retry state.
-
-    A successful private-chat delivery must never suppress a failed
-    supergroup delivery (and vice versa)."""
+    """Deliver once per configured destination, with independent retry state."""
     import hashlib
     parts = split_telegram(text)
     report_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -2761,7 +2791,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info):
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v8.5 SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v8.6.1 SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -2830,7 +2860,7 @@ def save_run(results, parts, macro, news):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v8.5 closed-candle multi-timeframe engine",
+            "notes": "v8.6.1 closed-candle multi-timeframe engine",
         },
     )
 
@@ -2875,6 +2905,9 @@ def report():
 
 def main():
     try:
+        # Fail early and visibly if Telegram itself is unavailable.
+        telegram_preflight()
+
         text, results, macro, news, market_info, unavailable = report()
         parts, sent, errors = send_report(text)
 
@@ -2889,17 +2922,40 @@ def main():
         print(text)
         print("")
         print(
-            f"ATLAS v8.5 sent: {sent} Telegram messages "
+            f"{VERSION} sent: {sent} Telegram messages "
             f"across {parts} report parts; errors={len(errors)}"
         )
 
-        # Never fail the analysis because Telegram failed.
+        if errors or sent == 0:
+            raise RuntimeError(
+                "Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"])
+            )
         return 0
 
     except Exception as e:
-        append_changelog("FATAL", None, None, str(e), {"traceback": traceback.format_exc()})
-        print(f"ATLAS v8.5 ERROR: {e}")
-        return 0
+        tb = traceback.format_exc()
+        append_changelog("FATAL", None, None, str(e), {"traceback": tb})
+        print(f"{VERSION} ERROR: {e}")
+
+        # If Telegram credentials are valid, send a compact diagnostic instead
+        # of silently marking the GitHub Action successful.
+        try:
+            if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
+                alert = (
+                    f"🚨 {VERSION} FAILED\n"
+                    f"Reason: {str(e)[:900]}\n\n"
+                    "Check the GitHub Actions log and changelog.txt."
+                )
+                for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+                    if destination:
+                        try:
+                            telegram_send_one(destination, alert)
+                        except Exception as te:
+                            print(f"Telegram error alert failed for {destination}: {te}")
+        except Exception:
+            pass
+        # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
+        return 1
 
 
 if __name__ == "__main__":
