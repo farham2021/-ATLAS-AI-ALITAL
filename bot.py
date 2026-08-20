@@ -55,7 +55,7 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-TELEGRAM_GROUP_CHAT_ID = ""  # v8.1: single Telegram destination only
+TELEGRAM_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
@@ -1998,26 +1998,33 @@ def split_telegram(text, max_chars=3900):
 
 
 def send_report(text):
-    """Send the report exactly once to the primary Telegram chat.
+    """Send each report once to each configured Telegram destination.
 
-    Telegram_GROUP_CHAT_ID is intentionally disabled in v8.1 to prevent
-    duplicate delivery of the same report.
+    Private chat and supergroup are treated as separate destinations.
+    If both IDs are identical, the report is sent only once.
     """
     parts = split_telegram(text)
-    if not TELEGRAM_CHAT_ID:
-        append_changelog("TELEGRAM", None, None, "TELEGRAM_CHAT_ID missing")
-        return len(parts), 0, ["TELEGRAM_CHAT_ID missing"]
+    destinations = []
+
+    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if chat_id and chat_id not in destinations:
+            destinations.append(chat_id)
+
+    if not destinations:
+        append_changelog("TELEGRAM", None, None, "No Telegram destination configured")
+        return len(parts), 0, ["No Telegram destination configured"]
 
     sent = 0
     errors = []
 
-    for i, part in enumerate(parts, 1):
-        try:
-            telegram_send_one(TELEGRAM_CHAT_ID, part)
-            sent += 1
-            time.sleep(0.7)
-        except Exception as e:
-            errors.append(f"Telegram part {i}: {e}")
+    for chat_id in destinations:
+        for i, part in enumerate(parts, 1):
+            try:
+                telegram_send_one(chat_id, part)
+                sent += 1
+                time.sleep(0.7)
+            except Exception as e:
+                errors.append(f"Telegram chat {chat_id} part {i}: {e}")
 
     for e in errors:
         append_changelog("TELEGRAM", None, None, e)
