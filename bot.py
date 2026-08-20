@@ -48,14 +48,16 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v8.1"
+VERSION = "ATLAS v8.2"
 TIMEFRAMES = ("1h", "4h", "1d")
 SIGNAL_TIMEFRAME = "4h"
 TEHRAN = ZoneInfo("Asia/Tehran")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-TELEGRAM_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_CHAT_ID", "").strip()
+TELEGRAM_GROUP_CHAT_ID = os.environ.get(
+    "TELEGRAM_GROUP_CHAT_ID", "-1003961443232"
+).strip()
 
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
@@ -83,7 +85,7 @@ MIN_BACKTEST_IMPROVEMENT = float(
     os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10")
 )
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v81.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v82.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -217,7 +219,7 @@ def safe_json(value):
 
 def http_get(url, timeout=15, headers=None):
     h = {
-        "User-Agent": "ATLAS-AI/8.1",
+        "User-Agent": "ATLAS-AI/8.2",
         "Accept": "application/json,application/xml,text/xml,*/*",
     }
     if headers:
@@ -274,6 +276,11 @@ def init_sqlite():
             losses integer default 0,
             updated_at text,
             reason text
+        );
+        create table if not exists self_healing_cursor(
+            id integer primary key check(id=1),
+            processed_closed integer not null default 0,
+            updated_at text
         );
         create table if not exists backtests(
             id integer primary key autoincrement,
@@ -662,96 +669,203 @@ def volume_state(rows):
 
 
 def support_resistance(rows):
-    lows = [f(x[3]) for x in rows[-20:]]
-    highs = [f(x[2]) for x in rows[-20:]]
+    """Legacy fallback S/R from a candle set.
+
+    The primary ATLAS S/R engine is ``daily_key_levels`` below. This
+    function remains as a safe fallback when Daily data is unavailable.
+    """
+    lows = [f(x[3]) for x in rows[-30:] if f(x[3]) is not None]
+    highs = [f(x[2]) for x in rows[-30:] if f(x[2]) is not None]
+    if not lows or not highs:
+        return None, None
     return min(lows), max(highs)
 
 
-def daily_key_levels(rows, price=None):
-    """Find robust daily support/resistance from completed daily candles.
+def _cluster_levels(values, tolerance=0.012):
+    """Cluster nearby prices so repeated touches form one S/R zone."""
+    vals = sorted(v for v in values if v is not None and v > 0)
+    if not vals:
+        return []
+    clusters = [[vals[0]]]
+    for v in vals[1:]:
+        center = sum(clusters[-1]) / len(clusters[-1])
+        if abs(v - center) / center <= tolerance:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    return [
+        {
+            "level": sum(c) / len(c),
+            "touches": len(c),
+            "spread": (max(c) - min(c)) / max(sum(c) / len(c), 1e-12) * 100,
+        }
+        for c in clusters
+    ]
 
-    Uses local swing points, clustering, touch count, recency and ATR-aware
-    tolerance. Only levels on the correct side of current price are returned.
+
+def daily_key_levels(daily_rows, current_price=None):
+    """High-confidence Daily support/resistance engine.
+
+    Uses completed Daily candles only. A level earns strength from:
+      - repeated Daily swing touches,
+      - recency,
+      - rejection/close evidence,
+      - volume confirmation when available,
+      - weekly range context.
+
+    Only support below price and resistance above price are returned.
+    If Daily data is insufficient, confidence is explicitly LOW.
     """
-    if not rows or len(rows) < 30:
-        return None
+    if not daily_rows or len(daily_rows) < 60:
+        return {
+            "support": None, "resistance": None,
+            "support_score": 0, "resistance_score": 0,
+            "support_touches": 0, "resistance_touches": 0,
+            "confidence": "LOW", "method": "INSUFFICIENT_DAILY_DATA",
+        }
 
-    completed = rows[:-1] if len(rows) > 1 else rows
-    completed = completed[-90:]
-    if len(completed) < 30:
-        return None
+    rows = daily_rows[-180:]
+    price = f(current_price) if current_price is not None else f(rows[-1][4])
+    if price is None:
+        price = f(rows[-1][4])
 
-    closes = [f(x[4]) for x in completed]
-    highs = [f(x[2]) for x in completed]
-    lows = [f(x[3]) for x in completed]
-    last_price = f(price) if price else closes[-1]
+    highs = [f(r[2]) for r in rows]
+    lows = [f(r[3]) for r in rows]
+    closes_ = [f(r[4]) for r in rows]
+    vols = [f(r[5]) for r in rows]
+    atr_d = atr(rows, 14)
+    if not atr_d or not price:
+        return {
+            "support": None, "resistance": None,
+            "support_score": 0, "resistance_score": 0,
+            "support_touches": 0, "resistance_touches": 0,
+            "confidence": "LOW", "method": "INVALID_DAILY_DATA",
+        }
 
-    # Daily ATR proxy: median of recent true ranges.
-    trs = []
-    for i in range(1, len(completed)):
-        h, l = highs[i], lows[i]
-        pc = closes[i - 1]
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    trs = sorted(x for x in trs if x > 0)
-    atr_d = trs[len(trs)//2] if trs else max(last_price * 0.02, 1e-12)
+    # Local Daily swing points: strict 2-bar pivots on both sides.
+    swing_highs, swing_lows = [], []
+    for i in range(2, len(rows) - 2):
+        h = highs[i]
+        l = lows[i]
+        if h is not None and h >= max(highs[i-2:i]) and h >= max(highs[i+1:i+3]):
+            swing_highs.append(h)
+        if l is not None and l <= min(lows[i-2:i]) and l <= min(lows[i+1:i+3]):
+            swing_lows.append(l)
 
-    # Candidate swing points.
-    candidates = []
-    w = 2
-    for i in range(w, len(completed) - w):
-        if highs[i] >= max(highs[i-w:i+w+1]):
-            candidates.append(("R", highs[i], i))
-        if lows[i] <= min(lows[i-w:i+w+1]):
-            candidates.append(("S", lows[i], i))
+    # Add recent 20/60/120-day extrema as structural candidates.
+    for n in (20, 60, 120):
+        chunk = rows[-n:]
+        swing_highs.append(max(f(r[2]) for r in chunk))
+        swing_lows.append(min(f(r[3]) for r in chunk))
 
-    tolerance = max(atr_d * 0.30, last_price * 0.003)
+    sup_candidates = [x for x in swing_lows if x < price]
+    res_candidates = [x for x in swing_highs if x > price]
+    sup_clusters = _cluster_levels(sup_candidates, tolerance=0.015)
+    res_clusters = _cluster_levels(res_candidates, tolerance=0.015)
 
-    def cluster(side):
-        vals = [(v, i) for s, v, i in candidates if s == side]
-        groups = []
-        for value, pos in sorted(vals, key=lambda z: z[0]):
-            placed = False
-            for g in groups:
-                if abs(value - g["level"]) <= tolerance:
-                    g["values"].append((value, pos))
-                    g["level"] = sum(v for v, _ in g["values"]) / len(g["values"])
-                    placed = True
-                    break
-            if not placed:
-                groups.append({"level": value, "values": [(value, pos)]})
-        return groups
+    avg_vol = None
+    valid_vols = [v for v in vols[-21:-1] if v is not None and v > 0]
+    if len(valid_vols) >= 10:
+        avg_vol = sum(valid_vols) / len(valid_vols)
 
-    def score(g):
-        touches = len(g["values"])
-        recency = max(pos for _, pos in g["values"])
-        recency_score = 20 * (recency / max(len(completed)-1, 1))
-        touch_score = min(40, touches * 12)
-        distance = abs(g["level"] - last_price) / max(atr_d, 1e-12)
-        proximity_score = max(0, 25 - min(distance, 25))
-        # A level repeatedly respected and not absurdly distant scores higher.
-        return min(100, round(touch_score + recency_score + proximity_score + 15, 1))
+    def score_zone(zone, side):
+        level = zone["level"]
+        touches = zone["touches"]
+        score = 35 + min(25, (touches - 1) * 8)
 
-    supports = [g for g in cluster("S") if g["level"] < last_price]
-    resistances = [g for g in cluster("R") if g["level"] > last_price]
+        # Recency: nearest candidate in the cluster gets a modest bonus.
+        distances = []
+        for i, r in enumerate(rows):
+            hi, lo, cl = f(r[2]), f(r[3]), f(r[4])
+            hit = hi >= level >= lo if hi is not None and lo is not None else False
+            if hit:
+                distances.append(len(rows) - 1 - i)
+        if distances:
+            recency = min(distances)
+            score += max(0, 15 - recency * 0.35)
 
-    if not supports or not resistances:
-        return None
+        # ATR-normalized proximity: useful levels should not be absurdly far.
+        dist_pct = abs(level - price) / price * 100
+        atrp = atr_d / price * 100
+        if dist_pct <= max(atrp * 4, 8):
+            score += 10
+        elif dist_pct <= max(atrp * 8, 15):
+            score += 5
 
-    # Prefer strength first, then proximity among similarly strong levels.
-    supports.sort(key=lambda g: (score(g), -abs(last_price-g["level"])), reverse=True)
-    resistances.sort(key=lambda g: (score(g), -abs(last_price-g["level"])), reverse=True)
+        # Rejection evidence around the level.
+        rejection = 0
+        for r in rows[-90:]:
+            o, h, l, c = map(f, (r[1], r[2], r[3], r[4]))
+            if None in (o, h, l, c):
+                continue
+            body = abs(c - o)
+            rng = max(h - l, 1e-12)
+            if side == "support" and l <= level * 1.006 and c > level and (c-l) / rng > 0.55:
+                rejection += 1
+            if side == "resistance" and h >= level * 0.994 and c < level and (h-c) / rng > 0.55:
+                rejection += 1
+        score += min(15, rejection * 3)
 
-    s = supports[0]
-    r = resistances[0]
+        # Volume confirmation is a bonus, never a standalone reason.
+        if avg_vol:
+            vol_hits = 0
+            for r in rows[-90:]:
+                o, h, l, c, v = f(r[1]), f(r[2]), f(r[3]), f(r[4]), f(r[5])
+                if None in (o, h, l, c, v):
+                    continue
+                if v < avg_vol * 1.20:
+                    continue
+                if side == "support" and l <= level * 1.006 and c > level:
+                    vol_hits += 1
+                if side == "resistance" and h >= level * 0.994 and c < level:
+                    vol_hits += 1
+            score += min(10, vol_hits * 2)
+
+        return int(clamp(round(score), 0, 100))
+
+    def best(zones, side):
+        ranked = []
+        for z in zones:
+            score = score_zone(z, side)
+            ranked.append((score, z))
+        if not ranked:
+            return None
+        # Prefer strong levels; among similar scores prefer the nearer one.
+        ranked.sort(key=lambda item: (
+            item[0],
+            -abs(item[1]["level"] - price) / price,
+        ), reverse=True)
+        score, z = ranked[0]
+        return {
+            "level": z["level"],
+            "score": score,
+            "touches": z["touches"],
+        }
+
+    sup = best(sup_clusters, "support")
+    res = best(res_clusters, "resistance")
+
+    # Never report a level as reliable unless it has meaningful structure.
+    if sup and sup["score"] < 55:
+        sup = None
+    if res and res["score"] < 55:
+        res = None
+
+    min_score = min(
+        sup["score"] if sup else 0,
+        res["score"] if res else 0,
+    )
+    confidence = "HIGH" if min_score >= 80 else "MEDIUM" if min_score >= 65 else "LOW"
 
     return {
-        "support": s["level"],
-        "resistance": r["level"],
-        "support_strength": score(s),
-        "resistance_strength": score(r),
-        "support_touches": len(s["values"]),
-        "resistance_touches": len(r["values"]),
-        "atr_daily": atr_d,
+        "support": sup["level"] if sup else None,
+        "resistance": res["level"] if res else None,
+        "support_score": sup["score"] if sup else 0,
+        "resistance_score": res["score"] if res else 0,
+        "support_touches": sup["touches"] if sup else 0,
+        "resistance_touches": res["touches"] if res else 0,
+        "confidence": confidence,
+        "method": "DAILY_SWINGS_CLUSTER_REJECTION_VOLUME",
     }
 
 
@@ -1126,6 +1240,8 @@ def indicator_alignment(tf4):
     bullish = 0
     bearish = 0
     reasons = []
+    overbought = False
+    oversold = False
 
     if rr is not None:
         if 52 <= rr <= 68:
@@ -1133,10 +1249,11 @@ def indicator_alignment(tf4):
             reasons.append("RSI صعودی/متعادل")
         elif rr < 45:
             bearish += 1
-            reasons.append("RSI ضعیف")
+            oversold = True
+            reasons.append("RSI ضعیف / اشباع فروش")
         elif rr > 75:
-            bullish += 1
-            reasons.append("RSI بالای 75؛ مومنتوم قوی اما پرریسک")
+            overbought = True
+            reasons.append("RSI بالای 75؛ اشباع خرید — بدون امتیاز صعودی")
 
     if ml is not None and ms is not None:
         if ml > ms and ml > 0:
@@ -1159,7 +1276,7 @@ def indicator_alignment(tf4):
         else "BEARISH" if bearish >= 2 and bearish > bullish
         else "MIXED"
     )
-    return direction, bullish, bearish, reasons
+    return direction, bullish, bearish, reasons, overbought, oversold
 
 
 def strong_divergence(rows):
@@ -1177,11 +1294,13 @@ def strong_divergence(rows):
 
 def calculate_levels(rows, direction, daily_levels=None):
     price = f(rows[-1][4])
-    sup, res = support_resistance(rows)
+    sup = daily_levels.get("support") if daily_levels else None
+    res = daily_levels.get("resistance") if daily_levels else None
+    if sup is None or res is None:
+        fallback_sup, fallback_res = support_resistance(rows)
+        sup = sup if sup is not None else fallback_sup
+        res = res if res is not None else fallback_res
     pivot = weekly_pivot(rows)
-    if daily_levels:
-        sup = daily_levels["support"]
-        res = daily_levels["resistance"]
     a = atr(rows)
 
     if not price or not a:
@@ -1232,7 +1351,7 @@ def suggested_leverage(atr_percent):
     return round(clamp(lev, 1, MAX_LEVERAGE), 1)
 
 
-def analyze_coin(coin, market_news):
+def analyze_coin(coin, market_news, weights):
     if is_stable(coin):
         return None
 
@@ -1246,17 +1365,12 @@ def analyze_coin(coin, market_news):
 
     price, sources, quality, spread_pct, errors = price_consensus(coin)
 
-    daily_levels = daily_key_levels(tfd.get("rows", []), price)
-    if daily_levels is None:
-        # Do not fabricate daily S/R when the daily history is insufficient.
-        daily_levels = None
-
     h1 = tf1.get("trend", "UNKNOWN")
     h4 = tf4.get("trend", "UNKNOWN")
     d1 = tfd.get("trend", "UNKNOWN")
 
     pattern, pattern_dir = candle_pattern(tf4["rows"])
-    ind_dir, bull_n, bear_n, indicator_reasons = indicator_alignment(tf4)
+    ind_dir, bull_n, bear_n, indicator_reasons, overbought, oversold = indicator_alignment(tf4)
 
     divergence = strong_divergence(tf4["rows"])
 
@@ -1264,35 +1378,40 @@ def analyze_coin(coin, market_news):
     atrp = atr_pct(tf4["rows"])
     liq_score, liq_label = asset_liquidity(coin, sources)
 
+    # Daily S/R is authoritative for the report. H4 remains the execution
+    # timeframe, but Daily structure determines the key levels.
+    daily_levels = daily_key_levels(tfd.get("rows", []), price)
+
     mom30, _ = momentum_30m(coin)
 
     # --------------------------------------------------------
     # Confidence components
     # --------------------------------------------------------
-    candle_points = 0
+    candle_points = 0.0
     candle_valid = False
     if pattern != "NONE" and pattern_dir in ("BULLISH", "BEARISH"):
-        aligned = 0
-        if pattern_dir == ind_dir:
-            aligned += 1
-        if pattern_dir == h4:
-            aligned += 1
-        if pattern_dir == d1:
-            aligned += 1
+        aligned = sum([pattern_dir == ind_dir, pattern_dir == h4, pattern_dir == d1])
         if aligned >= 2:
-            candle_points = 20
+            candle_points = weights["candle_pattern"]
             candle_valid = True
 
-    indicator_points = min(30, (2 if bull_n >= 2 else 0) * 15)
-    if bear_n >= 2:
-        indicator_points = 30
+    indicator_points = 0.0
+    if bull_n >= 2 or bear_n >= 2:
+        indicator_points = weights["rsi"] + weights["macd"]
 
-    volume_points = 15 if vol_ratio is not None and vol_ratio > 1 else 0
-    higher_points = 20 if h4 in ("BULLISH", "BEARISH") and d1 == h4 else 0
-    news_points = 15 if market_news["impact"] != "HIGH" else 0
+    volume_points = weights["volume"] if vol_ratio is not None and vol_ratio > 1 else 0.0
+    higher_points = weights["higher_trend"] if h4 in ("BULLISH", "BEARISH") and d1 == h4 else 0.0
+    news_points = weights["news_clear"] if market_news["impact"] != "HIGH" else 0.0
 
-    confidence = candle_points + indicator_points + volume_points
-    confidence += higher_points + news_points
+    confidence = candle_points + indicator_points + volume_points + higher_points + news_points
+    score_components = {
+        "candle_pattern": candle_points,
+        "indicators": indicator_points,
+        "volume": volume_points,
+        "higher_trend": higher_points,
+        "news_clear": news_points,
+        "weights_used": dict(weights),
+    }
 
     # --------------------------------------------------------
     # Direction selection
@@ -1356,8 +1475,12 @@ def analyze_coin(coin, market_news):
     action = "NO TRADE"
 
     if gate == "PASS":
-        levels = calculate_levels(tf4["rows"], direction, daily_levels)
-        if levels is None:
+        if daily_levels["confidence"] == "LOW":
+            gate = "BLOCK"
+            gate_reason = "Reliable Daily S/R not confirmed"
+        else:
+            levels = calculate_levels(tf4["rows"], direction, daily_levels)
+        if gate == "PASS" and levels is None:
             gate = "BLOCK"
             gate_reason = "Invalid price geometry"
         else:
@@ -1395,12 +1518,14 @@ def analyze_coin(coin, market_news):
         "volume": vol_state,
         "volume_ratio": vol_ratio,
         "atr_pct": atrp,
-        "support": (daily_levels["support"] if daily_levels else (levels["support"] if levels else support_resistance(tf4["rows"])[0])),
-        "resistance": (daily_levels["resistance"] if daily_levels else (levels["resistance"] if levels else support_resistance(tf4["rows"])[1])),
-        "support_strength": daily_levels["support_strength"] if daily_levels else 0,
-        "resistance_strength": daily_levels["resistance_strength"] if daily_levels else 0,
-        "support_touches": daily_levels["support_touches"] if daily_levels else 0,
-        "resistance_touches": daily_levels["resistance_touches"] if daily_levels else 0,
+        "support": daily_levels["support"] if daily_levels["support"] is not None else support_resistance(tf4["rows"])[0],
+        "resistance": daily_levels["resistance"] if daily_levels["resistance"] is not None else support_resistance(tf4["rows"])[1],
+        "support_score": daily_levels["support_score"],
+        "resistance_score": daily_levels["resistance_score"],
+        "support_touches": daily_levels["support_touches"],
+        "resistance_touches": daily_levels["resistance_touches"],
+        "sr_confidence": daily_levels["confidence"],
+        "sr_method": daily_levels["method"],
         "pivot": levels["pivot"] if levels else weekly_pivot(tf4["rows"]),
         "entry": levels["entry"] if levels else None,
         "sl": levels["sl"] if levels else None,
@@ -1410,6 +1535,9 @@ def analyze_coin(coin, market_news):
         "direction": direction,
         "action": action,
         "confidence": int(clamp(confidence, 0, 100)),
+        "score_components": score_components,
+        "overbought": overbought,
+        "oversold": oversold,
         "quality": quality,
         "spread": spread_pct,
         "liquidity_score": liq_score,
@@ -1499,57 +1627,41 @@ def update_weight(feature, factor, reason, evidence):
 
 
 def self_diagnostic():
-    """After every three closed signals, identify weak features."""
+    """Adapt weights only in fixed batches of newly processed closed signals."""
     rows = STORE.select(
         "atlas_signal_outcomes",
-        {
-            "select": "coin,direction,outcome,notes",
-            "status": "eq.CLOSED",
-            "limit": "300",
-            "order": "evaluated_at.desc",
-        },
+        {"select": "coin,direction,outcome,notes", "status": "eq.CLOSED",
+         "limit": "300", "order": "evaluated_at.desc"},
     )
-
-    if len(rows) < 3 or len(rows) % 3:
+    init_sqlite()
+    with sqlite_conn() as c:
+        row = c.execute("select processed_closed from self_healing_cursor where id=1").fetchone()
+        processed = int(row[0]) if row else 0
+    if len(rows) <= processed:
         return
-
-    recent = rows[:3]
+    batch_end = (len(rows) // 3) * 3
+    if batch_end <= processed:
+        return
+    recent = rows[processed:batch_end]
     losses = sum(1 for r in recent if r.get("outcome") == "SL")
     error_pct = losses / len(recent) * 100
 
-    if error_pct <= 5:
-        return
+    if error_pct > 5:
+        counts = {}
+        for r in recent:
+            text = (r.get("notes") or "").lower()
+            for token in ("rsi", "macd", "volume", "sma", "hammer", "engulfing"):
+                if token in text:
+                    counts[token] = counts.get(token, 0) + 1
+        feature = max(counts, key=counts.get) if counts else "rsi"
+        mapped = {"rsi":"rsi", "macd":"macd", "volume":"volume", "sma":"higher_trend", "hammer":"candle_pattern", "engulfing":"candle_pattern"}
+        feature = mapped.get(feature, "rsi")
+        update_weight(feature, 0.80, "خطای پیش‌بینی > 5% پس از batch جدید؛ وزن 20% کاهش یافت",
+                      {"samples": len(recent), "wins": len(recent)-losses, "losses": losses, "error_pct": error_pct})
 
-    # Simple evidence attribution from stored reason text.
-    counts = {}
-    for r in recent:
-        for token in ("RSI", "MACD", "volume", "SMA", "Hammer", "Engulfing"):
-            if token.lower() in (r.get("notes") or "").lower():
-                counts[token] = counts.get(token, 0) + 1
-
-    feature = max(counts, key=counts.get) if counts else "rsi"
-    mapped = {
-        "RSI": "rsi",
-        "MACD": "macd",
-        "volume": "volume",
-        "SMA": "higher_trend",
-        "Hammer": "candle_pattern",
-        "Engulfing": "candle_pattern",
-    }
-    feature = mapped.get(feature, "rsi")
-
-    update_weight(
-        feature,
-        0.80,
-        "خطای پیش‌بینی > 5% پس از سه سیگنال؛ وزن 20% کاهش یافت",
-        {
-            "samples": 3,
-            "wins": 3 - losses,
-            "losses": losses,
-            "error_pct": error_pct,
-            "replacement": "Stochastic",
-        },
-    )
+    with sqlite_conn() as c:
+        c.execute("insert or replace into self_healing_cursor(id,processed_closed,updated_at) values(1,?,?)",
+                  (batch_end, now_utc().isoformat()))
 
 
 # ============================================================
@@ -1829,13 +1941,7 @@ def store_signal(result):
         "volatility_warning": bool(result["warning"]),
         "reason": result["reason"],
         "leverage": result["leverage"],
-        "confidence_breakdown": {
-            "candle": 20 if result["pattern_valid"] else 0,
-            "indicators": 30 if result["macd"] != "UNKNOWN" else 0,
-            "volume": 15 if result["volume_ratio"] and result["volume_ratio"] > 1 else 0,
-            "higher_trend": 20 if result["h4_trend"] == result["d1_trend"] else 0,
-            "news_clear": 15 if result["news_impact"] != "HIGH" else 0,
-        },
+        "confidence_breakdown": result.get("score_components", {}),
         "model_version": VERSION,
     }
     STORE.insert("atlas_signals", row)
@@ -1998,33 +2104,30 @@ def split_telegram(text, max_chars=3900):
 
 
 def send_report(text):
-    """Send each report once to each configured Telegram destination.
-
-    Private chat and supergroup are treated as separate destinations.
-    If both IDs are identical, the report is sent only once.
-    """
     parts = split_telegram(text)
+
     destinations = []
-
-    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-        if chat_id and chat_id not in destinations:
-            destinations.append(chat_id)
-
-    if not destinations:
-        append_changelog("TELEGRAM", None, None, "No Telegram destination configured")
-        return len(parts), 0, ["No Telegram destination configured"]
+    if TELEGRAM_CHAT_ID:
+        destinations.append(TELEGRAM_CHAT_ID)
+    if (
+        TELEGRAM_GROUP_CHAT_ID
+        and TELEGRAM_GROUP_CHAT_ID not in destinations
+    ):
+        destinations.append(TELEGRAM_GROUP_CHAT_ID)
 
     sent = 0
     errors = []
 
-    for chat_id in destinations:
+    for destination in destinations:
         for i, part in enumerate(parts, 1):
             try:
-                telegram_send_one(chat_id, part)
+                telegram_send_one(destination, part)
                 sent += 1
                 time.sleep(0.7)
             except Exception as e:
-                errors.append(f"Telegram chat {chat_id} part {i}: {e}")
+                errors.append(
+                    f"Telegram destination {destination}, part {i}: {e}"
+                )
 
     for e in errors:
         append_changelog("TELEGRAM", None, None, e)
@@ -2062,8 +2165,9 @@ def asset_block(r):
         f"Liquidity: {r['liquidity']} ({r['liquidity_score']:.0f}/100)",
         f"ATR: {r['atr_pct']:.2f}%" if r["atr_pct"] is not None else "ATR: N/A",
         f"4H/D1 Alignment: {'✅' if r['h4_trend']==r['d1_trend'] else '⚠️'}",
-        f"Support: {fmt(r['support'])} | Daily Strength: {r.get('support_strength', 0):.0f}/100 | Touches: {r.get('support_touches', 0)}",
-        f"Resistance: {fmt(r['resistance'])} | Daily Strength: {r.get('resistance_strength', 0):.0f}/100 | Touches: {r.get('resistance_touches', 0)}",
+        f"Daily Support: {fmt(r['support'])} | Strength: {r.get('support_score', 0)}/100 | Touches: {r.get('support_touches', 0)}",
+        f"Daily Resistance: {fmt(r['resistance'])} | Strength: {r.get('resistance_score', 0)}/100 | Touches: {r.get('resistance_touches', 0)}",
+        f"Daily S/R Confidence: {r.get('sr_confidence', 'LOW')}",
         f"Weekly Pivot: {fmt(r['pivot'])}",
         f"Confidence: {r['confidence']}%",
         f"🎯 ACTION: {action_emoji(r['action'])}",
@@ -2089,90 +2193,6 @@ def asset_block(r):
     if r["spread"] > 3:
         lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
 
-    return "\n".join(lines)
-
-
-def atlas_conclusion(results):
-    """Final decision layer: identifies strong rise/fall candidates.
-
-    A candidate is only promoted when H4 and D1 agree and confidence is high.
-    Overbought/oversold conditions are explicitly downgraded rather than
-    treated as automatic buy/sell signals.
-    """
-    confirmed_buy = [
-        x for x in results
-        if x["action"] == "BUY CONFIRMATION"
-        and x["h4_trend"] == "BULLISH"
-        and x["d1_trend"] == "BULLISH"
-        and x["confidence"] >= 60
-        and x["quality"] in ("HIGH", "MEDIUM")
-    ]
-    confirmed_sell = [
-        x for x in results
-        if x["action"] == "SELL CONFIRMATION"
-        and x["h4_trend"] == "BEARISH"
-        and x["d1_trend"] == "BEARISH"
-        and x["confidence"] >= 60
-        and x["quality"] in ("HIGH", "MEDIUM")
-    ]
-
-    rise_watch = [
-        x for x in results
-        if x["h4_trend"] == "BULLISH"
-        and x["d1_trend"] == "BULLISH"
-        and x["confidence"] >= 60
-        and x["action"] != "BUY CONFIRMATION"
-    ]
-    fall_watch = [
-        x for x in results
-        if x["h4_trend"] == "BEARISH"
-        and x["d1_trend"] == "BEARISH"
-        and x["confidence"] >= 60
-        and x["action"] != "SELL CONFIRMATION"
-    ]
-
-    lines = ["━━━━━━━━━━━━━━━━━━", "🎯 ATLAS FINAL CONCLUSION"]
-
-    if confirmed_buy:
-        lines.append("🟢 BUY / ACCUMULATE — تأییدشده:")
-        for x in sorted(confirmed_buy, key=lambda z: z["confidence"], reverse=True)[:5]:
-            lines.append(f"• {x['coin']} | Confidence {x['confidence']}% | BUY CONFIRMATION")
-    else:
-        lines.append("🟢 BUY: فعلاً هیچ ارز با تأیید کامل ATLAS برای خرید وجود ندارد.")
-
-    if confirmed_sell:
-        lines.append("🔴 SELL / REDUCE — تأییدشده:")
-        for x in sorted(confirmed_sell, key=lambda z: z["confidence"], reverse=True)[:5]:
-            lines.append(f"• {x['coin']} | Confidence {x['confidence']}% | SELL CONFIRMATION")
-    else:
-        lines.append("🔴 SELL: فعلاً هیچ ارز با تأیید کامل ATLAS برای فروش وجود ندارد.")
-
-    if rise_watch:
-        lines.append("📈 مستعد صعود / تحت نظر:")
-        for x in sorted(rise_watch, key=lambda z: z["confidence"], reverse=True)[:5]:
-            rsi = x.get("rsi")
-            tag = "⚠️ RSI بالا" if rsi is not None and rsi >= 75 else "✅"
-            lines.append(f"• {x['coin']} | {x['confidence']}% | {tag}")
-    else:
-        lines.append("📈 مستعد صعود: کاندید معتبر کافی وجود ندارد.")
-
-    if fall_watch:
-        lines.append("📉 مستعد ریزش / تحت نظر:")
-        for x in sorted(fall_watch, key=lambda z: z["confidence"], reverse=True)[:5]:
-            rsi = x.get("rsi")
-            tag = "⚠️ oversold" if rsi is not None and rsi <= 30 else "⚠️"
-            lines.append(f"• {x['coin']} | {x['confidence']}% | {tag}")
-    else:
-        lines.append("📉 مستعد ریزش: کاندید معتبر کافی وجود ندارد.")
-
-    lines += [
-        "",
-        "🛑 تصمیم ATLAS:",
-        "خرید فقط از بخش BUY / ACCUMULATE تأییدشده؛",
-        "فروش/کاهش فقط از بخش SELL / REDUCE تأییدشده.",
-        "صرفاً صعودی یا نزولی بودن یک ارز به‌تنهایی مجوز معامله نیست.",
-        "در صورت تعارض H4/D1، حجم ضعیف یا داده ناقص → NO TRADE.",
-    ]
     return "\n".join(lines)
 
 
@@ -2262,6 +2282,21 @@ def market_summary(results, macro, news):
     return "\n".join(lines)
 
 
+def atlas_conclusion(results):
+    """Final decision layer: only confirmed multi-timeframe setups are actionable."""
+    buys = [x for x in results if x.get("action") == "BUY CONFIRMATION" and x.get("confidence", 0) >= 60 and x.get("h4_trend") == "BULLISH" and x.get("d1_trend") == "BULLISH"]
+    sells = [x for x in results if x.get("action") == "SELL CONFIRMATION" and x.get("confidence", 0) >= 60 and x.get("h4_trend") == "BEARISH" and x.get("d1_trend") == "BEARISH"]
+    rise = [x for x in results if x.get("h4_trend") == "BULLISH" and x.get("d1_trend") == "BULLISH" and x.get("confidence",0) >= 60 and x.get("action") != "BUY CONFIRMATION"]
+    fall = [x for x in results if x.get("h4_trend") == "BEARISH" and x.get("d1_trend") == "BEARISH" and x.get("confidence",0) >= 60 and x.get("action") != "SELL CONFIRMATION"]
+    lines=["━━━━━━━━━━━━━━━━━━","🎯 ATLAS FINAL CONCLUSION"]
+    lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(x["coin"] for x in sorted(buys,key=lambda z:z["confidence"],reverse=True)[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
+    lines.append("🔴 SELL / REDUCE: " + (", ".join(x["coin"] for x in sorted(sells,key=lambda z:z["confidence"],reverse=True)[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
+    lines.append("📈 RISE WATCH: " + (", ".join(x["coin"] for x in sorted(rise,key=lambda z:z["confidence"],reverse=True)[:5]) if rise else "ندارد"))
+    lines.append("📉 FALL WATCH: " + (", ".join(x["coin"] for x in sorted(fall,key=lambda z:z["confidence"],reverse=True)[:5]) if fall else "ندارد"))
+    lines.append("⛔ نتیجه فقط بر اساس شروط ATLAS است؛ در نبود تأیید کامل، اقدام = HOLD/WAIT.")
+    return "\n".join(lines)
+
+
 def build_report(results, top10, dynamic30, macro, news):
     # Most useful assets first, but the complete radar is still retained.
     results.sort(
@@ -2309,7 +2344,7 @@ def build_report(results, top10, dynamic30, macro, news):
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v8.1 SELF-HEALING: ACTIVE",
+        "🎯 ATLAS v8.2 SELF-HEALING: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -2370,7 +2405,7 @@ def save_run(results, parts, macro, news):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v8.1 self-healing run",
+            "notes": "v8.2 self-healing run",
         },
     )
 
@@ -2381,47 +2416,33 @@ def save_run(results, parts, macro, news):
 
 def report():
     init_sqlite()
-
-    # Evaluate previous signals before producing new ones.
     evaluate_open_outcomes()
-    self_diagnostic()
-
     universe, top10, dynamic30 = build_universe()
+
+    # Governance: backtest MUST pass before self-healing can change weights.
+    backtest_ok, bt = mandatory_backtest_gate(universe)
+    if backtest_ok:
+        self_diagnostic()
+    else:
+        append_changelog("SELF_HEALING", None, None,
+                         "Model adaptation frozen because mandatory backtest gate failed", bt)
+
+    weights = get_weights()
     news = news_feed()
     macro = macro_snapshot()
-
     results = []
     unavailable = 0
-
     for coin in universe:
         try:
-            r = analyze_coin(coin, news)
+            r = analyze_coin(coin, news, weights)
             if r:
                 results.append(r)
         except Exception as e:
             unavailable += 1
-            append_changelog(
-                "ASSET_ERROR",
-                None,
-                None,
-                f"{coin}: {e}",
-            )
+            append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}")
         time.sleep(0.08)
-
-    # Mandatory backtest is run before any future model adaptation.
-    backtest_ok, bt = mandatory_backtest_gate(universe)
-    if not backtest_ok:
-        append_changelog(
-            "SELF_HEALING",
-            None,
-            None,
-            "Model adaptation frozen because mandatory backtest gate failed",
-            bt,
-        )
-
     for r in results:
         store_signal(r)
-
     text = build_report(results, top10, dynamic30, macro, news)
     return text, results, macro, news, unavailable
 
