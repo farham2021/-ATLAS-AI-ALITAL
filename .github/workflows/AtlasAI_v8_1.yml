@@ -6,9 +6,9 @@ on:
   schedule:
     - cron: "0 */4 * * *"
 
-  push:
-    branches:
-      - main
+concurrency:
+  group: atlas-v8-1
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -73,6 +73,7 @@ jobs:
       # =========================================================
       - name: Run ATLAS v8.1 Market Supervisor
         env:
+
           # -----------------------------------------------------
           # Telegram
           # -----------------------------------------------------
