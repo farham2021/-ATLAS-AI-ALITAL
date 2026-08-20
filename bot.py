@@ -1,5 +1,5 @@
 # ============================================================
-# ATLAS AI v8.1 — SELF-HEALING MARKET SUPERVISOR
+# ATLAS AI v8.3 — SELF-HEALING MARKET SUPERVISOR
 # ============================================================
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
@@ -37,6 +37,7 @@ import sqlite3
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
+import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from statistics import mean, median
@@ -48,7 +49,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v8.2"
+VERSION = "ATLAS v8.3"
 TIMEFRAMES = ("1h", "4h", "1d")
 SIGNAL_TIMEFRAME = "4h"
 TEHRAN = ZoneInfo("Asia/Tehran")
@@ -85,7 +86,7 @@ MIN_BACKTEST_IMPROVEMENT = float(
     os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10")
 )
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v82.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v83.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -176,13 +177,35 @@ def shamsi(dt):
     return f"{jy:04d}/{jm:02d}/{jd:02d}"
 
 
-def f(x):
+def safe_float(x, default=None):
     try:
-        if x is None:
-            return None
-        return float(x)
-    except Exception:
-        return None
+        if x is None or isinstance(x, bool):
+            return default
+        v = float(x)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def f(x):
+    return safe_float(x)
+
+
+def safe_mean(values, default=None):
+    vals = [safe_float(v) for v in (values or [])]
+    vals = [v for v in vals if v is not None]
+    return (sum(vals) / len(vals)) if vals else default
+
+
+def safe_median(values, default=None):
+    vals = [safe_float(v) for v in (values or [])]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return default
+    vals.sort()
+    n = len(vals)
+    mid = n // 2
+    return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2
 
 
 def fmt(x):
@@ -212,7 +235,7 @@ def is_stable(symbol):
 
 def safe_json(value):
     try:
-        return json.dumps(value, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
         return "{}"
 
@@ -236,7 +259,11 @@ def http_get(url, timeout=15, headers=None):
 def safe_http_get(url, timeout=15, headers=None, default=None):
     try:
         return http_get(url, timeout, headers)
-    except Exception:
+    except ET.ParseError as e:
+        append_changelog("HTTP_XML", None, None, f"XML parse failed: {url}: {e}")
+        return default
+    except Exception as e:
+        append_changelog("HTTP", None, None, f"request failed: {url}: {e}")
         return default
 
 
@@ -245,8 +272,10 @@ def safe_http_get(url, timeout=15, headers=None, default=None):
 # ============================================================
 
 def sqlite_conn():
-    c = sqlite3.connect(DB_FILE)
+    c = sqlite3.connect(DB_FILE, timeout=30)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA busy_timeout=30000")
+    c.execute("PRAGMA journal_mode=WAL")
     return c
 
 
@@ -281,6 +310,14 @@ def init_sqlite():
             id integer primary key check(id=1),
             processed_closed integer not null default 0,
             updated_at text
+        );
+        create table if not exists self_healing_processed(
+            signal_id integer primary key,
+            processed_at text not null
+        );
+        create table if not exists telegram_sent_reports(
+            report_hash text primary key,
+            sent_at text not null
         );
         create table if not exists backtests(
             id integer primary key autoincrement,
@@ -327,16 +364,19 @@ class SupabaseStore:
             url = f"{SUPABASE_URL}/rest/v1/{table}"
             req = urllib.request.Request(
                 url,
-                data=json.dumps(row, ensure_ascii=False).encode(),
+                data=safe_json(row).encode(),
                 headers=self.headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=15):
                 return True
         except Exception as e:
-            append_changelog(
-                "SUPABASE", None, None, f"insert failed: {table}: {e}"
-            )
+            if table != "atlas_changelog":
+                try:
+                    with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
+                        fh.write(f"{now_utc().isoformat()} | SUPABASE | insert failed: {table}: {e}\n")
+                except Exception:
+                    pass
             return False
 
     def update(self, table, match, row):
@@ -347,16 +387,19 @@ class SupabaseStore:
             url = f"{SUPABASE_URL}/rest/v1/{table}?{q}"
             req = urllib.request.Request(
                 url,
-                data=json.dumps(row, ensure_ascii=False).encode(),
+                data=safe_json(row).encode(),
                 headers=self.headers,
                 method="PATCH",
             )
             with urllib.request.urlopen(req, timeout=15):
                 return True
         except Exception as e:
-            append_changelog(
-                "SUPABASE", None, None, f"update failed: {table}: {e}"
-            )
+            if table != "atlas_changelog":
+                try:
+                    with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
+                        fh.write(f"{now_utc().isoformat()} | SUPABASE | update failed: {table}: {e}\n")
+                except Exception:
+                    pass
             return False
 
     def select(self, table, params=None):
@@ -415,15 +458,25 @@ def make_exchange(exchange_id):
     })
 
 
-EX = {}
-MARKETS = {}
+def init_exchanges():
+    global EX, MARKETS
+    EX = {}
+    MARKETS = {}
+    for eid in ("binance", "xt", "lbank"):
+        try:
+            ex = make_exchange(eid)
+            markets = ex.load_markets()
+            if not markets:
+                raise RuntimeError(f"{eid}: empty market catalog")
+            EX[eid] = ex
+            MARKETS[eid] = markets
+        except Exception as e:
+            EX.pop(eid, None)
+            MARKETS.pop(eid, None)
+            append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
 
-for eid in ("binance", "xt", "lbank"):
-    try:
-        EX[eid] = make_exchange(eid)
-        MARKETS[eid] = EX[eid].load_markets()
-    except Exception:
-        MARKETS[eid] = {}
+
+init_exchanges()
 
 
 def symbol_for(eid, coin):
@@ -435,7 +488,9 @@ def symbol_for(eid, coin):
 
 
 def exchange_ticker(eid, coin):
-    ex = EX[eid]
+    ex = EX.get(eid)
+    if ex is None:
+        raise RuntimeError(f"{eid}: exchange unavailable")
     sym = symbol_for(eid, coin)
     if not sym:
         raise RuntimeError(f"{eid}: pair unavailable")
@@ -449,7 +504,9 @@ def exchange_ticker(eid, coin):
 
 
 def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
-    ex = EX[eid]
+    ex = EX.get(eid)
+    if ex is None:
+        raise RuntimeError(f"{eid}: exchange unavailable")
     sym = symbol_for(eid, coin)
     if not sym:
         raise RuntimeError(f"{eid}: pair unavailable")
@@ -704,180 +761,83 @@ def _cluster_levels(values, tolerance=0.012):
 
 
 def daily_key_levels(daily_rows, current_price=None):
-    """High-confidence Daily support/resistance engine.
+    """Reliable Daily-only support/resistance; never silently falls back to H4."""
+    valid = []
+    for r in (daily_rows or []):
+        if not isinstance(r, (list, tuple)) or len(r) < 6:
+            continue
+        vals = [f(r[i]) for i in (0,1,2,3,4,5)]
+        if all(v is not None for v in vals[:5]):
+            valid.append([int(vals[0]), vals[1], vals[2], vals[3], vals[4], vals[5] or 0.0])
+    if len(valid) < 60:
+        return {"support":None,"resistance":None,"support_score":0,"resistance_score":0,
+                "support_touches":0,"resistance_touches":0,"confidence":"LOW","method":"INSUFFICIENT_DAILY_DATA"}
 
-    Uses completed Daily candles only. A level earns strength from:
-      - repeated Daily swing touches,
-      - recency,
-      - rejection/close evidence,
-      - volume confirmation when available,
-      - weekly range context.
+    rows = valid[-180:]
+    price = f(current_price) or f(rows[-1][4])
+    if price is None or price <= 0:
+        return {"support":None,"resistance":None,"support_score":0,"resistance_score":0,
+                "support_touches":0,"resistance_touches":0,"confidence":"LOW","method":"INVALID_DAILY_PRICE"}
 
-    Only support below price and resistance above price are returned.
-    If Daily data is insufficient, confidence is explicitly LOW.
-    """
-    if not daily_rows or len(daily_rows) < 60:
-        return {
-            "support": None, "resistance": None,
-            "support_score": 0, "resistance_score": 0,
-            "support_touches": 0, "resistance_touches": 0,
-            "confidence": "LOW", "method": "INSUFFICIENT_DAILY_DATA",
-        }
+    highs=[r[2] for r in rows]; lows=[r[3] for r in rows]; vols=[r[5] for r in rows]
+    atr_d=atr(rows,14)
+    if atr_d is None or atr_d <= 0:
+        return {"support":None,"resistance":None,"support_score":0,"resistance_score":0,
+                "support_touches":0,"resistance_touches":0,"confidence":"LOW","method":"INVALID_DAILY_ATR"}
 
-    rows = daily_rows[-180:]
-    price = f(current_price) if current_price is not None else f(rows[-1][4])
-    if price is None:
-        price = f(rows[-1][4])
+    swing_highs=[]; swing_lows=[]
+    for i in range(2,len(rows)-2):
+        h,l=highs[i],lows[i]
+        if h is not None and h >= max(highs[i-2:i]) and h >= max(highs[i+1:i+3]): swing_highs.append(h)
+        if l is not None and l <= min(lows[i-2:i]) and l <= min(lows[i+1:i+3]): swing_lows.append(l)
+    for n in (20,60,120):
+        chunk=rows[-n:]
+        swing_highs.append(max(r[2] for r in chunk))
+        swing_lows.append(min(r[3] for r in chunk))
 
-    highs = [f(r[2]) for r in rows]
-    lows = [f(r[3]) for r in rows]
-    closes_ = [f(r[4]) for r in rows]
-    vols = [f(r[5]) for r in rows]
-    atr_d = atr(rows, 14)
-    if not atr_d or not price:
-        return {
-            "support": None, "resistance": None,
-            "support_score": 0, "resistance_score": 0,
-            "support_touches": 0, "resistance_touches": 0,
-            "confidence": "LOW", "method": "INVALID_DAILY_DATA",
-        }
+    sup_clusters=_cluster_levels([x for x in swing_lows if x < price],0.015)
+    res_clusters=_cluster_levels([x for x in swing_highs if x > price],0.015)
+    valid_vols=[v for v in vols[-21:-1] if v is not None and v>0]
+    avg_vol=safe_mean(valid_vols) if len(valid_vols)>=10 else None
 
-    # Local Daily swing points: strict 2-bar pivots on both sides.
-    swing_highs, swing_lows = [], []
-    for i in range(2, len(rows) - 2):
-        h = highs[i]
-        l = lows[i]
-        if h is not None and h >= max(highs[i-2:i]) and h >= max(highs[i+1:i+3]):
-            swing_highs.append(h)
-        if l is not None and l <= min(lows[i-2:i]) and l <= min(lows[i+1:i+3]):
-            swing_lows.append(l)
-
-    # Add recent 20/60/120-day extrema as structural candidates.
-    for n in (20, 60, 120):
-        chunk = rows[-n:]
-        swing_highs.append(max(f(r[2]) for r in chunk))
-        swing_lows.append(min(f(r[3]) for r in chunk))
-
-    sup_candidates = [x for x in swing_lows if x < price]
-    res_candidates = [x for x in swing_highs if x > price]
-    sup_clusters = _cluster_levels(sup_candidates, tolerance=0.015)
-    res_clusters = _cluster_levels(res_candidates, tolerance=0.015)
-
-    avg_vol = None
-    valid_vols = [v for v in vols[-21:-1] if v is not None and v > 0]
-    if len(valid_vols) >= 10:
-        avg_vol = sum(valid_vols) / len(valid_vols)
-
-    def score_zone(zone, side):
-        level = zone["level"]
-        touches = zone["touches"]
-        score = 35 + min(25, (touches - 1) * 8)
-
-        # Recency: nearest candidate in the cluster gets a modest bonus.
-        distances = []
-        for i, r in enumerate(rows):
-            hi, lo, cl = f(r[2]), f(r[3]), f(r[4])
-            hit = hi >= level >= lo if hi is not None and lo is not None else False
-            if hit:
-                distances.append(len(rows) - 1 - i)
+    def score_zone(zone,side):
+        level=zone["level"]; touches=zone["touches"]; score=35+min(25,(touches-1)*8)
+        distances=[]; rejection=0; vol_hits=0
+        for i,r in enumerate(rows):
+            o,h,l,c,v=r[1],r[2],r[3],r[4],r[5]
+            if None in (h,l,c): continue
+            if h >= level >= l: distances.append(len(rows)-1-i)
+            body=max(abs(c-o),1e-12) if o is not None else 1e-12
+            rng=max(h-l,1e-12)
+            if side=="support" and l<=level*1.006 and c>level and (c-l)/rng>0.55: rejection+=1
+            if side=="resistance" and h>=level*0.994 and c<level and (h-c)/rng>0.55: rejection+=1
+            if avg_vol and v is not None and v>=avg_vol*1.2:
+                if side=="support" and l<=level*1.006 and c>level: vol_hits+=1
+                if side=="resistance" and h>=level*0.994 and c<level: vol_hits+=1
         if distances:
-            recency = min(distances)
-            score += max(0, 15 - recency * 0.35)
+            score += max(0,15-min(distances)*0.35)
+        dist_pct=abs(level-price)/price*100; atrp=atr_d/price*100
+        if dist_pct<=max(atrp*4,8): score+=10
+        elif dist_pct<=max(atrp*8,15): score+=5
+        score += min(15,rejection*3)+min(10,vol_hits*2)
+        return int(clamp(round(score),0,100))
 
-        # ATR-normalized proximity: useful levels should not be absurdly far.
-        dist_pct = abs(level - price) / price * 100
-        atrp = atr_d / price * 100
-        if dist_pct <= max(atrp * 4, 8):
-            score += 10
-        elif dist_pct <= max(atrp * 8, 15):
-            score += 5
+    def best(clusters,side):
+        ranked=[(score_zone(z,side),z) for z in clusters]
+        if not ranked:return None
+        ranked.sort(key=lambda q:(q[0],-abs(q[1]["level"]-price)/price),reverse=True)
+        score,z=ranked[0]
+        return {"level":z["level"],"score":score,"touches":z["touches"]}
 
-        # Rejection evidence around the level.
-        rejection = 0
-        for r in rows[-90:]:
-            o, h, l, c = map(f, (r[1], r[2], r[3], r[4]))
-            if None in (o, h, l, c):
-                continue
-            body = abs(c - o)
-            rng = max(h - l, 1e-12)
-            if side == "support" and l <= level * 1.006 and c > level and (c-l) / rng > 0.55:
-                rejection += 1
-            if side == "resistance" and h >= level * 0.994 and c < level and (h-c) / rng > 0.55:
-                rejection += 1
-        score += min(15, rejection * 3)
-
-        # Volume confirmation is a bonus, never a standalone reason.
-        if avg_vol:
-            vol_hits = 0
-            for r in rows[-90:]:
-                o, h, l, c, v = f(r[1]), f(r[2]), f(r[3]), f(r[4]), f(r[5])
-                if None in (o, h, l, c, v):
-                    continue
-                if v < avg_vol * 1.20:
-                    continue
-                if side == "support" and l <= level * 1.006 and c > level:
-                    vol_hits += 1
-                if side == "resistance" and h >= level * 0.994 and c < level:
-                    vol_hits += 1
-            score += min(10, vol_hits * 2)
-
-        return int(clamp(round(score), 0, 100))
-
-    def best(zones, side):
-        ranked = []
-        for z in zones:
-            score = score_zone(z, side)
-            ranked.append((score, z))
-        if not ranked:
-            return None
-        # Prefer strong levels; among similar scores prefer the nearer one.
-        ranked.sort(key=lambda item: (
-            item[0],
-            -abs(item[1]["level"] - price) / price,
-        ), reverse=True)
-        score, z = ranked[0]
-        return {
-            "level": z["level"],
-            "score": score,
-            "touches": z["touches"],
-        }
-
-    sup = best(sup_clusters, "support")
-    res = best(res_clusters, "resistance")
-
-    # Never report a level as reliable unless it has meaningful structure.
-    if sup and sup["score"] < 55:
-        sup = None
-    if res and res["score"] < 55:
-        res = None
-
-    min_score = min(
-        sup["score"] if sup else 0,
-        res["score"] if res else 0,
-    )
-    confidence = "HIGH" if min_score >= 80 else "MEDIUM" if min_score >= 65 else "LOW"
-
-    return {
-        "support": sup["level"] if sup else None,
-        "resistance": res["level"] if res else None,
-        "support_score": sup["score"] if sup else 0,
-        "resistance_score": res["score"] if res else 0,
-        "support_touches": sup["touches"] if sup else 0,
-        "resistance_touches": res["touches"] if res else 0,
-        "confidence": confidence,
-        "method": "DAILY_SWINGS_CLUSTER_REJECTION_VOLUME",
-    }
-
-
-def weekly_pivot(rows):
-    # Use the latest completed 7-day window from available 4H candles.
-    if len(rows) < 42:
-        return None
-    recent = rows[-42:]
-    h = max(f(x[2]) for x in recent)
-    l = min(f(x[3]) for x in recent)
-    c = f(recent[-1][4])
-    return (h + l + c) / 3
+    sup=best(sup_clusters,"support"); res=best(res_clusters,"resistance")
+    if sup and sup["score"]<55:sup=None
+    if res and res["score"]<55:res=None
+    min_score=min(sup["score"] if sup else 0,res["score"] if res else 0)
+    confidence="HIGH" if min_score>=80 else "MEDIUM" if min_score>=65 else "LOW"
+    return {"support":sup["level"] if sup else None,"resistance":res["level"] if res else None,
+            "support_score":sup["score"] if sup else 0,"resistance_score":res["score"] if res else 0,
+            "support_touches":sup["touches"] if sup else 0,"resistance_touches":res["touches"] if res else 0,
+            "confidence":confidence,"method":"DAILY_SWING_CLUSTER_REJECTION_VOLUME"}
 
 
 # ============================================================
@@ -928,14 +888,15 @@ def candle_pattern(rows):
 # ============================================================
 
 def local_extrema(values, window=3):
-    lows, highs = [], []
-    for i in range(window, len(values) - window):
-        chunk = values[i - window:i + window + 1]
-        if values[i] == min(chunk):
-            lows.append(i)
-        if values[i] == max(chunk):
-            highs.append(i)
-    return lows, highs
+    vals=[safe_float(v) for v in (values or [])]
+    lows,highs=[],[]
+    for i in range(window,len(vals)-window):
+        if vals[i] is None: continue
+        chunk=[v for v in vals[i-window:i+window+1] if v is not None]
+        if len(chunk)<window+1: continue
+        if vals[i]==min(chunk): lows.append(i)
+        if vals[i]==max(chunk): highs.append(i)
+    return lows,highs
 
 
 def divergence_3_level(values, indicator):
@@ -1006,18 +967,17 @@ def tf_snapshot(coin):
 
 def momentum_30m(coin):
     try:
-        rows, _ = best_ohlcv(coin, "30m", 40)
-        c = closes(rows)
-        if len(c) < 6:
-            return "UNKNOWN", False
-        short = (c[-1] / c[-4] - 1) * 100
-        if short > 0.20:
-            return "BULLISH", False
-        if short < -0.20:
-            return "BEARISH", False
-        return "NEUTRAL", False
-    except Exception:
-        return "UNKNOWN", False
+        rows,_=best_ohlcv(coin,"30m",60)
+        rows=strip_incomplete(rows,"30m")
+        c=[x for x in closes(rows) if x is not None]
+        if len(c)<6:return "UNKNOWN",False
+        short=(c[-1]/c[-4]-1)*100
+        if short>0.20:return "BULLISH",False
+        if short<-0.20:return "BEARISH",False
+        return "NEUTRAL",False
+    except Exception as e:
+        append_changelog("MOMENTUM_30M",None,None,f"{coin}: {e}")
+        return "UNKNOWN",False
 
 
 # ============================================================
@@ -1103,30 +1063,27 @@ def news_feed():
 # ============================================================
 
 def yahoo_chart(symbol, interval="1h", range_="5d"):
-    url = (
-        "https://query1.finance.yahoo.com/v8/finance/chart/"
-        + urllib.parse.quote(symbol)
-        + "?"
-        + urllib.parse.urlencode({
-            "interval": interval,
-            "range": range_,
-            "events": "history",
-        })
-    )
-    d = http_get(url)
-    result = d["chart"]["result"][0]
-    quote = result["indicators"]["quote"][0]
-    timestamps = result.get("timestamp", [])
-    rows = []
-    for i, ts in enumerate(timestamps):
-        o = f(quote["open"][i])
-        h = f(quote["high"][i])
-        l = f(quote["low"][i])
-        c = f(quote["close"][i])
-        v = f(quote.get("volume", [None] * len(timestamps))[i])
-        if None not in (o, h, l, c):
-            rows.append([ts * 1000, o, h, l, c, v or 0])
-    return rows
+    url=("https://query1.finance.yahoo.com/v8/finance/chart/"+urllib.parse.quote(symbol)+"?"+urllib.parse.urlencode({"interval":interval,"range":range_,"events":"history"}))
+    d=safe_http_get(url,timeout=15,default={})
+    if not isinstance(d,dict): return []
+    chart=d.get("chart")
+    if not isinstance(chart,dict): return []
+    results=chart.get("result")
+    if not isinstance(results,list) or not results: return []
+    result=results[0] or {}
+    indicators=result.get("indicators") or {}
+    quotes=indicators.get("quote") or []
+    if not quotes or not isinstance(quotes[0],dict): return []
+    quote=quotes[0]; timestamps=result.get("timestamp") or []
+    rows=[]
+    for i,ts in enumerate(timestamps):
+        try:
+            o=f((quote.get("open") or [None]*len(timestamps))[i]); h=f((quote.get("high") or [None]*len(timestamps))[i])
+            l=f((quote.get("low") or [None]*len(timestamps))[i]); c=f((quote.get("close") or [None]*len(timestamps))[i])
+            v=f((quote.get("volume") or [None]*len(timestamps))[i])
+            if None not in (o,h,l,c): rows.append([int(ts)*1000,o,h,l,c,v or 0.0])
+        except (IndexError,TypeError,ValueError): continue
+    return strip_incomplete(rows,interval)
 
 
 def macro_snapshot():
@@ -1167,7 +1124,7 @@ def asset_liquidity(coin, ticker_sources):
 def market_liquidity_index(results):
     scores = [f(x.get("liquidity_score")) for x in results]
     scores = [x for x in scores if x is not None]
-    return round(mean(scores), 1) if scores else 0.0
+    return round(safe_mean(scores, 0.0), 1)
 
 
 # ============================================================
@@ -1215,7 +1172,7 @@ def price_consensus(coin):
     if not vals:
         raise RuntimeError("NO PRICE DATA")
 
-    med = median(vals)
+    med = safe_median(vals)
     spreads = [abs(x - med) / med * 100 for x in vals if med]
     sp = max(spreads) if spreads else 0
 
@@ -1293,13 +1250,11 @@ def strong_divergence(rows):
 
 
 def calculate_levels(rows, direction, daily_levels=None):
-    price = f(rows[-1][4])
+    price = f(rows[-1][4]) if rows else None
     sup = daily_levels.get("support") if daily_levels else None
     res = daily_levels.get("resistance") if daily_levels else None
     if sup is None or res is None:
-        fallback_sup, fallback_res = support_resistance(rows)
-        sup = sup if sup is not None else fallback_sup
-        res = res if res is not None else fallback_res
+        return None
     pivot = weekly_pivot(rows)
     a = atr(rows)
 
@@ -1480,12 +1435,12 @@ def analyze_coin(coin, market_news, weights):
             gate_reason = "Reliable Daily S/R not confirmed"
         else:
             levels = calculate_levels(tf4["rows"], direction, daily_levels)
-        if gate == "PASS" and levels is None:
-            gate = "BLOCK"
-            gate_reason = "Invalid price geometry"
-        else:
-            leverage = suggested_leverage(atrp)
-            action = "BUY CONFIRMATION" if direction == "LONG" else "SELL CONFIRMATION"
+            if levels is None:
+                gate = "BLOCK"
+                gate_reason = "Invalid price geometry"
+            else:
+                leverage = suggested_leverage(atrp)
+                action = "BUY CONFIRMATION" if direction == "LONG" else "SELL CONFIRMATION"
 
     reason_parts = []
     if pattern_valid := candle_valid:
@@ -1518,8 +1473,8 @@ def analyze_coin(coin, market_news, weights):
         "volume": vol_state,
         "volume_ratio": vol_ratio,
         "atr_pct": atrp,
-        "support": daily_levels["support"] if daily_levels["support"] is not None else support_resistance(tf4["rows"])[0],
-        "resistance": daily_levels["resistance"] if daily_levels["resistance"] is not None else support_resistance(tf4["rows"])[1],
+        "support": daily_levels["support"],
+        "resistance": daily_levels["resistance"],
         "support_score": daily_levels["support_score"],
         "resistance_score": daily_levels["resistance_score"],
         "support_touches": daily_levels["support_touches"],
@@ -1570,98 +1525,82 @@ DEFAULT_WEIGHTS = {
 
 def get_weights():
     weights = DEFAULT_WEIGHTS.copy()
-
+    # Carry the latest learned weights forward across v8.x versions.
     rows = STORE.select(
         "atlas_model_weights",
-        {"select": "feature,weight", "model_version": f"eq.{VERSION}"},
+        {"select": "feature,weight,model_version,updated_at", "order": "updated_at.desc", "limit": "200"},
     )
+    seen=set()
     for r in rows:
-        if r.get("feature") in weights:
-            weights[r["feature"]] = f(r.get("weight")) or weights[r["feature"]]
-
+        feature=r.get("feature")
+        w=f(r.get("weight"))
+        if feature in weights and feature not in seen and w is not None:
+            weights[feature]=clamp(w,5,30); seen.add(feature)
     init_sqlite()
     with sqlite_conn() as c:
-        for feature, weight in weights.items():
-            c.execute(
-                """
-                insert or ignore into model_weights
-                (feature,weight,baseline_weight,updated_at)
-                values(?,?,?,?)
-                """,
-                (feature, weight, DEFAULT_WEIGHTS[feature], now_utc().isoformat()),
-            )
+        local=c.execute("select feature,weight from model_weights").fetchall()
+        for r in local:
+            if r["feature"] in weights and r["feature"] not in seen and f(r["weight"]) is not None:
+                weights[r["feature"]]=clamp(f(r["weight"]),5,30)
+        for feature,weight in weights.items():
+            c.execute("insert or ignore into model_weights(feature,weight,baseline_weight,updated_at) values(?,?,?,?)",
+                      (feature,weight,DEFAULT_WEIGHTS[feature],now_utc().isoformat()))
     return weights
 
 
 def update_weight(feature, factor, reason, evidence):
-    old = DEFAULT_WEIGHTS.get(feature, 15.0)
-    rows = STORE.select(
-        "atlas_model_weights",
-        {
-            "select": "weight",
-            "feature": f"eq.{feature}",
-            "model_version": f"eq.{VERSION}",
-            "limit": "1",
-        },
-    )
+    if feature not in DEFAULT_WEIGHTS:
+        return
+    evidence=evidence or {}
+    old=DEFAULT_WEIGHTS.get(feature,15.0)
+    rows=STORE.select("atlas_model_weights", {"select":"feature,weight,updated_at","feature":f"eq.{feature}","order":"updated_at.desc","limit":"1"})
     if rows:
-        old = f(rows[0].get("weight")) or old
-
-    new = clamp(old * factor, 5, 30)
-
-    append_changelog(feature, old, new, reason, evidence)
-    STORE.insert(
-        "atlas_model_weights",
-        {
-            "model_version": VERSION,
-            "feature": feature,
-            "weight": new,
-            "baseline_weight": DEFAULT_WEIGHTS.get(feature, old),
-            "samples": evidence.get("samples", 0),
-            "wins": evidence.get("wins", 0),
-            "losses": evidence.get("losses", 0),
-            "reason": reason,
-            "updated_at": now_utc().isoformat(),
-        },
-    )
+        old=f(rows[0].get("weight")) or old
+    else:
+        init_sqlite()
+        with sqlite_conn() as c:
+            r=c.execute("select weight from model_weights where feature=?",(feature,)).fetchone()
+            if r and f(r[0]) is not None: old=f(r[0])
+    new=clamp(old*factor,5,30)
+    payload={"model_version":VERSION,"feature":feature,"weight":new,"baseline_weight":DEFAULT_WEIGHTS[feature],"samples":evidence.get("samples",0),"wins":evidence.get("wins",0),"losses":evidence.get("losses",0),"reason":reason,"updated_at":now_utc().isoformat()}
+    STORE.insert("atlas_model_weights",payload)
+    init_sqlite()
+    with sqlite_conn() as c:
+        c.execute("insert into model_weights(feature,weight,baseline_weight,samples,wins,losses,updated_at,reason) values(?,?,?,?,?,?,?,?) on conflict(feature) do update set weight=excluded.weight,samples=excluded.samples,wins=excluded.wins,losses=excluded.losses,updated_at=excluded.updated_at,reason=excluded.reason",
+                  (feature,new,DEFAULT_WEIGHTS[feature],evidence.get("samples",0),evidence.get("wins",0),evidence.get("losses",0),payload["updated_at"],reason))
+    append_changelog(feature,old,new,reason,evidence)
 
 
 def self_diagnostic():
-    """Adapt weights only in fixed batches of newly processed closed signals."""
-    rows = STORE.select(
-        "atlas_signal_outcomes",
-        {"select": "coin,direction,outcome,notes", "status": "eq.CLOSED",
-         "limit": "300", "order": "evaluated_at.desc"},
-    )
+    """Adapt weights only after the backtest gate, using durable local signal IDs."""
     init_sqlite()
     with sqlite_conn() as c:
-        row = c.execute("select processed_closed from self_healing_cursor where id=1").fetchone()
-        processed = int(row[0]) if row else 0
-    if len(rows) <= processed:
-        return
-    batch_end = (len(rows) // 3) * 3
-    if batch_end <= processed:
-        return
-    recent = rows[processed:batch_end]
-    losses = sum(1 for r in recent if r.get("outcome") == "SL")
-    error_pct = losses / len(recent) * 100
-
-    if error_pct > 5:
-        counts = {}
-        for r in recent:
-            text = (r.get("notes") or "").lower()
-            for token in ("rsi", "macd", "volume", "sma", "hammer", "engulfing"):
-                if token in text:
-                    counts[token] = counts.get(token, 0) + 1
-        feature = max(counts, key=counts.get) if counts else "rsi"
-        mapped = {"rsi":"rsi", "macd":"macd", "volume":"volume", "sma":"higher_trend", "hammer":"candle_pattern", "engulfing":"candle_pattern"}
-        feature = mapped.get(feature, "rsi")
-        update_weight(feature, 0.80, "خطای پیش‌بینی > 5% پس از batch جدید؛ وزن 20% کاهش یافت",
-                      {"samples": len(recent), "wins": len(recent)-losses, "losses": losses, "error_pct": error_pct})
-
-    with sqlite_conn() as c:
-        c.execute("insert or replace into self_healing_cursor(id,processed_closed,updated_at) values(1,?,?)",
-                  (batch_end, now_utc().isoformat()))
+        rows=c.execute("""
+            select s.id,s.coin,s.direction,s.outcome,s.notes
+            from signal_outcomes s
+            left join self_healing_processed p on p.signal_id=s.id
+            where s.status='CLOSED' and p.signal_id is null
+            order by s.id asc
+        """).fetchall()
+    if len(rows)<3:return
+    batch=rows[:(len(rows)//3)*3]
+    for start_i in range(0,len(batch),3):
+        recent=batch[start_i:start_i+3]
+        losses=sum(1 for r in recent if r["outcome"]=="SL")
+        error_pct=losses/3*100
+        if error_pct>5:
+            counts={}
+            for r in recent:
+                text=(r["notes"] or "").lower()
+                for token in ("rsi","macd","volume","sma","hammer","engulfing"):
+                    if token in text: counts[token]=counts.get(token,0)+1
+            feature=max(counts,key=counts.get) if counts else "rsi"
+            mapped={"rsi":"rsi","macd":"macd","volume":"volume","sma":"higher_trend","hammer":"candle_pattern","engulfing":"candle_pattern"}
+            feature=mapped.get(feature,"rsi")
+            update_weight(feature,0.80,"خطای پیش‌بینی > 5% پس از batch جدید؛ وزن 20% کاهش یافت",
+                          {"samples":3,"wins":3-losses,"losses":losses,"error_pct":error_pct,"signal_ids":[r["id"] for r in recent]})
+        with sqlite_conn() as c:
+            c.executemany("insert or ignore into self_healing_processed(signal_id,processed_at) values(?,?)",[(r["id"],now_utc().isoformat()) for r in recent])
 
 
 # ============================================================
@@ -1743,8 +1682,8 @@ def backtest_coin(coin, days=180):
 
     wins = sum(1 for x in trades if x > 0)
     losses = len(trades) - wins
-    avg_profit = mean([x for x in trades if x > 0]) if wins else 0
-    avg_loss = abs(mean([x for x in trades if x < 0])) if losses else 0
+    avg_profit = safe_mean([x for x in trades if x > 0], 0.0)
+    avg_loss = abs(safe_mean([x for x in trades if x < 0], 0.0)) if losses else 0
     gross_profit = sum(x for x in trades if x > 0)
     gross_loss = abs(sum(x for x in trades if x < 0))
 
@@ -1780,8 +1719,8 @@ def mandatory_backtest_gate(universe):
         )
         return False, {"reason": "no backtest data"}
 
-    win_rate = mean(x["win_rate"] for x in samples)
-    pf = mean(x["profit_factor"] for x in samples)
+    win_rate = safe_mean([x.get("win_rate") for x in samples], 0.0)
+    pf = safe_mean([x.get("profit_factor") for x in samples], 0.0)
     dd = max(x["max_drawdown"] for x in samples)
 
     # If no baseline exists, establish it without changing the model.
@@ -1965,87 +1904,43 @@ def store_signal(result):
 def evaluate_open_outcomes():
     init_sqlite()
     with sqlite_conn() as c:
-        open_rows = c.execute(
-            """
-            select * from signal_outcomes
-            where status='OPEN'
-            order by id asc
-            limit 100
-            """
-        ).fetchall()
-
+        open_rows=c.execute("select * from signal_outcomes where status='OPEN' order by id asc limit 100").fetchall()
     for row in open_rows:
-        coin = row["coin"]
         try:
-            candles, _ = best_ohlcv(coin, "4h", 80)
-        except Exception:
-            continue
-
-        issued = datetime.fromisoformat(row["issued_at"].replace("Z", "+00:00"))
-        after = [
-            x for x in candles
-            if x[0] / 1000 > issued.timestamp()
-        ]
-        outcome = None
-        exit_price = None
-        bars = 0
-
-        for bars, x in enumerate(after[:SIGNAL_HORIZON_BARS], 1):
-            hi, lo = f(x[2]), f(x[3])
-            if row["direction"] == "LONG":
-                if lo <= row["sl"]:
-                    outcome, exit_price = "SL", row["sl"]
-                    break
-                if hi >= row["tp1"]:
-                    outcome, exit_price = "TP1", row["tp1"]
-                    break
-            else:
-                if hi >= row["sl"]:
-                    outcome, exit_price = "SL", row["sl"]
-                    break
-                if lo <= row["tp1"]:
-                    outcome, exit_price = "TP1", row["tp1"]
-                    break
-
-        if outcome:
-            if row["direction"] == "LONG":
-                pnl = (exit_price - row["entry"]) / row["entry"] * 100
-            else:
-                pnl = (row["entry"] - exit_price) / row["entry"] * 100
-
+            candles,_=best_ohlcv(row["coin"],"4h",100)
+            issued=datetime.fromisoformat(row["issued_at"].replace("Z","+00:00"))
+            after=[x for x in candles if x[0]/1000>issued.timestamp()]
+            outcome=None; exit_price=None; bars=0
+            entry=f(row["entry"]); sl=f(row["sl"]); tp1=f(row["tp1"]); tp2=f(row["tp2"])
+            if None in (entry,sl,tp1): continue
+            for bars,x in enumerate(after[:SIGNAL_HORIZON_BARS],1):
+                hi,lo=f(x[2]),f(x[3])
+                if hi is None or lo is None: continue
+                if row["direction"]=="LONG":
+                    if lo<=sl:
+                        outcome,exit_price="SL",sl; break
+                    if tp2 is not None and hi>=tp2:
+                        outcome,exit_price="TP2",tp2; break
+                    if hi>=tp1:
+                        outcome,exit_price="TP1",tp1; break
+                else:
+                    if hi>=sl:
+                        outcome,exit_price="SL",sl; break
+                    if tp2 is not None and lo<=tp2:
+                        outcome,exit_price="TP2",tp2; break
+                    if lo<=tp1:
+                        outcome,exit_price="TP1",tp1; break
+            if outcome is None and after and len(after)>=SIGNAL_HORIZON_BARS:
+                last=after[SIGNAL_HORIZON_BARS-1]; exit_price=f(last[4])
+                if exit_price is not None:
+                    outcome="TIMEOUT"; bars=SIGNAL_HORIZON_BARS
+            if not outcome or exit_price is None: continue
+            pnl=((exit_price-entry)/entry*100) if row["direction"]=="LONG" else ((entry-exit_price)/entry*100)
             with sqlite_conn() as c:
-                c.execute(
-                    """
-                    update signal_outcomes
-                    set status='CLOSED', outcome=?, exit_price=?,
-                        exit_at=?, pnl_pct=?, bars_to_exit=?
-                    where id=?
-                    """,
-                    (
-                        outcome, exit_price, now_utc().isoformat(),
-                        pnl, bars, row["id"],
-                    ),
-                )
-
-            STORE.insert(
-                "atlas_signal_outcomes",
-                {
-                    "coin": coin,
-                    "direction": row["direction"],
-                    "entry": row["entry"],
-                    "sl": row["sl"],
-                    "tp1": row["tp1"],
-                    "tp2": row["tp2"],
-                    "issued_at": row["issued_at"],
-                    "status": "CLOSED",
-                    "outcome": outcome,
-                    "exit_price": exit_price,
-                    "exit_at": now_utc().isoformat(),
-                    "pnl_pct": pnl,
-                    "bars_to_exit": bars,
-                    "notes": row["notes"],
-                },
-            )
+                c.execute("update signal_outcomes set status='CLOSED',outcome=?,exit_price=?,exit_at=?,pnl_pct=?,bars_to_exit=? where id=?",(outcome,exit_price,now_utc().isoformat(),pnl,bars,row["id"]))
+            STORE.insert("atlas_signal_outcomes",{"coin":row["coin"],"direction":row["direction"],"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"issued_at":row["issued_at"],"status":"CLOSED","outcome":outcome,"exit_price":exit_price,"exit_at":now_utc().isoformat(),"pnl_pct":pnl,"bars_to_exit":bars,"notes":row["notes"]})
+        except Exception as e:
+            append_changelog("OUTCOME_EVAL",None,None,f"{row['coin']}: {e}",{"traceback":traceback.format_exc()})
 
 
 # ============================================================
@@ -2104,35 +1999,30 @@ def split_telegram(text, max_chars=3900):
 
 
 def send_report(text):
-    parts = split_telegram(text)
-
-    destinations = []
-    if TELEGRAM_CHAT_ID:
-        destinations.append(TELEGRAM_CHAT_ID)
-    if (
-        TELEGRAM_GROUP_CHAT_ID
-        and TELEGRAM_GROUP_CHAT_ID not in destinations
-    ):
-        destinations.append(TELEGRAM_GROUP_CHAT_ID)
-
-    sent = 0
-    errors = []
-
+    import hashlib
+    parts=split_telegram(text)
+    report_hash=hashlib.sha256(text.encode("utf-8")).hexdigest()
+    init_sqlite()
+    with sqlite_conn() as c:
+        exists=c.execute("select 1 from telegram_sent_reports where report_hash=?",(report_hash,)).fetchone()
+        if exists:
+            append_changelog("TELEGRAM",None,None,"Duplicate report suppressed",{"hash":report_hash})
+            return len(parts),0,["duplicate report suppressed"]
+    destinations=[]
+    for destination in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
+        if destination and destination not in destinations: destinations.append(destination)
+    sent=0; errors=[]
     for destination in destinations:
-        for i, part in enumerate(parts, 1):
+        for i,part in enumerate(parts,1):
             try:
-                telegram_send_one(destination, part)
-                sent += 1
-                time.sleep(0.7)
+                telegram_send_one(destination,part); sent+=1; time.sleep(0.7)
             except Exception as e:
-                errors.append(
-                    f"Telegram destination {destination}, part {i}: {e}"
-                )
-
-    for e in errors:
-        append_changelog("TELEGRAM", None, None, e)
-
-    return len(parts), sent, errors
+                errors.append(f"Telegram destination {destination}, part {i}: {e}")
+    if sent>0:
+        with sqlite_conn() as c:
+            c.execute("insert or ignore into telegram_sent_reports(report_hash,sent_at) values(?,?)",(report_hash,now_utc().isoformat()))
+    for e in errors: append_changelog("TELEGRAM",None,None,e)
+    return len(parts),sent,errors
 
 
 # ============================================================
@@ -2283,17 +2173,17 @@ def market_summary(results, macro, news):
 
 
 def atlas_conclusion(results):
-    """Final decision layer: only confirmed multi-timeframe setups are actionable."""
-    buys = [x for x in results if x.get("action") == "BUY CONFIRMATION" and x.get("confidence", 0) >= 60 and x.get("h4_trend") == "BULLISH" and x.get("d1_trend") == "BULLISH"]
-    sells = [x for x in results if x.get("action") == "SELL CONFIRMATION" and x.get("confidence", 0) >= 60 and x.get("h4_trend") == "BEARISH" and x.get("d1_trend") == "BEARISH"]
-    rise = [x for x in results if x.get("h4_trend") == "BULLISH" and x.get("d1_trend") == "BULLISH" and x.get("confidence",0) >= 60 and x.get("action") != "BUY CONFIRMATION"]
-    fall = [x for x in results if x.get("h4_trend") == "BEARISH" and x.get("d1_trend") == "BEARISH" and x.get("confidence",0) >= 60 and x.get("action") != "SELL CONFIRMATION"]
+    threshold=MIN_CONFIDENCE
+    buys=[x for x in results if x.get("action")=="BUY CONFIRMATION" and x.get("confidence",0)>=threshold]
+    sells=[x for x in results if x.get("action")=="SELL CONFIRMATION" and x.get("confidence",0)>=threshold]
+    rise=[x for x in results if x.get("h4_trend")=="BULLISH" and x.get("d1_trend")=="BULLISH" and x.get("confidence",0)>=threshold and x.get("action")!="BUY CONFIRMATION"]
+    fall=[x for x in results if x.get("h4_trend")=="BEARISH" and x.get("d1_trend")=="BEARISH" and x.get("confidence",0)>=threshold and x.get("action")!="SELL CONFIRMATION"]
     lines=["━━━━━━━━━━━━━━━━━━","🎯 ATLAS FINAL CONCLUSION"]
-    lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(x["coin"] for x in sorted(buys,key=lambda z:z["confidence"],reverse=True)[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
-    lines.append("🔴 SELL / REDUCE: " + (", ".join(x["coin"] for x in sorted(sells,key=lambda z:z["confidence"],reverse=True)[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
-    lines.append("📈 RISE WATCH: " + (", ".join(x["coin"] for x in sorted(rise,key=lambda z:z["confidence"],reverse=True)[:5]) if rise else "ندارد"))
-    lines.append("📉 FALL WATCH: " + (", ".join(x["coin"] for x in sorted(fall,key=lambda z:z["confidence"],reverse=True)[:5]) if fall else "ندارد"))
-    lines.append("⛔ نتیجه فقط بر اساس شروط ATLAS است؛ در نبود تأیید کامل، اقدام = HOLD/WAIT.")
+    lines.append("🟢 BUY / ACCUMULATE: "+(", ".join(x["coin"] for x in sorted(buys,key=lambda z:z["confidence"],reverse=True)[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
+    lines.append("🔴 SELL / REDUCE: "+(", ".join(x["coin"] for x in sorted(sells,key=lambda z:z["confidence"],reverse=True)[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
+    lines.append("📈 RISE WATCH: "+(", ".join(x["coin"] for x in sorted(rise,key=lambda z:z["confidence"],reverse=True)[:5]) if rise else "ندارد"))
+    lines.append("📉 FALL WATCH: "+(", ".join(x["coin"] for x in sorted(fall,key=lambda z:z["confidence"],reverse=True)[:5]) if fall else "ندارد"))
+    lines.append(f"Threshold: {threshold:.0f}% | اقدام بدون تأیید کامل = HOLD/WAIT")
     return "\n".join(lines)
 
 
@@ -2344,7 +2234,7 @@ def build_report(results, top10, dynamic30, macro, news):
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v8.2 SELF-HEALING: ACTIVE",
+        "🎯 ATLAS v8.3 SELF-HEALING: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -2405,7 +2295,7 @@ def save_run(results, parts, macro, news):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v8.2 self-healing run",
+            "notes": "v8.3 hardened self-healing run",
         },
     )
 
@@ -2439,8 +2329,8 @@ def report():
                 results.append(r)
         except Exception as e:
             unavailable += 1
-            append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}")
-        time.sleep(0.08)
+            append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
+        time.sleep(0.50)
     for r in results:
         store_signal(r)
     text = build_report(results, top10, dynamic30, macro, news)
@@ -2462,7 +2352,7 @@ def main():
         print(text)
         print("")
         print(
-            f"ATLAS v8.1 sent: {sent} Telegram messages "
+            f"ATLAS v8.3 sent: {sent} Telegram messages "
             f"across {parts} report parts; errors={len(errors)}"
         )
 
@@ -2470,8 +2360,8 @@ def main():
         return 0
 
     except Exception as e:
-        append_changelog("FATAL", None, None, str(e))
-        print(f"ATLAS v8.1 ERROR: {e}")
+        append_changelog("FATAL", None, None, str(e), {"traceback": traceback.format_exc()})
+        print(f"ATLAS v8.3 ERROR: {e}")
         return 0
 
 
