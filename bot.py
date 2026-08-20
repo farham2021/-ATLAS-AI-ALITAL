@@ -1,7 +1,7 @@
 # ============================================================
-# ATLAS AI v8.3 — SELF-HEALING MARKET SUPERVISOR
+# ATLAS AI v8.5 — SELF-HEALING MARKET SUPERVISOR
 # ============================================================
-# v8.4 hardening:
+# v8.5 hardening:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
 # - Daily S/R primary with high-confidence H4 fallback for continuity
@@ -58,9 +58,12 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v8.4"
-TIMEFRAMES = ("1h", "4h", "1d")
+VERSION = "ATLAS v8.5"
+TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
+EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
+EVENT_LOOKBACK_LIMITS = {"30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
+EVENT_DEDUP_ENABLED = os.environ.get("ATLAS_CANDLE_EVENT_DEDUP", "1").strip() != "0"
 TEHRAN = ZoneInfo("Asia/Tehran")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -99,7 +102,7 @@ MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.80"))
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v84.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v85.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -340,6 +343,14 @@ def init_sqlite():
             passed integer not null,
             details text
         );
+        create table if not exists candle_events(
+            coin text not null,
+            timeframe text not null,
+            last_closed_ts integer,
+            last_status text,
+            observed_at text not null,
+            primary key(coin, timeframe)
+        );
         create table if not exists backtests(
             id integer primary key autoincrement,
             timestamp text,
@@ -539,23 +550,84 @@ def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
     sym = symbol_for(eid, coin)
     if not sym:
         raise RuntimeError(f"{eid}: pair unavailable")
+    supported = getattr(ex, "timeframes", None) or {}
+    if supported and timeframe not in supported:
+        raise RuntimeError(f"{eid}: timeframe {timeframe} unsupported")
     rows = ex.fetch_ohlcv(sym, timeframe=timeframe, limit=limit)
     if len(rows) < 60:
         raise RuntimeError(f"{eid}: insufficient candles")
     return strip_incomplete(rows, timeframe)
 
 
-def strip_incomplete(rows, timeframe):
-    ms = {
+def _next_candle_boundary_ms(start_ms, timeframe):
+    """Return the next UTC candle boundary; monthly/weekly are calendar-aware."""
+    dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    if timeframe == "1M":
+        if dt.month == 12:
+            nxt = dt.replace(year=dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            nxt = dt.replace(month=dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return int(nxt.timestamp() * 1000)
+    if timeframe == "1w":
+        nxt = dt + timedelta(days=7)
+        return int(nxt.timestamp() * 1000)
+    fixed = {
+        "15m": 15 * 60 * 1000,
         "30m": 30 * 60 * 1000,
         "1h": 60 * 60 * 1000,
         "4h": 4 * 60 * 60 * 1000,
         "1d": 24 * 60 * 60 * 1000,
-    }.get(timeframe, 4 * 60 * 60 * 1000)
-    now = int(time.time() * 1000)
-    if rows and rows[-1][0] + ms > now:
-        return rows[:-1]
-    return rows
+    }.get(timeframe)
+    if fixed is None:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return start_ms + fixed
+
+
+def candle_is_closed(start_ms, timeframe, now_ms=None):
+    if start_ms is None:
+        return False
+    now_ms = now_ms or int(time.time() * 1000)
+    try:
+        return _next_candle_boundary_ms(int(start_ms), timeframe) <= now_ms
+    except Exception:
+        return False
+
+
+def strip_incomplete(rows, timeframe):
+    """Keep only fully closed candles, including calendar-aware weekly/monthly candles."""
+    clean = []
+    now_ms = int(time.time() * 1000)
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        ts = safe_float(row[0])
+        if ts is None:
+            continue
+        if candle_is_closed(int(ts), timeframe, now_ms):
+            clean.append(list(row))
+    return clean
+
+
+def candle_event(coin, timeframe, rows):
+    """Detect a newly observed CLOSED candle without pretending REST is tick-level realtime."""
+    latest = int(rows[-1][0]) if rows else None
+    if latest is None:
+        return {"status": "NO_DATA", "closed_ts": None, "timeframe": timeframe}
+    status = "NEW_CLOSED"
+    if EVENT_DEDUP_ENABLED:
+        with sqlite_conn() as c:
+            prev = c.execute(
+                "select last_closed_ts from candle_events where coin=? and timeframe=?",
+                (coin, timeframe),
+            ).fetchone()
+            if prev and prev[0] == latest:
+                status = "UNCHANGED"
+            c.execute(
+                "insert into candle_events(coin,timeframe,last_closed_ts,last_status,observed_at) values(?,?,?,?,?) "
+                "on conflict(coin,timeframe) do update set last_closed_ts=excluded.last_closed_ts,last_status=excluded.last_status,observed_at=excluded.observed_at",
+                (coin, timeframe, latest, status, now_utc().isoformat()),
+            )
+    return {"status": status, "closed_ts": latest, "timeframe": timeframe}
 
 
 def best_ohlcv(coin, timeframe, limit=250):
@@ -565,7 +637,7 @@ def best_ohlcv(coin, timeframe, limit=250):
             return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
         except Exception:
             continue
-    raise RuntimeError(f"4H DATA UNAVAILABLE: {coin}")
+    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
 
 
 # ============================================================
@@ -975,8 +1047,11 @@ def tf_snapshot(coin):
     out = {}
     for tf in TIMEFRAMES:
         try:
-            rows, engine = best_ohlcv(coin, tf, 250)
+            limit = 250 if tf in ("1h", "4h", "1d") else 120 if tf == "1w" else 60
+            rows, engine = best_ohlcv(coin, tf, limit)
             c = closes(rows)
+            if len(c) < 20:
+                raise RuntimeError(f"{tf}: insufficient closed candles")
             r = rsi(c)
             ml, ms, hist = macd(c)
             s20, s50 = sma(c, 20), sma(c, 50)
@@ -990,9 +1065,16 @@ def tf_snapshot(coin):
                 "sma20": s20,
                 "sma50": s50,
                 "price": c[-1],
+                "event": candle_event(coin, tf, rows),
             }
         except Exception as e:
-            out[tf] = {"error": str(e), "trend": "UNKNOWN"}
+            out[tf] = {"error": str(e), "trend": "UNKNOWN", "event": {"status":"ERROR","closed_ts":None,"timeframe":tf}}
+    # 30m is kept separate because it is used as the execution/momentum confirmation.
+    try:
+        rows, engine = best_ohlcv(coin, "30m", EVENT_LOOKBACK_LIMITS["30m"])
+        out["30m"] = {"rows": rows, "engine": engine, "event": candle_event(coin, "30m", rows)}
+    except Exception as e:
+        out["30m"] = {"error": str(e), "event": {"status":"ERROR","closed_ts":None,"timeframe":"30m"}}
     return out
 
 
@@ -1252,10 +1334,10 @@ def indicator_alignment(tf4):
             reasons.append("RSI بالای 75؛ اشباع خرید — بدون امتیاز صعودی")
 
     if ml is not None and ms is not None:
-        if ml > ms and ml > 0:
+        if ml > ms:
             bullish += 1
             reasons.append("MACD صعودی")
-        elif ml < ms and ml < 0:
+        elif ml < ms:
             bearish += 1
             reasons.append("MACD نزولی")
 
@@ -1358,6 +1440,36 @@ def suggested_leverage(atr_percent):
     return round(clamp(lev, 1, MAX_LEVERAGE), 1)
 
 
+def candle_trigger_state(rows, direction, support=None, resistance=None):
+    """Classify the latest CLOSED 4H candle; no prediction of an unfinished candle."""
+    if not rows or len(rows) < 3:
+        return {"state":"UNKNOWN","close_location":None,"range_pct":None,"near_extreme":False}
+    r=rows[-1]
+    o,h,l,c=map(f,r[1:5])
+    if None in (h,l,c) or h <= l or c <= 0:
+        return {"state":"UNKNOWN","close_location":None,"range_pct":None,"near_extreme":False}
+    loc=(c-l)/(h-l)
+    range_pct=(h-l)/c*100
+    prev=rows[-2]
+    ph,pl,pc=f(prev[2]),f(prev[3]),f(prev[4])
+    state="NEUTRAL_CLOSE"
+    if direction=="LONG":
+        if resistance is not None and c>resistance and pc is not None and pc<=resistance:
+            state="BREAKOUT_CLOSED"
+        elif loc>=0.80:
+            state="BULLISH_CLOSE"
+        elif l < (support or -math.inf) and c > (support or math.inf):
+            state="SUPPORT_RECLAIM"
+    elif direction=="SHORT":
+        if support is not None and c<support and pc is not None and pc>=support:
+            state="BREAKDOWN_CLOSED"
+        elif loc<=0.20:
+            state="BEARISH_CLOSE"
+        elif h > (resistance or math.inf) and c < (resistance or -math.inf):
+            state="RESISTANCE_REJECT"
+    return {"state":state,"close_location":round(loc,3),"range_pct":round(range_pct,3),"near_extreme":loc>=0.85 or loc<=0.15}
+
+
 def analyze_coin(coin, market_news, weights):
     if is_stable(coin):
         return None
@@ -1369,12 +1481,16 @@ def analyze_coin(coin, market_news, weights):
 
     tf1 = snapshots.get("1h", {})
     tfd = snapshots.get("1d", {})
+    tfw = snapshots.get("1w", {})
+    tfm = snapshots.get("1M", {})
 
     price, sources, quality, spread_pct, errors = price_consensus(coin)
 
     h1 = tf1.get("trend", "UNKNOWN")
     h4 = tf4.get("trend", "UNKNOWN")
     d1 = tfd.get("trend", "UNKNOWN")
+    w1 = tfw.get("trend", "UNKNOWN")
+    m1 = tfm.get("trend", "UNKNOWN")
 
     pattern, pattern_dir = candle_pattern(tf4["rows"])
     ind_dir, bull_n, bear_n, indicator_reasons, overbought, oversold = indicator_alignment(tf4)
@@ -1396,6 +1512,9 @@ def analyze_coin(coin, market_news, weights):
         sr_fallback = True
 
     mom30, _ = momentum_30m(coin)
+    trigger = candle_trigger_state(tf4.get("rows", []), direction,
+                                   effective_levels.get("support") if effective_levels else None,
+                                   effective_levels.get("resistance") if effective_levels else None)
 
     # --------------------------------------------------------
     # Confidence components
@@ -1447,6 +1566,15 @@ def analyze_coin(coin, market_news, weights):
         direction = "SHORT"
         confidence = max(confidence, 65)
 
+    # Weekly/monthly are regime filters, not entry triggers. A direct
+    # monthly contradiction blocks the setup; a weekly contradiction
+    # requires an unusually strong confidence score.
+    regime_conflict = False
+    if direction == "LONG" and m1 == "BEARISH":
+        regime_conflict = True
+    elif direction == "SHORT" and m1 == "BULLISH":
+        regime_conflict = True
+
     # --------------------------------------------------------
     # Hard gates
     # --------------------------------------------------------
@@ -1454,7 +1582,10 @@ def analyze_coin(coin, market_news, weights):
     gate_reason = "All mandatory gates passed"
     warning = None
 
-    if quality == "LOW" or spread_pct > 3:
+    if regime_conflict:
+        gate = "BLOCK"
+        gate_reason = "Monthly regime contradicts signal"
+    elif quality == "LOW" or spread_pct > 3:
         gate = "BLOCK"
         gate_reason = "Data quality/conflict"
     elif vol_ratio is None or vol_ratio <= MIN_VOLUME_RATIO:
@@ -1466,6 +1597,9 @@ def analyze_coin(coin, market_news, weights):
     elif direction == "NONE":
         gate = "BLOCK"
         gate_reason = "Higher-timeframe alignment missing"
+    elif ((direction == "LONG" and w1 == "BEARISH") or (direction == "SHORT" and w1 == "BULLISH")) and confidence < max(MIN_CONFIDENCE + 15, 75):
+        gate = "BLOCK"
+        gate_reason = "Weekly regime conflict; stronger confirmation required"
     elif market_news["impact"] == "HIGH":
         warning = "نوسان بالا"
         # High-impact news is not always a full block. It is a warning
@@ -1504,9 +1638,17 @@ def analyze_coin(coin, market_news, weights):
                 gate_reason = "Invalid price geometry"
             else:
                 leverage = suggested_leverage(atrp)
-                action = "BUY CONFIRMATION" if direction == "LONG" else "SELL CONFIRMATION"
+                four_h_event = snapshots.get("4h", {}).get("event", {})
+                fresh_closed_4h = four_h_event.get("status") == "NEW_CLOSED"
+                if fresh_closed_4h and trigger["state"] in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BULLISH_CLOSE") and direction == "LONG":
+                    action = "BUY CONFIRMATION"
+                elif fresh_closed_4h and trigger["state"] in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT", "BEARISH_CLOSE") and direction == "SHORT":
+                    action = "SELL CONFIRMATION"
+                else:
+                    action = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                    warning = warning or "منتظر بسته‌شدن تأییدکننده 4H"
                 if sr_fallback:
-                    warning = "Daily S/R unavailable؛ H4 fallback used"
+                    warning = warning or "Daily S/R unavailable؛ H4 fallback used"
 
     reason_parts = []
     if pattern_valid := candle_valid:
@@ -1532,6 +1674,8 @@ def analyze_coin(coin, market_news, weights):
         "h1_trend": h1,
         "h4_trend": h4,
         "d1_trend": d1,
+        "w1_trend": w1,
+        "m1_trend": m1,
         "pattern": pattern,
         "pattern_valid": pattern_valid,
         "rsi": tf4.get("rsi"),
@@ -1565,6 +1709,8 @@ def analyze_coin(coin, market_news, weights):
         "liquidity_score": liq_score,
         "liquidity": liq_label,
         "momentum_30m": mom30,
+        "candle_trigger": trigger,
+        "candle_events": {tf: snapshots.get(tf, {}).get("event", {}) for tf in EVENT_TIMEFRAMES},
         "news_impact": market_news["impact"],
         "warning": warning,
         "gate": gate,
@@ -2022,6 +2168,10 @@ def store_signal(result):
         "h1_trend": result["h1_trend"],
         "h4_trend": result["h4_trend"],
         "d1_trend": result["d1_trend"],
+        "w1_trend": result.get("w1_trend"),
+        "m1_trend": result.get("m1_trend"),
+        "candle_trigger": result.get("candle_trigger", {}),
+        "candle_events": result.get("candle_events", {}),
         "liquidity_score": result["liquidity_score"],
         "volume_ratio": result["volume_ratio"],
         "atr_pct": result["atr_pct"],
@@ -2220,7 +2370,7 @@ def asset_block(r):
         f"🔹 {r['coin']}",
         f"Price: {fmt(r['price'])}",
         f"24H: {pct(r['change'])}",
-        f"Trend H1/H4/D1: {r['h1_trend']} / {r['h4_trend']} / {r['d1_trend']}",
+        f"Trend H1/H4/D1/W1/M1: {r['h1_trend']} / {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')} / {r.get('m1_trend','UNKNOWN')}",
         f"RSI14: {r['rsi']:.1f}" if r["rsi"] is not None else "RSI14: N/A",
         f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
         f"Pattern: {r['pattern']}" + (" ✅" if r["pattern_valid"] else ""),
@@ -2229,6 +2379,8 @@ def asset_block(r):
         f"Liquidity: {r['liquidity']} ({r['liquidity_score']:.0f}/100)",
         f"ATR: {r['atr_pct']:.2f}%" if r["atr_pct"] is not None else "ATR: N/A",
         f"4H/D1 Alignment: {'✅' if r['h4_trend']==r['d1_trend'] else '⚠️'}",
+        f"4H Candle Trigger: {r.get('candle_trigger',{}).get('state','UNKNOWN')}",
+        f"4H Close Location: {r.get('candle_trigger',{}).get('close_location','N/A')}",
         f"Daily Support: {fmt(r['support'])} | Strength: {r.get('support_score', 0)}/100 | Touches: {r.get('support_touches', 0)}",
         f"Daily Resistance: {fmt(r['resistance'])} | Strength: {r.get('resistance_score', 0)}/100 | Touches: {r.get('resistance_touches', 0)}",
         f"Daily S/R Confidence: {r.get('sr_confidence', 'LOW')}",
@@ -2358,6 +2510,12 @@ def atlas_conclusion(results):
     lines.append("📈 RISE WATCH: "+(", ".join(x["coin"] for x in sorted(rise,key=lambda z:z["confidence"],reverse=True)[:5]) if rise else "ندارد"))
     lines.append("📉 FALL WATCH: "+(", ".join(x["coin"] for x in sorted(fall,key=lambda z:z["confidence"],reverse=True)[:5]) if fall else "ندارد"))
     lines.append(f"Threshold: {threshold:.0f}% | اقدام بدون تأیید کامل = HOLD/WAIT")
+    # Candle-event summary: the scheduler observes closed-candle transitions.
+    new_events = 0
+    for r in results:
+        ev = r.get("candle_events", {})
+        new_events += sum(1 for x in ev.values() if isinstance(x, dict) and x.get("status") == "NEW_CLOSED")
+    lines.append(f"Closed-candle events observed: {new_events}")
     return "\n".join(lines)
 
 
@@ -2380,7 +2538,7 @@ def build_report(results, top10, dynamic30, macro, news):
         f"🤖 {VERSION} — SNIPER",
         "━━━━━━━━━━━━━━━━━━",
         f"{shamsi(dt)}  {dt.strftime('%H:%M')} 🇮🇷",
-        "Timeframe: 1H / 4H / 1D",
+        "Timeframe: 30M / 1H / 4H / 1D / 1W / 1M",
         "",
         f"💧 MARKET LIQUIDITY INDEX: {liq:.1f}/100",
         f"🧭 DXY: {fmt(macro.get('DXY'))}",
@@ -2401,14 +2559,14 @@ def build_report(results, top10, dynamic30, macro, news):
         "🛡️ ATLAS DATA ENGINE",
         f"Assets scanned: {len(results)}",
         f"Successful: {len(results)}",
-        "Incomplete 4H candles excluded",
+        "Only CLOSED candles used for signals; incomplete candles excluded",
         "Stablecoins excluded",
         "Data conflict >3% = NO TRADE",
         f"Risk/trade: {RISK_PER_TRADE:.2f}%",
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v8.4 SELF-HEALING: ACTIVE",
+        "🎯 ATLAS v8.5 SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -2469,7 +2627,7 @@ def save_run(results, parts, macro, news):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v8.3 hardened self-healing run",
+            "notes": "v8.5 closed-candle multi-timeframe engine",
         },
     )
 
@@ -2526,7 +2684,7 @@ def main():
         print(text)
         print("")
         print(
-            f"ATLAS v8.3 sent: {sent} Telegram messages "
+            f"ATLAS v8.5 sent: {sent} Telegram messages "
             f"across {parts} report parts; errors={len(errors)}"
         )
 
@@ -2535,7 +2693,7 @@ def main():
 
     except Exception as e:
         append_changelog("FATAL", None, None, str(e), {"traceback": traceback.format_exc()})
-        print(f"ATLAS v8.3 ERROR: {e}")
+        print(f"ATLAS v8.5 ERROR: {e}")
         return 0
 
 
