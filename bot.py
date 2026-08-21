@@ -16,6 +16,9 @@
 # - de-duplicated CoinGecko mover symbols
 # - stronger final conclusion: best setup, entry/SL/TP and actionable ranking
 # - unavailable asset count is explicitly reported for diagnostics
+# v9.1 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
+# human-like overbought/oversold execution control, watch-quality ranking,
+# and accurate attempted/successful asset accounting.
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
 #
@@ -64,7 +67,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v9.0"
+VERSION = "ATLAS v9.1"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -114,7 +117,7 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v90.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v91.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -139,7 +142,9 @@ STABLE_SYMBOLS = {
 
 # Yahoo Finance symbols.
 MACRO_SYMBOLS = {
-    "DXY": "^DXY",
+    # Yahoo's canonical searchable ICE US Dollar Index symbol is DX-Y.NYB.
+    # ^DXY remains a fallback because Yahoo chart availability can vary.
+    "DXY": ("DX-Y.NYB", "DX=F", "^DXY"),
     "GOLD": "GC=F",
     "SILVER": "SI=F",
     "COPPER": "HG=F",
@@ -1244,14 +1249,19 @@ def yahoo_chart(symbol, interval="1h", range_="5d"):
 
 def macro_snapshot():
     out = {}
-    for name, symbol in MACRO_SYMBOLS.items():
-        try:
-            rows = yahoo_chart(symbol, "1h", "5d")
-            c = closes(rows)
-            if c:
-                out[name] = c[-1]
-        except Exception:
-            out[name] = None
+    for name, symbols in MACRO_SYMBOLS.items():
+        candidates = symbols if isinstance(symbols, (tuple, list)) else (symbols,)
+        value = None
+        for symbol in candidates:
+            try:
+                rows = yahoo_chart(symbol, "1h", "5d")
+                c = closes(rows)
+                if c:
+                    value = c[-1]
+                    break
+            except Exception as e:
+                append_changelog("MACRO", None, None, f"{name}/{symbol}: {e}")
+        out[name] = value
     return out
 
 
@@ -1555,8 +1565,13 @@ def analyze_coin(coin, market_news, weights):
     # UnboundLocalError and leaving the report with Total scanned: 0.
 
     # --------------------------------------------------------
-    # Confidence components
+    # v9.1 CONFIDENCE — component-level, not binary.
+    # The six learned weights now produce different scores for different
+    # quality setups instead of clustering many assets at exactly 65%.
     # --------------------------------------------------------
+    rsi_value = f(tf4.get("rsi"))
+    ml, ms, _hist = macd(closes(tf4["rows"]))
+
     candle_points = 0.0
     candle_valid = False
     if pattern != "NONE" and pattern_dir in ("BULLISH", "BEARISH"):
@@ -1564,22 +1579,70 @@ def analyze_coin(coin, market_news, weights):
         if aligned >= 2:
             candle_points = weights["candle_pattern"]
             candle_valid = True
+        elif aligned == 1:
+            candle_points = weights["candle_pattern"] * 0.35
 
-    indicator_points = 0.0
-    if bull_n >= 2 or bear_n >= 2:
-        indicator_points = weights["rsi"] + weights["macd"]
+    # RSI is graded. Extreme overbought/oversold never earns full confirmation.
+    rsi_points = 0.0
+    # Direction is selected immediately below; use the raw indicator direction
+    # here so the score remains deterministic before gate evaluation.
+    if rsi_value is not None:
+        if ind_dir == "BULLISH":
+            if 52 <= rsi_value <= 68:
+                rsi_points = weights["rsi"]
+            elif 68 < rsi_value <= 75:
+                rsi_points = weights["rsi"] * 0.70
+            elif 75 < rsi_value <= 80:
+                rsi_points = weights["rsi"] * 0.25
+            elif rsi_value > 80:
+                rsi_points = weights["rsi"] * 0.10
+        elif ind_dir == "BEARISH":
+            if 32 <= rsi_value < 45:
+                rsi_points = weights["rsi"]
+            elif 25 <= rsi_value < 32:
+                rsi_points = weights["rsi"] * 0.70
+            elif 20 <= rsi_value < 25:
+                rsi_points = weights["rsi"] * 0.25
+            elif rsi_value < 20:
+                rsi_points = weights["rsi"] * 0.10
 
-    volume_points = weights["volume"] if vol_ratio is not None and vol_ratio > MIN_VOLUME_RATIO else 0.0
+    macd_points = 0.0
+    if ml is not None and ms is not None:
+        if ind_dir == "BULLISH" and ml > ms:
+            macd_points = weights["macd"]
+        elif ind_dir == "BEARISH" and ml < ms:
+            macd_points = weights["macd"]
+
+    if vol_ratio is None:
+        volume_points = 0.0
+    elif vol_ratio >= 1.50:
+        volume_points = weights["volume"]
+    elif vol_ratio >= 1.00:
+        volume_points = weights["volume"] * 0.70
+    elif vol_ratio >= MIN_VOLUME_RATIO:
+        volume_points = weights["volume"] * 0.35
+    else:
+        volume_points = 0.0
+
     higher_points = weights["higher_trend"] if h4 in ("BULLISH", "BEARISH") and d1 == h4 else 0.0
-    news_points = weights["news_clear"] if market_news["impact"] != "HIGH" else 0.0
 
+    if market_news["impact"] == "NORMAL":
+        news_points = weights["news_clear"]
+    elif market_news["impact"] == "HIGH":
+        news_points = 0.0
+    else:
+        news_points = weights["news_clear"] * 0.50
+
+    indicator_points = rsi_points + macd_points
     confidence = candle_points + indicator_points + volume_points + higher_points + news_points
     score_components = {
-        "candle_pattern": candle_points,
-        "indicators": indicator_points,
-        "volume": volume_points,
-        "higher_trend": higher_points,
-        "news_clear": news_points,
+        "candle_pattern": round(candle_points, 2),
+        "rsi": round(rsi_points, 2),
+        "macd": round(macd_points, 2),
+        "indicators": round(indicator_points, 2),
+        "volume": round(volume_points, 2),
+        "higher_trend": round(higher_points, 2),
+        "news_clear": round(news_points, 2),
         "weights_used": dict(weights),
     }
 
@@ -1714,13 +1777,22 @@ def analyze_coin(coin, market_news, weights):
     if warning:
         reason_parts.append(warning)
 
+    change_24h = next(
+        (f(x.get("change")) for x in sources if f(x.get("change")) is not None),
+        None,
+    )
+    if change_24h is None:
+        h1_rows = tf1.get("rows", [])
+        if len(h1_rows) >= 25 and price is not None:
+            base_24h = f(h1_rows[-25][4])
+            if base_24h and base_24h > 0:
+                change_24h = (price / base_24h - 1.0) * 100.0
+
     return {
         "coin": coin,
         "price": price,
-        "change": next(
-            (x.get("change") for x in sources if x["source"] == "BINANCE"),
-            None,
-        ),
+        "change": change_24h,
+        "change_source": "ticker" if any(f(x.get("change")) is not None for x in sources) else "H1_24H_FALLBACK",
         "trend": h4,
         "h1_trend": h1,
         "h4_trend": h4,
@@ -1753,6 +1825,7 @@ def analyze_coin(coin, market_news, weights):
         "action": action,
         "confidence": int(clamp(confidence, 0, 100)),
         "score_components": score_components,
+        "confidence_raw": round(confidence, 2),
         "overbought": overbought,
         "oversold": oversold,
         "quality": quality,
@@ -1926,6 +1999,20 @@ def apply_decision_engine(results, btc_regime, breadth):
 
         if raw in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
             state = raw
+
+            # Human-like risk control: do not chase extreme momentum.
+            # A genuine closed-candle breakout/reclaim may still execute,
+            # but an extreme RSI without structural confirmation becomes WATCH.
+            trigger_state = (r.get("candle_trigger") or {}).get("state")
+            if direction == "LONG" and r.get("overbought"):
+                if not (trigger_state in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM") and r.get("confidence", 0) >= 75 and (r.get("volume_ratio") or 0) >= 1.35):
+                    state = "BULLISH WATCH"
+                    reasons.append("RSI اشباع خرید؛ ورود تعقیبی ممنوع، منتظر Pullback/Retest")
+            elif direction == "SHORT" and r.get("oversold"):
+                if not (trigger_state in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT") and r.get("confidence", 0) >= 75 and (r.get("volume_ratio") or 0) >= 1.35):
+                    state = "BEARISH WATCH"
+                    reasons.append("RSI اشباع فروش؛ ورود تعقیبی ممنوع، منتظر Pullback/Retest")
+
             if rr is None or rr < MIN_EXECUTABLE_RR:
                 state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
                 reasons.append(f"R/R زیر {MIN_EXECUTABLE_RR:.1f}")
@@ -2702,7 +2789,7 @@ def asset_block(r):
     lines = [
         f"🔹 {r['coin']}",
         f"Price: {fmt(r['price'])}",
-        f"24H: {pct(r['change'])}",
+        f"24H: {pct(r['change'])} ({r.get('change_source','N/A')})",
         f"Trend H1/H4/D1/W1/M1: {r['h1_trend']} / {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')} / {r.get('m1_trend','UNKNOWN')}",
         f"RSI14: {r['rsi']:.1f}" if r["rsi"] is not None else "RSI14: N/A",
         f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
@@ -2722,6 +2809,9 @@ def asset_block(r):
         f"🎯 ACTION: {action_emoji(r['action'])}",
         f"Data: {r['quality']}",
     ]
+
+    if r.get("decision_reasons"):
+        lines.append("Decision: " + " | ".join(r["decision_reasons"]))
 
     if r["action"] in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
         lines += [
@@ -2979,7 +3069,7 @@ def market_summary(results, macro, news):
         f"Bias: {regime}",
         f"4H Bullish: {bullish} | 4H Bearish: {bearish}",
         f"Actionable setups: {len(tradable)}",
-        f"DXY: {fmt(dxy)}" if dxy else "DXY: N/A",
+        f"DXY: {fmt(dxy)} | USD liquidity proxy" if dxy is not None else "DXY: N/A | USD liquidity proxy unavailable",
         f"Fear & Greed: {fg_value} — {fg_label}" if fg_value is not None else "Fear & Greed: N/A",
         f"News: {news['bias']} / Impact: {news['impact']}",
     ]
@@ -3034,10 +3124,10 @@ def market_summary(results, macro, news):
 def atlas_conclusion(results):
     threshold = MIN_CONFIDENCE
     actionable = [x for x in results if x.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and x.get("confidence", 0) >= threshold]
-    buys = sorted([x for x in actionable if x.get("action") == "BUY CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
-    sells = sorted([x for x in actionable if x.get("action") == "SELL CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
-    rise = sorted([x for x in results if x.get("h4_trend") == "BULLISH" and x.get("d1_trend") == "BULLISH" and x.get("action") == "BULLISH WATCH"], key=lambda z: z.get("confidence", 0), reverse=True)
-    fall = sorted([x for x in results if x.get("h4_trend") == "BEARISH" and x.get("d1_trend") == "BEARISH" and x.get("action") == "BEARISH WATCH"], key=lambda z: z.get("confidence", 0), reverse=True)
+    buys = sorted([x for x in actionable if x.get("action") == "BUY CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
+    sells = sorted([x for x in actionable if x.get("action") == "SELL CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
+    rise = sorted([x for x in results if x.get("action") == "BULLISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
+    fall = sorted([x for x in results if x.get("action") == "BEARISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
 
     lines = ["━━━━━━━━━━━━━━━━━━", f"🎯 {VERSION} FINAL CONCLUSION"]
     lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in buys[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
@@ -3045,16 +3135,24 @@ def atlas_conclusion(results):
     lines.append("📈 RISE WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in rise[:5]) if rise else "ندارد"))
     lines.append("📉 FALL WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in fall[:5]) if fall else "ندارد"))
 
-    best = (buys[0] if buys else None)
-    best_side = "BUY"
-    if sells and (best is None or sells[0].get("confidence", 0) > best.get("confidence", 0)):
-        best = sells[0]
-        best_side = "SELL"
+    best = buys[0] if buys else (sells[0] if sells else None)
+    best_side = "BUY" if buys else "SELL"
+    if buys and sells and sells[0].get("confidence", 0) > buys[0].get("confidence", 0):
+        best, best_side = sells[0], "SELL"
     if best:
         lines += [
             f"⭐ BEST SETUP: {best['coin']} — {best_side} — {best['confidence']}%",
             f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: {best.get('volume_ratio'):.2f}x" if best.get('volume_ratio') is not None else f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: N/A",
             f"   Entry: {fmt(best.get('entry'))} | SL: {fmt(best.get('sl'))} | TP1: {fmt(best.get('tp1'))} | TP2: {fmt(best.get('tp2'))}",
+        ]
+    elif rise or fall:
+        watch = rise[0] if rise else fall[0]
+        side = "BULLISH WATCH" if rise else "BEARISH WATCH"
+        lines += [
+            f"⭐ BEST WATCH: {watch['coin']} — {side} — {watch['confidence']}%",
+            f"   Trigger: {(watch.get('candle_trigger') or {}).get('state','UNKNOWN')} | RSI: {watch.get('rsi'):.1f}" if watch.get('rsi') is not None else f"   Trigger: {(watch.get('candle_trigger') or {}).get('state','UNKNOWN')} | RSI: N/A",
+            f"   S/R: {watch.get('sr_confidence','LOW')} | Volume: {watch.get('volume_ratio'):.2f}x" if watch.get('volume_ratio') is not None else f"   S/R: {watch.get('sr_confidence','LOW')} | Volume: N/A",
+            "   تصمیم: هنوز ورود اجرایی نیست؛ منتظر تأیید ساختار/پولبک هستیم.",
         ]
     else:
         lines.append("⭐ BEST SETUP: NONE — بازار در این اجرا ستاپ کم‌ریسک و تأییدشده نداد.")
@@ -3063,8 +3161,8 @@ def atlas_conclusion(results):
     for r in results:
         ev = r.get("candle_events", {})
         new_events += sum(1 for x in ev.values() if isinstance(x, dict) and x.get("status") == "NEW_CLOSED")
-    lines.append(f"Threshold: {threshold:.0f}% | Closed-candle events observed: {new_events}")
-    lines.append("🛡️ تصمیم ATLAS: فقط BUY/SELLهای بالای آستانه و عبورکرده از تمام Gateها actionable هستند؛ بقیه HOLD/WAIT.")
+    lines.append(f"Threshold: {threshold:.0f}% | Watch threshold: {MIN_WATCH_CONFIDENCE:.0f}% | Closed-candle events observed: {new_events}")
+    lines.append("🛡️ تصمیم ATLAS: BUY/SELL فقط پس از Gate + R/R + regime + ساختار؛ WATCH یعنی جهت جالب است اما ورود هنوز تأیید نشده.")
     return "\n".join(lines)
 
 
@@ -3090,7 +3188,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "Timeframe: 30M / 1H / 4H / 1D / 1W / 1M",
         "",
         f"💧 MARKET LIQUIDITY INDEX: {liq:.1f}/100",
-        f"🧭 DXY: {fmt(macro.get('DXY'))}",
+        f"🧭 DXY: {fmt(macro.get('DXY'))} | USD liquidity proxy",
         f"📰 NEWS: {news['bias']} | {news['impact']}",
         "",
         "📡 RADAR",
@@ -3107,8 +3205,9 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     footer = [
         "━━━━━━━━━━━━━━━━━━",
         "🛡️ ATLAS DATA ENGINE",
-        f"Assets scanned: {len(results)}",
+        f"Assets attempted: {len(results) + unavailable}",
         f"Successful: {len(results)} | Unavailable: {unavailable}",
+        f"Success rate: {(len(results) / max(len(results) + unavailable, 1) * 100):.1f}%",
         "Only CLOSED candles used for signals; incomplete candles excluded",
         "Stablecoins excluded",
         "Data conflict >3% = NO TRADE",
@@ -3169,15 +3268,15 @@ def save_context(macro, news, liquidity, market_info=None):
     )
 
 
-def save_run(results, parts, macro, news):
+def save_run(results, parts, macro, news, unavailable=0):
     STORE.insert(
         "atlas_runs",
         {
             "timestamp": now_utc().isoformat(),
             "model_version": VERSION,
-            "assets_scanned": len(results),
+            "assets_scanned": len(results) + unavailable,
             "successful": len(results),
-            "unavailable": 0,
+            "unavailable": unavailable,
             "signals_sent": sum(
                 1 for x in results
                 if x["action"] in ("BUY CONFIRMATION", "SELL CONFIRMATION")
@@ -3253,7 +3352,7 @@ def main():
             market_liquidity_index(results),
             market_info,
         )
-        save_run(results, parts, macro, news)
+        save_run(results, parts, macro, news, unavailable)
 
         print(text)
         print("")
