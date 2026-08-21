@@ -1,0 +1,109 @@
+name: ATLAS v9.1 Market Supervisor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 8 * * *"
+    - cron: "30 12 * * *"
+    - cron: "30 18 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-v9
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  atlas:
+    name: ATLAS v9.1 Market Supervisor
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout ATLAS repository
+        uses: actions/checkout@v5
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install ATLAS dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --upgrade ccxt
+      - name: Prepare ATLAS v9.1 source
+        run: |
+          if [ -f bot.py ]; then
+            echo "Found bot.py"
+          elif [ -f AtlasAI_v9_bot.py ]; then
+            echo "Found AtlasAI_v9_bot.py; copying to bot.py"
+            cp AtlasAI_v9_bot.py bot.py
+          elif [ -f ATLAS_bot_v9.py ]; then
+            echo "Found ATLAS_bot_v9.py; copying to bot.py"
+            cp ATLAS_bot_v9.py bot.py
+          else
+            echo "ERROR: bot.py is missing from the checked-out repository."
+            echo "Expected one of: bot.py, AtlasAI_v9_bot.py, ATLAS_bot_v9.py"
+            echo "Repository files:"
+            ls -la
+            exit 1
+          fi
+
+      - name: Validate ATLAS v9.1 source
+        run: |
+          test -f bot.py
+          python -m py_compile bot.py
+          echo "ATLAS v9.1 syntax: OK"
+      - name: Run ATLAS v9.1 smoke test
+        run: |
+          if [ -f atlas_v9_smoke_test.py ]; then
+            python atlas_v9_smoke_test.py
+          else
+            echo "Smoke test file not present; skipping optional smoke test."
+          fi
+      - name: Run ATLAS v9.1 Market Supervisor
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          SUPABASE_URL: "https://tmnfhsuwtqfpglckfxwg.supabase.co"
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+          ATLAS_VERSION: "9.1"
+          ATLAS_TIMEFRAME: "4H"
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MIN_CONFIDENCE: "60"
+          ATLAS_MAX_LEVERAGE: "10"
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+          ATLAS_BACKTEST_REFRESH_HOURS: "24"
+          ATLAS_MIN_VOLUME_RATIO: "0.80"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+          ATLAS_REQUEST_SLEEP_SECONDS: "0.50"
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_BTC_REGIME_CACHE_MINUTES: "30"
+          ATLAS_SIGNAL_MEMORY_HOURS: "12"
+          ATLAS_MARKET_BREADTH_MIN_SAMPLES: "8"
+          ATLAS_SQLITE_FILE: "atlas_v91.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+        run: python bot.py
+      - name: Upload ATLAS v9.1 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-v9-diagnostics-${{ github.run_id }}
+          path: |
+            atlas_v91.sqlite3
+            changelog.txt
+          if-no-files-found: ignore
+          retention-days: 14
