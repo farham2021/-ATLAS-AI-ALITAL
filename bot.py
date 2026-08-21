@@ -1,5 +1,5 @@
 # ============================================================
-# ATLAS AI v10.1 — HARDENED HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v10.2 — HARDENED HUMAN-LIKE DECISION ENGINE
 # ============================================================
 # v10.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
@@ -70,7 +70,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.1"
+VERSION = "ATLAS v10.2"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -120,7 +120,7 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v101.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v102.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -338,7 +338,31 @@ def sqlite_conn():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA busy_timeout=30000")
     c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
     return c
+
+
+def checkpoint_sqlite():
+    """Flush SQLite WAL into the main DB before a GitHub runner disappears.
+
+    GitHub Actions runners are ephemeral. Caching only the main .sqlite3 file
+    while recent commits still live in -wal can silently lose state. This
+    checkpoint makes the cached database self-contained.
+    """
+    if not DB_FILE or not Path(DB_FILE).exists():
+        return
+    try:
+        with sqlite_conn() as c:
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            c.execute("PRAGMA optimize")
+    except Exception as e:
+        append_changelog(
+            "SQLITE_CHECKPOINT",
+            None,
+            None,
+            f"checkpoint failed: {e}",
+            {"traceback": traceback.format_exc()},
+        )
 
 
 def init_sqlite():
@@ -443,6 +467,12 @@ def init_sqlite():
             details text
         );
         """)
+    with sqlite_conn() as c:
+        check = c.execute("PRAGMA integrity_check").fetchone()
+        if not check or str(check[0]).lower() != "ok":
+            raise RuntimeError(
+                f"SQLite integrity_check failed: {check[0] if check else 'unknown'}"
+            )
 
 
 # ============================================================
@@ -1665,7 +1695,7 @@ def analyze_coin(coin, market_news, weights):
     # UnboundLocalError and leaving the report with Total scanned: 0.
 
     # --------------------------------------------------------
-    # v10.1 CONFIDENCE — component-level, not binary.
+    # v10.2 CONFIDENCE — component-level, not binary.
     # The six learned weights now produce different scores for different
     # quality setups instead of clustering many assets at exactly 65%.
     # --------------------------------------------------------
@@ -2263,7 +2293,7 @@ def atlas_decision_board(results, btc_regime, breadth):
     best = buys[0] if buys else (sells[0] if sells else None)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        "🎯 ATLAS v10.1 DECISION BOARD",
+        "🎯 ATLAS v10.2 DECISION BOARD",
         f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
         f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
     ]
@@ -3452,7 +3482,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v10.1 HARDENED HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v10.2 HARDENED HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -3526,7 +3556,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v10.1 hardened human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF",
+            "notes": "v10.2 hardened human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF + persistent SQLite checkpoint",
         },
     )
 
@@ -3606,6 +3636,7 @@ def main():
             raise RuntimeError(
                 "Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"])
             )
+        checkpoint_sqlite()
         return 0
 
     except Exception as e:
@@ -3628,6 +3659,10 @@ def main():
                             telegram_send_one(destination, alert)
                         except Exception as te:
                             print(f"Telegram error alert failed for {destination}: {te}")
+        except Exception:
+            pass
+        try:
+            checkpoint_sqlite()
         except Exception:
             pass
         # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
