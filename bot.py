@@ -1,5 +1,5 @@
 # ============================================================
-# ATLAS AI v9.0 — HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v9.2 — HUMAN-LIKE DECISION ENGINE
 # ============================================================
 # v9.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
@@ -19,6 +19,8 @@
 # v9.1 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
 # human-like overbought/oversold execution control, watch-quality ranking,
 # and accurate attempted/successful asset accounting.
+# v9.2 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
+# then Static Radar; Telegram chunking now preserves radar section boundaries.
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
 #
@@ -67,7 +69,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v9.1"
+VERSION = "ATLAS v9.2"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -127,11 +129,19 @@ CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 # These assets belong to the user's ATLAS radar and remain under
 # surveillance even if they leave CoinGecko's current top ranks.
+# Fixed priority radar requested for the first Telegram messages.
+# This order is deliberate and MUST NOT be replaced by CoinGecko rank ordering.
+ATLAS_PRIORITY_TOP10 = [
+    "BTC", "ETH", "BNB", "XRP", "SOL",
+    "TRX", "HYPE", "DOGE", "ADA", "MATIC",
+]
+
 ATLAS_STATIC = [
     "BTC", "ETH", "XRP", "SOL", "BNB", "TON", "ADA", "DOGE", "TRX", "LINK",
     "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR",
     "QNT", "GRT", "TAO", "ONDO", "UNI", "ETHFI", "ATOM", "FIL", "AAVE", "MKR",
     "APT", "ARB", "OP", "INJ", "TIA", "SEI", "PEPE", "FET", "ICP", "ETC",
+    "HYPE", "MATIC",
 ]
 
 STABLE_SYMBOLS = {
@@ -736,26 +746,60 @@ def binance_top(limit=40):
 
 
 def build_universe():
-    cg = gecko_top(40)
-    top10 = [x["symbol"] for x in cg[:10]]
-    dynamic30 = [x["symbol"] for x in cg[10:40]]
+    """
+    Build the radar in a deterministic reporting order.
 
-    if len(dynamic30) < 20:
-        for x in binance_top(50):
-            if x["symbol"] not in top10 and x["symbol"] not in dynamic30:
-                dynamic30.append(x["symbol"])
+    Reporting contract:
+      1) ATLAS_PRIORITY_TOP10, in the exact configured order.
+      2) Dynamic Top-30 market-cap assets from CoinGecko, excluding priority assets.
+      3) ATLAS_STATIC assets, excluding everything already present.
+
+    The order is intentionally independent of confidence, liquidity or price.
+    Those factors may rank setups inside the final conclusion, but they must
+    never reorder the asset-report sequence.
+    """
+    cg = gecko_top(60)
+
+    cg_symbols = []
+    for x in cg:
+        s = (x.get("symbol") or "").upper()
+        if s and not is_stable(s) and s not in cg_symbols:
+            cg_symbols.append(s)
+
+    # Fixed user-priority universe. It is called Top-10 Priority rather than
+    # "current market-cap Top 10" because MATIC/HYPE may not currently rank
+    # inside CoinGecko's literal top ten.
+    top10 = list(ATLAS_PRIORITY_TOP10)
+
+    # Dynamic market-cap list: highest-ranked CoinGecko assets not already in
+    # the fixed priority list. Fill from Binance only if CoinGecko is short.
+    dynamic30 = [s for s in cg_symbols if s not in top10][:30]
+
+    if len(dynamic30) < 30:
+        for x in binance_top(80):
+            s = (x.get("symbol") or "").upper()
+            if s and not is_stable(s) and s not in top10 and s not in dynamic30:
+                dynamic30.append(s)
             if len(dynamic30) >= 30:
                 break
 
     dynamic30 = dynamic30[:30]
 
-    # ATLAS static radar is preserved, but stablecoins are removed.
-    static = [x for x in ATLAS_STATIC if not is_stable(x)]
+    # Static radar comes last and cannot displace priority/dynamic assets.
+    static = [
+        x for x in ATLAS_STATIC
+        if not is_stable(x) and x not in top10 and x not in dynamic30
+    ]
 
     universe = list(dict.fromkeys(top10 + dynamic30 + static))
     universe = [x for x in universe if not is_stable(x)]
 
-    for i, symbol in enumerate(universe, 1):
+    for symbol in universe:
+        source = (
+            "TOP10_PRIORITY" if symbol in top10
+            else "DYNAMIC30" if symbol in dynamic30
+            else "ATLAS_STATIC"
+        )
         STORE.insert(
             "atlas_assets",
             {
@@ -763,11 +807,7 @@ def build_universe():
                 "rank": next(
                     (x["rank"] for x in cg if x["symbol"] == symbol), None
                 ),
-                "source": (
-                    "TOP10" if symbol in top10
-                    else "DYNAMIC30" if symbol in dynamic30
-                    else "ATLAS_STATIC"
-                ),
+                "source": source,
                 "is_stablecoin": False,
                 "active": True,
                 "last_seen_at": now_utc().isoformat(),
@@ -3166,20 +3206,57 @@ def atlas_conclusion(results):
     return "\n".join(lines)
 
 
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    # Most useful assets first, but the complete radar is still retained.
-    results.sort(
-        key=lambda x: (
-            x["action"] in ("BUY CONFIRMATION", "SELL CONFIRMATION"),
-            x["confidence"],
-            x["liquidity_score"],
-            abs(x["price"] or 0),
-        ),
-        reverse=True,
-    )
+def _ordered_report_results(results, top10, dynamic30):
+    """Return results in the contractual Telegram radar order."""
+    by_coin = {}
+    for r in results:
+        coin = (r.get("coin") or "").upper()
+        if coin and coin not in by_coin:
+            by_coin[coin] = r
+
+    ordered = []
+    seen = set()
+
+    for group in (top10, dynamic30, ATLAS_STATIC):
+        for coin in group:
+            coin = coin.upper()
+            if coin in by_coin and coin not in seen:
+                ordered.append(by_coin[coin])
+                seen.add(coin)
+
+    # Defensive tail: anything introduced by a future data source but not
+    # assigned to one of the three groups still appears at the end.
+    for r in results:
+        coin = (r.get("coin") or "").upper()
+        if coin and coin not in seen:
+            ordered.append(r)
+            seen.add(coin)
+
+    return ordered
+
+
+def _report_section_header(title, count, subtitle=None):
+    lines = ["━━━━━━━━━━━━━━━━━━", title, f"Assets in section: {count}"]
+    if subtitle:
+        lines.append(subtitle)
+    return "\n".join(lines)
+
+
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
+                 btc_regime=None, breadth=None):
+    # CRITICAL: report order is a product requirement, not a performance rank.
+    # Never sort the full result set by confidence here.
+    results = _ordered_report_results(results, top10, dynamic30)
 
     liq = market_liquidity_index(results)
     dt = now_tehran()
+
+    priority_success = [r for r in results if r.get("coin") in set(top10)]
+    dynamic_success = [r for r in results if r.get("coin") in set(dynamic30)]
+    static_success = [
+        r for r in results
+        if r.get("coin") not in set(top10) and r.get("coin") not in set(dynamic30)
+    ]
 
     header = [
         f"🤖 {VERSION} — SNIPER",
@@ -3191,16 +3268,40 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"🧭 DXY: {fmt(macro.get('DXY'))} | USD liquidity proxy",
         f"📰 NEWS: {news['bias']} | {news['impact']}",
         "",
-        "📡 RADAR",
-        f"Top 10 Market Cap: {len(top10)}",
-        f"Dynamic Top 30: {len(dynamic30)}",
-        f"ATLAS Static Radar: {len(ATLAS_STATIC)}",
+        "📡 RADAR ORDER",
+        "1️⃣ ATLAS TOP 10 PRIORITY → 2️⃣ DYNAMIC TOP 30 → 3️⃣ ATLAS STATIC RADAR",
+        f"Priority Top 10: {len(top10)} | Available: {len(priority_success)}",
+        f"Dynamic Top 30: {len(dynamic30)} | Available: {len(dynamic_success)}",
+        f"ATLAS Static Radar: {len(ATLAS_STATIC)} | Available: {len(static_success)}",
         f"Total scanned: {len(results)}",
         f"Unavailable/failed: {unavailable}",
         "",
     ]
 
-    blocks = [asset_block(x) for x in results]
+    blocks = []
+
+    # These explicit section headers guarantee that Telegram chunking can
+    # never silently mix Dynamic-30 before the Priority-10 assets.
+    blocks.append(_report_section_header(
+        "1️⃣ ATLAS TOP 10 PRIORITY",
+        len(top10),
+        "BTC → ETH → BNB → XRP → SOL → TRX → HYPE → DOGE → ADA → MATIC",
+    ))
+    blocks.extend(asset_block(x) for x in priority_success)
+
+    blocks.append(_report_section_header(
+        "2️⃣ DYNAMIC TOP 30",
+        len(dynamic30),
+        "CoinGecko market-cap ranking, excluding the fixed ATLAS Top 10.",
+    ))
+    blocks.extend(asset_block(x) for x in dynamic_success)
+
+    blocks.append(_report_section_header(
+        "3️⃣ ATLAS STATIC RADAR",
+        len(static_success),
+        "Persistent surveillance assets not already present in sections 1 or 2.",
+    ))
+    blocks.extend(asset_block(x) for x in static_success)
 
     footer = [
         "━━━━━━━━━━━━━━━━━━",
@@ -3215,7 +3316,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v9 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v9.2 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -3227,7 +3328,11 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         market_intelligence_block(market_info),
         market_summary(results, macro, news),
         atlas_conclusion(results),
-        atlas_decision_board(results, btc_regime or {"regime":"UNKNOWN","reason":""}, breadth or {"state":"UNKNOWN","score":50.0,"samples":0}),
+        atlas_decision_board(
+            results,
+            btc_regime or {"regime": "UNKNOWN", "reason": ""},
+            breadth or {"state": "UNKNOWN", "score": 50.0, "samples": 0},
+        ),
         "\n".join(footer),
     ])
 
