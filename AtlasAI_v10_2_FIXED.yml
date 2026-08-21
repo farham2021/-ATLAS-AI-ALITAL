@@ -1,0 +1,222 @@
+name: ATLAS v10.2 Market Supervisor
+
+on:
+  workflow_dispatch:
+  schedule:
+    # اجرای اصلی هر 4 ساعت — بدون تغییر در cadence
+    - cron: "0 */4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-v10-2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  atlas:
+    name: ATLAS v10.2 Market Supervisor
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      PYTHONUNBUFFERED: "1"
+
+      ATLAS_VERSION: "10.2"
+      ATLAS_TIMEFRAME: "4H"
+      RISK_PER_TRADE_PCT: "1.5"
+      MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+      ATLAS_MIN_CONFIDENCE: "60"
+      ATLAS_MAX_LEVERAGE: "10"
+      ATLAS_BACKTEST_DAYS: "180"
+      ATLAS_SIGNAL_HORIZON_BARS: "36"
+      ATLAS_BACKTEST_IMPROVEMENT: "10"
+      ATLAS_BACKTEST_REFRESH_HOURS: "24"
+      ATLAS_CANDLE_EVENT_DEDUP: "1"
+      ATLAS_SQLITE_FILE: "atlas_v102.sqlite3"
+      ATLAS_CHANGELOG: "changelog.txt"
+
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+      CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+      CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install ATLAS dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          fi
+          python -m pip install --upgrade ccxt
+
+      # ============================================================
+      # PERSISTENT ATLAS STATE
+      # GitHub-hosted runners are ephemeral.
+      #
+      # IMPORTANT:
+      # cache/restore is used BEFORE bot.py.
+      # cache/save uses a UNIQUE key AFTER bot.py because GitHub cache
+      # entries are immutable and an existing key cannot be overwritten.
+      # ============================================================
+      - name: Restore ATLAS persistent state
+        id: atlas-state-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            atlas_v102.sqlite3
+            changelog.txt
+          key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-${{ github.run_id }}
+          restore-keys: |
+            atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-
+            atlas-state-${{ runner.os }}-${{ github.ref_name }}-
+            atlas-state-${{ runner.os }}-
+
+      - name: Verify repository files
+        run: |
+          set -euo pipefail
+          echo "=============================================="
+          echo " ATLAS v10.2 REPOSITORY CHECK"
+          echo "=============================================="
+          pwd
+          ls -la
+          echo "---- workflows ----"
+          ls -la .github/workflows || true
+
+          test -f bot.py
+          test -f atlas_v10_2_smoke_test.py
+          test -f requirements.txt
+
+          echo "bot.py: OK"
+          echo "atlas_v10_2_smoke_test.py: OK"
+          echo "requirements.txt: OK"
+
+      - name: Validate Python syntax
+        run: |
+          set -euo pipefail
+          python -m py_compile bot.py
+          python -m py_compile atlas_v10_2_smoke_test.py
+          echo "Python syntax: PASS"
+
+      - name: Run ATLAS v10.2 smoke test
+        run: |
+          set -euo pipefail
+          python atlas_v10_2_smoke_test.py
+
+      - name: Validate required secrets
+        run: |
+          set -euo pipefail
+          test -n "$TELEGRAM_TOKEN" || {
+            echo "ERROR: TELEGRAM_TOKEN missing"
+            exit 1
+          }
+
+          if [ -z "$TELEGRAM_CHAT_ID" ] && [ -z "$TELEGRAM_GROUP_CHAT_ID" ]; then
+            echo "ERROR: TELEGRAM_CHAT_ID and TELEGRAM_GROUP_CHAT_ID are both missing"
+            exit 1
+          fi
+
+          echo "Telegram configuration: OK"
+          echo "Supabase URL: ${SUPABASE_URL:+configured}"
+          echo "CoinGlass key: ${COINGLASS_API_KEY:+configured}"
+
+      - name: Run ATLAS v10.2 Market Supervisor
+        run: |
+          set -euo pipefail
+          echo "=============================================="
+          echo " ATLAS v10.2 START"
+          echo "=============================================="
+          python --version
+          python -c "import ccxt; print('CCXT', ccxt.__version__)"
+          python bot.py
+
+      # ============================================================
+      # FINALIZE LOCAL SQLITE
+      # Must happen BEFORE cache/save.
+      # ============================================================
+      - name: Finalize SQLite state
+        if: always()
+        run: |
+          set -euo pipefail
+
+          if [ -f atlas_v102.sqlite3 ]; then
+            python - <<'PY'
+          import sqlite3
+
+          db = "atlas_v102.sqlite3"
+          con = sqlite3.connect(db, timeout=30)
+
+          try:
+              con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+              con.execute("PRAGMA optimize")
+              result = con.execute("PRAGMA integrity_check").fetchone()
+              print("SQLite integrity:", result[0] if result else "UNKNOWN")
+          finally:
+              con.close()
+          PY
+          else
+            echo "atlas_v102.sqlite3 not created."
+          fi
+
+      - name: Inspect ATLAS persistent state
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "=============================================="
+          echo " ATLAS v10.2 STATE"
+          echo "=============================================="
+
+          if [ -f atlas_v102.sqlite3 ]; then
+            ls -lh atlas_v102.sqlite3
+            sqlite3 atlas_v102.sqlite3 "PRAGMA integrity_check;" || true
+          else
+            echo "atlas_v102.sqlite3 not created."
+          fi
+
+          if [ -f changelog.txt ]; then
+            echo "---- changelog tail ----"
+            tail -n 40 changelog.txt
+          else
+            echo "changelog.txt not created."
+          fi
+
+      # UNIQUE RUN KEY = new cache can be saved.
+      # restore-keys on the next run will recover the newest matching state.
+      - name: Save ATLAS persistent state
+        if: always() && (hashFiles('atlas_v102.sqlite3') != '' || hashFiles('changelog.txt') != '')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            atlas_v102.sqlite3
+            changelog.txt
+          key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-${{ github.run_id }}
+
+      - name: Upload ATLAS state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-v10.2-state-${{ github.run_number }}
+          path: |
+            atlas_v102.sqlite3
+            changelog.txt
+          if-no-files-found: ignore
+          retention-days: 14
