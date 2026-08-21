@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
   schedule:
-    # هر 4 ساعت
+    # اجرای ATLAS هر 4 ساعت
     - cron: "0 */4 * * *"
 
 permissions:
@@ -26,22 +26,26 @@ jobs:
       # ============================================================
       # 2. SETUP PYTHON
       # ============================================================
-      # عمداً cache: pip حذف شده است.
-      # چون پروژه requirements.txt/pyproject.toml ندارد.
-      # ============================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       # ============================================================
-      # 3. RESTORE ATLAS PERSISTENT STATE
+      # 3. RESTORE PERSISTENT ATLAS STATE
       # ============================================================
-      # SQLite و changelog بین اجراها حفظ می‌شوند.
+      # SQLite:
+      # - backtest cache
+      # - signal memory
+      # - duplicate-signal protection
+      # - candle deduplication
       #
-      # نکته مهم:
-      # کلید restore نباید فقط github.run_id باشد.
-      # ابتدا آخرین state قبلی را پیدا می‌کنیم.
+      # Changelog:
+      # - persistent execution history
+      #
+      # IMPORTANT:
+      # github.run_number is intentionally NOT used as the only
+      # restore key. restore-keys finds the latest previous state.
       # ============================================================
       - name: Restore ATLAS persistent state
         uses: actions/cache/restore@v4
@@ -49,24 +53,33 @@ jobs:
           path: |
             atlas_v10.sqlite3
             changelog.txt
+
           key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_number }}
+
           restore-keys: |
             atlas-state-${{ runner.os }}-${{ github.ref_name }}-
             atlas-state-${{ runner.os }}-
 
       # ============================================================
-      # 4. MAKE SURE STATE FILES EXIST
+      # 4. INITIALIZE STATE FILES
       # ============================================================
-      # این مرحله مهم است.
-      # اگر اولین اجرای ATLAS باشد، فایل‌ها وجود ندارند.
-      # قبل از اجرای bot آنها را ایجاد می‌کنیم تا cache/save
-      # همیشه چیزی برای ذخیره کردن داشته باشد.
+      # First execution may have no cache.
+      # Create empty files so the save step always has valid paths.
       # ============================================================
-      - name: Initialize persistent state
+      - name: Initialize ATLAS persistent state
         shell: bash
         run: |
+          set -e
+
           touch changelog.txt
-          test -f atlas_v10.sqlite3 || touch atlas_v10.sqlite3
+
+          if [ ! -f atlas_v10.sqlite3 ]; then
+            touch atlas_v10.sqlite3
+          fi
+
+          echo "===== INITIAL STATE ====="
+          ls -lh atlas_v10.sqlite3
+          ls -lh changelog.txt
 
       # ============================================================
       # 5. VERIFY BOT
@@ -74,86 +87,138 @@ jobs:
       - name: Verify ATLAS bot
         shell: bash
         run: |
+          set -e
+
           test -f bot.py
+
           python -m py_compile bot.py
+
+          echo "ATLAS bot.py syntax check: OK"
 
       # ============================================================
       # 6. RUN ATLAS
       # ============================================================
       - name: Run ATLAS v10.1
         env:
+
           PYTHONUNBUFFERED: "1"
 
+          # --------------------------------------------------------
+          # TELEGRAM
+          # --------------------------------------------------------
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
+          # --------------------------------------------------------
+          # SUPABASE
+          # --------------------------------------------------------
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
+          # --------------------------------------------------------
+          # MARKET DATA
+          # --------------------------------------------------------
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+
+          # --------------------------------------------------------
+          # NEWS
+          # --------------------------------------------------------
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+          # --------------------------------------------------------
+          # DERIVATIVES / LIQUIDATIONS
+          # --------------------------------------------------------
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
+          # --------------------------------------------------------
+          # ATLAS VERSION
+          # --------------------------------------------------------
           ATLAS_VERSION: "10.1"
           ATLAS_TIMEFRAME: "4H"
 
+          # --------------------------------------------------------
+          # RISK ENGINE
+          # --------------------------------------------------------
           RISK_PER_TRADE_PCT: "1.5"
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
 
+          # --------------------------------------------------------
+          # SIGNAL THRESHOLDS
+          # --------------------------------------------------------
           ATLAS_MIN_CONFIDENCE: "60"
           ATLAS_WATCH_CONFIDENCE: "55"
           ATLAS_MAX_LEVERAGE: "10"
 
+          # --------------------------------------------------------
+          # BACKTEST ENGINE
+          # --------------------------------------------------------
           ATLAS_BACKTEST_DAYS: "180"
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
           ATLAS_SIGNAL_HORIZON_BARS: "36"
           ATLAS_BACKTEST_IMPROVEMENT: "10"
 
+          # --------------------------------------------------------
+          # PERSISTENT FILES
+          # --------------------------------------------------------
           ATLAS_SQLITE_FILE: "atlas_v10.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
 
         run: |
+          set -e
+
+          echo "========================================"
+          echo "ATLAS v10.1 START"
+          echo "========================================"
+
           python bot.py
 
+          echo "========================================"
+          echo "ATLAS v10.1 FINISHED"
+          echo "========================================"
+
       # ============================================================
-      # 7. SHOW STATE
+      # 7. INSPECT STATE
       # ============================================================
-      # برای اینکه اگر cache مشکلی داشت، در Log ببینیم
-      # فایل واقعاً ساخته/به‌روزرسانی شده یا نه.
+      # Always run this even if bot.py fails.
+      # This gives us direct evidence about SQLite/changelog state.
       # ============================================================
       - name: Inspect ATLAS persistent state
         if: always()
         shell: bash
         run: |
-          echo "===== ATLAS STATE ====="
+          echo "========================================"
+          echo "ATLAS PERSISTENT STATE"
+          echo "========================================"
 
           if [ -f atlas_v10.sqlite3 ]; then
+            echo "SQLite:"
             ls -lh atlas_v10.sqlite3
           else
-            echo "atlas_v10.sqlite3 NOT FOUND"
+            echo "ERROR: atlas_v10.sqlite3 NOT FOUND"
           fi
+
+          echo ""
 
           if [ -f changelog.txt ]; then
+            echo "Changelog:"
             ls -lh changelog.txt
-            echo "Changelog lines:"
+            echo "Lines:"
             wc -l changelog.txt
           else
-            echo "changelog.txt NOT FOUND"
+            echo "ERROR: changelog.txt NOT FOUND"
           fi
 
       # ============================================================
-      # 8. SAVE NEW PERSISTENT STATE
+      # 8. SAVE PERSISTENT STATE
       # ============================================================
-      # از github.run_number استفاده می‌کنیم تا هر اجرا یک نسخه
-      # جدید از state بسازد و restore-keys بتواند آخرین نسخه قبلی
-      # را در اجرای بعدی پیدا کند.
+      # Only save when ATLAS completed successfully.
       #
-      # اگر bot شکست بخورد، state ذخیره نمی‌شود.
-      # این رفتار عمداً حفظ شده تا state خراب جایگزین state سالم نشود.
+      # This prevents a failed/corrupted execution from replacing
+      # the last known-good persistent state.
       # ============================================================
       - name: Save ATLAS persistent state
         if: success()
@@ -162,21 +227,24 @@ jobs:
           path: |
             atlas_v10.sqlite3
             changelog.txt
+
           key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_number }}
 
       # ============================================================
       # 9. UPLOAD DEBUG ARTIFACT
       # ============================================================
-      # برای اینکه اگر ATLAS دوباره مشکل پیدا کرد، SQLite و changelog
-      # را بتوانیم از همان Run بررسی کنیم.
+      # Independent from cache.
+      # Gives us a downloadable snapshot of the state of the run.
       # ============================================================
       - name: Upload ATLAS state artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: atlas-state-${{ github.run_number }}
+
           path: |
             atlas_v10.sqlite3
             changelog.txt
+
           if-no-files-found: warn
           retention-days: 7
