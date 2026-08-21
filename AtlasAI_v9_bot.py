@@ -1,7 +1,7 @@
 # ============================================================
-# ATLAS AI v8.6.1 — SELF-HEALING MARKET SUPERVISOR
+# ATLAS AI v9.0 — HUMAN-LIKE DECISION ENGINE
 # ============================================================
-# v8.6.1 hardening:
+# v9.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
 # - Daily S/R primary with high-confidence H4 fallback for continuity
@@ -10,6 +10,12 @@
 # - relaxed H1 hard-gating while H4/D1 remain the primary trend filter
 # - configurable volume threshold
 # - zero-division and error observability hardening
+# - fixed critical direction-before-trigger execution bug that caused Total scanned: 0
+# - confirmation uses the latest fully CLOSED 4H candle, independent of exact cron minute
+# - preserved the three fixed global-market report times and Telegram supergroup delivery
+# - de-duplicated CoinGecko mover symbols
+# - stronger final conclusion: best setup, entry/SL/TP and actionable ranking
+# - unavailable asset count is explicitly reported for diagnostics
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
 #
@@ -58,7 +64,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v8.6.1"
+VERSION = "ATLAS v9.0"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -68,9 +74,7 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-TELEGRAM_GROUP_CHAT_ID = os.environ.get(
-    "TELEGRAM_GROUP_CHAT_ID", "-1003961443232"
-).strip()
+TELEGRAM_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
@@ -103,7 +107,14 @@ MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.80"))
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v85.sqlite3")
+# v9 Decision Engine: a signal is not a trade merely because indicators align.
+MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
+MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
+BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
+SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
+MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
+
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v90.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -259,7 +270,7 @@ def safe_json(value):
 
 def http_get(url, timeout=15, headers=None):
     h = {
-        "User-Agent": "ATLAS-AI/8.6.1",
+        "User-Agent": "ATLAS-AI/8.7",
         "Accept": "application/json,application/xml,text/xml,*/*",
     }
     if headers:
@@ -351,6 +362,30 @@ def init_sqlite():
             last_status text,
             observed_at text not null,
             primary key(coin, timeframe)
+        );
+        create table if not exists signal_memory(
+            coin text primary key,
+            direction text,
+            action text,
+            confidence real,
+            signal_candle_ts integer,
+            entry real,
+            sl real,
+            tp1 real,
+            tp2 real,
+            last_seen_at text not null,
+            decision_state text
+        );
+        create table if not exists decision_events(
+            id integer primary key autoincrement,
+            timestamp text not null,
+            coin text not null,
+            state text not null,
+            confidence real,
+            rr real,
+            btc_regime text,
+            breadth real,
+            reason text
         );
         create table if not exists backtests(
             id integer primary key autoincrement,
@@ -1650,14 +1685,19 @@ def analyze_coin(coin, market_news, weights):
             else:
                 leverage = suggested_leverage(atrp)
                 four_h_event = snapshots.get("4h", {}).get("event", {})
-                fresh_closed_4h = four_h_event.get("status") == "NEW_CLOSED"
-                if fresh_closed_4h and trigger["state"] in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BULLISH_CLOSE") and direction == "LONG":
+                trigger_ok_long = trigger["state"] in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BULLISH_CLOSE") and direction == "LONG"
+                trigger_ok_short = trigger["state"] in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT", "BEARISH_CLOSE") and direction == "SHORT"
+                # The latest fully CLOSED 4H candle is authoritative.
+                # We do not require the GitHub run itself to occur inside the
+                # small NEW_CLOSED event window; this keeps the three fixed
+                # daily report times from going silent when a run is delayed.
+                if trigger_ok_long:
                     action = "BUY CONFIRMATION"
-                elif fresh_closed_4h and trigger["state"] in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT", "BEARISH_CLOSE") and direction == "SHORT":
+                elif trigger_ok_short:
                     action = "SELL CONFIRMATION"
                 else:
                     action = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
-                    warning = warning or "منتظر بسته‌شدن تأییدکننده 4H"
+                    warning = warning or "منتظر بسته‌شدن/تأیید ساختار 4H"
                 if sr_fallback:
                     warning = warning or "Daily S/R unavailable؛ H4 fallback used"
 
@@ -1721,6 +1761,7 @@ def analyze_coin(coin, market_news, weights):
         "liquidity": liq_label,
         "momentum_30m": mom30,
         "candle_trigger": trigger,
+        "signal_candle_ts": snapshots.get("4h", {}).get("event", {}).get("closed_ts"),
         "candle_events": {tf: snapshots.get(tf, {}).get("event", {}) for tf in EVENT_TIMEFRAMES},
         "news_impact": market_news["impact"],
         "warning": warning,
@@ -1731,6 +1772,257 @@ def analyze_coin(coin, market_news, weights):
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
     }
+
+
+# ============================================================
+# v9 DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
+# ============================================================
+
+def _trend_bias_from_rows(rows):
+    try:
+        c = closes(rows)
+        if len(c) < 60:
+            return "UNKNOWN", None, None, None
+        rr = rsi(c)
+        ml, ms, _ = macd(c)
+        s20, s50 = sma(c, 20), sma(c, 50)
+        if None in (rr, ml, ms, s20, s50):
+            return "UNKNOWN", rr, ml, ms
+        bull = c[-1] > s20 > s50 and ml > ms
+        bear = c[-1] < s20 < s50 and ml < ms
+        if bull and rr >= 52:
+            return "BULLISH", rr, ml, ms
+        if bear and rr <= 48:
+            return "BEARISH", rr, ml, ms
+        return "MIXED", rr, ml, ms
+    except Exception:
+        return "UNKNOWN", None, None, None
+
+
+def btc_market_regime(force=False):
+    """Classify BTC as RISK_ON / NEUTRAL / RISK_OFF using closed 4H/1D data.
+
+    This is deliberately a regime filter, not a trading trigger. It is cached
+    in-process so a report does not repeatedly hammer the exchange.
+    """
+    global _BTC_REGIME_CACHE
+    now = time.time()
+    if not force and _BTC_REGIME_CACHE:
+        if now - _BTC_REGIME_CACHE.get("ts", 0) < BTC_REGIME_CACHE_MINUTES * 60:
+            return dict(_BTC_REGIME_CACHE)
+    out = {
+        "regime": "UNKNOWN", "h4": "UNKNOWN", "d1": "UNKNOWN",
+        "rsi4": None, "rsi1": None, "volume_ratio": None,
+        "reason": "BTC data unavailable", "ts": now,
+    }
+    try:
+        r4, _ = best_ohlcv("BTC", "4h", 180)
+        r1, _ = best_ohlcv("BTC", "1d", 180)
+        h4, rsi4, _, _ = _trend_bias_from_rows(r4)
+        d1, rsi1, _, _ = _trend_bias_from_rows(r1)
+        _, vr = volume_state(r4)
+        out.update({"h4": h4, "d1": d1, "rsi4": rsi4, "rsi1": rsi1, "volume_ratio": vr})
+        if h4 == "BULLISH" and d1 == "BULLISH":
+            out["regime"] = "RISK_ON"
+            out["reason"] = "BTC 4H + 1D bullish"
+        elif h4 == "BEARISH" and d1 == "BEARISH":
+            out["regime"] = "RISK_OFF"
+            out["reason"] = "BTC 4H + 1D bearish"
+        else:
+            out["regime"] = "NEUTRAL"
+            out["reason"] = "BTC higher timeframes mixed"
+    except Exception as e:
+        append_changelog("BTC_REGIME", None, None, str(e), {"traceback": traceback.format_exc()})
+    _BTC_REGIME_CACHE = dict(out)
+    return out
+
+
+_BTC_REGIME_CACHE = {}
+
+
+def market_breadth(results):
+    valid = [r for r in results if r.get("h4_trend") in ("BULLISH", "BEARISH") and r.get("d1_trend") in ("BULLISH", "BEARISH")]
+    if not valid:
+        return {"score": 50.0, "bullish": 0, "bearish": 0, "samples": 0, "state": "UNKNOWN"}
+    bullish = sum(1 for r in valid if r["h4_trend"] == "BULLISH" and r["d1_trend"] == "BULLISH")
+    bearish = sum(1 for r in valid if r["h4_trend"] == "BEARISH" and r["d1_trend"] == "BEARISH")
+    score = bullish / max(bullish + bearish, 1) * 100
+    if len(valid) < MARKET_BREADTH_MIN_SAMPLES:
+        state = "LOW_SAMPLE"
+    elif score >= 65:
+        state = "BULLISH"
+    elif score <= 35:
+        state = "BEARISH"
+    else:
+        state = "MIXED"
+    return {"score": round(score, 1), "bullish": bullish, "bearish": bearish, "samples": len(valid), "state": state}
+
+
+def decision_rr(result):
+    entry, sl, tp2 = f(result.get("entry")), f(result.get("sl")), f(result.get("tp2"))
+    if None in (entry, sl, tp2) or entry <= 0:
+        return None
+    risk = abs(entry - sl)
+    reward = abs(tp2 - entry)
+    if risk <= 0:
+        return None
+    return reward / risk
+
+
+def _near_opposing_level(result):
+    entry = f(result.get("entry"))
+    if entry is None or entry <= 0:
+        return False
+    direction = result.get("direction")
+    if direction == "LONG":
+        res = f(result.get("resistance"))
+        if res is not None and res > entry:
+            return (res - entry) / entry < 0.015
+    if direction == "SHORT":
+        sup = f(result.get("support"))
+        if sup is not None and sup < entry:
+            return (entry - sup) / entry < 0.015
+    return False
+
+
+def _load_signal_memory(coin):
+    init_sqlite()
+    with sqlite_conn() as c:
+        row = c.execute("select * from signal_memory where coin=?", (coin,)).fetchone()
+    return dict(row) if row else None
+
+
+def _save_signal_memory(result, state):
+    init_sqlite()
+    with sqlite_conn() as c:
+        c.execute("""insert into signal_memory
+            (coin,direction,action,confidence,signal_candle_ts,entry,sl,tp1,tp2,last_seen_at,decision_state)
+            values(?,?,?,?,?,?,?,?,?,?,?)
+            on conflict(coin) do update set
+            direction=excluded.direction, action=excluded.action,
+            confidence=excluded.confidence, signal_candle_ts=excluded.signal_candle_ts,
+            entry=excluded.entry, sl=excluded.sl, tp1=excluded.tp1, tp2=excluded.tp2,
+            last_seen_at=excluded.last_seen_at, decision_state=excluded.decision_state""",
+            (result["coin"], result.get("direction"), result.get("action"), result.get("confidence"),
+             result.get("signal_candle_ts"), result.get("entry"), result.get("sl"), result.get("tp1"),
+             result.get("tp2"), now_utc().isoformat(), state))
+
+
+def apply_decision_engine(results, btc_regime, breadth):
+    """Turn raw confirmations into human-like decisions.
+
+    A setup must be technically aligned AND tradable. Poor R/R, adverse BTC
+    regime, nearby opposing structure, or an unchanged signal are downgraded
+    to WATCH rather than being presented as fresh executable trades.
+    """
+    for r in results:
+        raw = r.get("action", "NO TRADE")
+        rr = decision_rr(r)
+        r["rr"] = round(rr, 2) if rr is not None else None
+        state = "NO TRADE"
+        reasons = []
+        direction = r.get("direction")
+        regime = btc_regime.get("regime", "UNKNOWN")
+
+        if raw in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            state = raw
+            if rr is None or rr < MIN_EXECUTABLE_RR:
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append(f"R/R زیر {MIN_EXECUTABLE_RR:.1f}")
+            if _near_opposing_level(r):
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("مقاومت/حمایت مقابل بسیار نزدیک")
+            if regime == "RISK_OFF" and direction == "LONG":
+                state = "BULLISH WATCH"
+                reasons.append("BTC regime ریسک‌گریز")
+            elif regime == "RISK_ON" and direction == "SHORT":
+                state = "BEARISH WATCH"
+                reasons.append("BTC regime ریسک‌پذیر")
+            if breadth["state"] == "BEARISH" and direction == "LONG":
+                state = "BULLISH WATCH"
+                reasons.append("Market breadth مخالف LONG")
+            elif breadth["state"] == "BULLISH" and direction == "SHORT":
+                state = "BEARISH WATCH"
+                reasons.append("Market breadth مخالف SHORT")
+
+            mem = _load_signal_memory(r["coin"])
+            same_candle = bool(mem and mem.get("signal_candle_ts") == r.get("signal_candle_ts") and mem.get("direction") == direction)
+            recent_same = False
+            if mem and mem.get("last_seen_at"):
+                try:
+                    age = (now_utc() - datetime.fromisoformat(mem["last_seen_at"].replace("Z", "+00:00"))).total_seconds() / 3600
+                    recent_same = age < SIGNAL_MEMORY_HOURS and mem.get("direction") == direction
+                except Exception:
+                    pass
+            if same_candle or recent_same:
+                r["repeat_signal"] = True
+                if state == raw:
+                    state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("سیگنال تکراری؛ تغییر معنادار مشاهده نشد")
+            else:
+                r["repeat_signal"] = False
+
+        elif raw in ("BULLISH WATCH", "BEARISH WATCH"):
+            state = raw
+        else:
+            state = "NO TRADE"
+
+        r["decision_state"] = state
+        r["decision_reasons"] = reasons
+        if state != raw:
+            r["original_action"] = raw
+        if state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            _save_signal_memory(r, state)
+        elif raw in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            _save_signal_memory(r, state)
+        STORE.insert("atlas_decision_events", {
+            "timestamp": now_utc().isoformat(), "coin": r["coin"], "state": state,
+            "confidence": r.get("confidence"), "rr": r.get("rr"),
+            "btc_regime": regime, "breadth": breadth.get("score"),
+            "reason": " | ".join(reasons) or "decision passed",
+        })
+    return results
+
+
+def atlas_decision_board(results, btc_regime, breadth):
+    buys = [r for r in results if r.get("decision_state") == "BUY CONFIRMATION" and not r.get("repeat_signal")]
+    sells = [r for r in results if r.get("decision_state") == "SELL CONFIRMATION" and not r.get("repeat_signal")]
+    bw = [r for r in results if r.get("decision_state") == "BULLISH WATCH"]
+    sw = [r for r in results if r.get("decision_state") == "BEARISH WATCH"]
+    buys.sort(key=lambda r: (r.get("confidence", 0), r.get("rr") or 0), reverse=True)
+    sells.sort(key=lambda r: (r.get("confidence", 0), r.get("rr") or 0), reverse=True)
+    bw.sort(key=lambda r: r.get("confidence", 0), reverse=True)
+    sw.sort(key=lambda r: r.get("confidence", 0), reverse=True)
+    best = buys[0] if buys else (sells[0] if sells else None)
+    lines = [
+        "━━━━━━━━━━━━━━━━━━",
+        "🎯 ATLAS v9 DECISION BOARD",
+        f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
+        f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
+    ]
+    def compact(title, rows, icon):
+        lines.append(f"{icon} {title}")
+        if not rows:
+            lines.append("— ندارد")
+            return
+        for r in rows[:5]:
+            rr = f" | R/R {r['rr']:.2f}" if r.get("rr") else ""
+            lines.append(f"{r['coin']} — {r['confidence']}%{rr}")
+    compact("EXECUTABLE BUY", buys, "🟢")
+    compact("EXECUTABLE SELL / REDUCE", sells, "🔴")
+    compact("WATCH — صعود", bw, "📈")
+    compact("WATCH — ریزش", sw, "📉")
+    if best:
+        lines.extend([
+            "🔥 BEST SETUP",
+            f"{best['coin']} | {best['decision_state']} | Confidence {best['confidence']}% | R/R {best.get('rr') or 0:.2f}",
+            f"Entry {fmt(best.get('entry'))} | SL {fmt(best.get('sl'))} | TP1 {fmt(best.get('tp1'))} | TP2 {fmt(best.get('tp2'))}",
+            f"Trend H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence')}",
+        ])
+    else:
+        lines.append("⚪ BEST SETUP: هیچ معامله‌ای با کیفیت کافی پیدا نشد")
+    lines.append("Rule: تحلیل خوب ≠ معامله خوب؛ R/R، regime، ساختار و تکراری‌بودن سیگنال همزمان بررسی شده‌اند.")
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -2264,7 +2556,7 @@ def telegram_api_get_me():
         raise RuntimeError("TELEGRAM_TOKEN missing")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
-        headers={"User-Agent": "ATLAS-AI/8.6.1"},
+        headers={"User-Agent": "ATLAS-AI/8.7"},
     )
     with urllib.request.urlopen(req, timeout=20) as r:
         raw = r.read().decode("utf-8", errors="replace")
@@ -2541,6 +2833,12 @@ def global_market_intelligence():
             "change_1h": f(x.get("price_change_percentage_1h_in_currency")),
             "change_7d": f(x.get("price_change_percentage_7d_in_currency")),
         })
+    # CoinGecko can expose duplicate symbols (same ticker used by different assets).
+    # Keep the highest-ranked occurrence so the report is not misleading.
+    unique = {}
+    for item in sorted(clean, key=lambda x: (x.get("rank") or 999999)):
+        unique.setdefault(item["symbol"], item)
+    clean = list(unique.values())
     clean.sort(key=lambda x: x["change_24h"], reverse=True)
     out["top_gainers"] = clean[:7]
     out["top_losers"] = list(reversed(clean[-7:])) if clean else []
@@ -2734,27 +3032,43 @@ def market_summary(results, macro, news):
 
 
 def atlas_conclusion(results):
-    threshold=MIN_CONFIDENCE
-    buys=[x for x in results if x.get("action")=="BUY CONFIRMATION" and x.get("confidence",0)>=threshold]
-    sells=[x for x in results if x.get("action")=="SELL CONFIRMATION" and x.get("confidence",0)>=threshold]
-    rise=[x for x in results if x.get("h4_trend")=="BULLISH" and x.get("d1_trend")=="BULLISH" and x.get("confidence",0)>=threshold and x.get("action")!="BUY CONFIRMATION"]
-    fall=[x for x in results if x.get("h4_trend")=="BEARISH" and x.get("d1_trend")=="BEARISH" and x.get("confidence",0)>=threshold and x.get("action")!="SELL CONFIRMATION"]
-    lines=["━━━━━━━━━━━━━━━━━━","🎯 ATLAS FINAL CONCLUSION"]
-    lines.append("🟢 BUY / ACCUMULATE: "+(", ".join(x["coin"] for x in sorted(buys,key=lambda z:z["confidence"],reverse=True)[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
-    lines.append("🔴 SELL / REDUCE: "+(", ".join(x["coin"] for x in sorted(sells,key=lambda z:z["confidence"],reverse=True)[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
-    lines.append("📈 RISE WATCH: "+(", ".join(x["coin"] for x in sorted(rise,key=lambda z:z["confidence"],reverse=True)[:5]) if rise else "ندارد"))
-    lines.append("📉 FALL WATCH: "+(", ".join(x["coin"] for x in sorted(fall,key=lambda z:z["confidence"],reverse=True)[:5]) if fall else "ندارد"))
-    lines.append(f"Threshold: {threshold:.0f}% | اقدام بدون تأیید کامل = HOLD/WAIT")
-    # Candle-event summary: the scheduler observes closed-candle transitions.
+    threshold = MIN_CONFIDENCE
+    actionable = [x for x in results if x.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and x.get("confidence", 0) >= threshold]
+    buys = sorted([x for x in actionable if x.get("action") == "BUY CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
+    sells = sorted([x for x in actionable if x.get("action") == "SELL CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
+    rise = sorted([x for x in results if x.get("h4_trend") == "BULLISH" and x.get("d1_trend") == "BULLISH" and x.get("action") == "BULLISH WATCH"], key=lambda z: z.get("confidence", 0), reverse=True)
+    fall = sorted([x for x in results if x.get("h4_trend") == "BEARISH" and x.get("d1_trend") == "BEARISH" and x.get("action") == "BEARISH WATCH"], key=lambda z: z.get("confidence", 0), reverse=True)
+
+    lines = ["━━━━━━━━━━━━━━━━━━", f"🎯 {VERSION} FINAL CONCLUSION"]
+    lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in buys[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
+    lines.append("🔴 SELL / REDUCE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in sells[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
+    lines.append("📈 RISE WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in rise[:5]) if rise else "ندارد"))
+    lines.append("📉 FALL WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in fall[:5]) if fall else "ندارد"))
+
+    best = (buys[0] if buys else None)
+    best_side = "BUY"
+    if sells and (best is None or sells[0].get("confidence", 0) > best.get("confidence", 0)):
+        best = sells[0]
+        best_side = "SELL"
+    if best:
+        lines += [
+            f"⭐ BEST SETUP: {best['coin']} — {best_side} — {best['confidence']}%",
+            f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: {best.get('volume_ratio'):.2f}x" if best.get('volume_ratio') is not None else f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: N/A",
+            f"   Entry: {fmt(best.get('entry'))} | SL: {fmt(best.get('sl'))} | TP1: {fmt(best.get('tp1'))} | TP2: {fmt(best.get('tp2'))}",
+        ]
+    else:
+        lines.append("⭐ BEST SETUP: NONE — بازار در این اجرا ستاپ کم‌ریسک و تأییدشده نداد.")
+
     new_events = 0
     for r in results:
         ev = r.get("candle_events", {})
         new_events += sum(1 for x in ev.values() if isinstance(x, dict) and x.get("status") == "NEW_CLOSED")
-    lines.append(f"Closed-candle events observed: {new_events}")
+    lines.append(f"Threshold: {threshold:.0f}% | Closed-candle events observed: {new_events}")
+    lines.append("🛡️ تصمیم ATLAS: فقط BUY/SELLهای بالای آستانه و عبورکرده از تمام Gateها actionable هستند؛ بقیه HOLD/WAIT.")
     return "\n".join(lines)
 
 
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0):
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     # Most useful assets first, but the complete radar is still retained.
     results.sort(
         key=lambda x: (
@@ -2802,7 +3116,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v8.6.1 SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v9 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -2814,6 +3128,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         market_intelligence_block(market_info),
         market_summary(results, macro, news),
         atlas_conclusion(results),
+        atlas_decision_board(results, btc_regime or {"regime":"UNKNOWN","reason":""}, breadth or {"state":"UNKNOWN","score":50.0,"samples":0}),
         "\n".join(footer),
     ])
 
@@ -2871,7 +3186,7 @@ def save_run(results, parts, macro, news):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v8.6.1 closed-candle multi-timeframe engine",
+            "notes": "v9 human-like decision engine: regime + breadth + R/R + signal memory + closed-candle MTF",
         },
     )
 
@@ -2908,9 +3223,19 @@ def report():
             unavailable += 1
             append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
         time.sleep(REQUEST_SLEEP_SECONDS)
+
+    # v9: market regime and breadth are calculated after the raw radar scan,
+    # then the decision engine converts technical confirmations into actual
+    # trade candidates. The existing 4-hour cadence is intentionally unchanged.
+    btc_regime = btc_market_regime()
+    breadth = market_breadth(results)
+    results = apply_decision_engine(results, btc_regime, breadth)
+
     for r in results:
+        # Only genuinely executable decisions become open trade signals.
+        r["action"] = r.get("decision_state", r.get("action"))
         store_signal(r)
-    text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable)
+    text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
     return text, results, macro, news, market_info, unavailable
 
 
