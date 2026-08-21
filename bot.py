@@ -1,7 +1,7 @@
 # ============================================================
-# ATLAS AI v10.0 — HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v10.1 — HARDENED DECISION ENGINE
 # ============================================================
-# v10.0 architecture upgrade:
+# v10.1 architecture hardening:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
 # - Daily S/R primary with high-confidence H4 fallback for continuity
@@ -16,10 +16,10 @@
 # - de-duplicated CoinGecko mover symbols
 # - stronger final conclusion: best setup, entry/SL/TP and actionable ranking
 # - unavailable asset count is explicitly reported for diagnostics
-# v10.0 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
+# v10.1 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
 # human-like overbought/oversold execution control, watch-quality ranking,
 # and accurate attempted/successful asset accounting.
-# v10.0 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
+# v10.1 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
 # then Static Radar; Telegram chunking now preserves radar section boundaries.
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
@@ -69,7 +69,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.0"
+VERSION = "ATLAS v10.1"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -133,7 +133,7 @@ CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 # This order is deliberate and MUST NOT be replaced by CoinGecko rank ordering.
 ATLAS_PRIORITY_TOP10 = [
     "BTC", "ETH", "BNB", "XRP", "SOL",
-    "TRX", "HYPE", "DOGE", "ADA", "MATIC",
+    "TRX", "HYPE", "DOGE", "ADA", "POL",
 ]
 
 ATLAS_STATIC = [
@@ -141,7 +141,7 @@ ATLAS_STATIC = [
     "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR",
     "QNT", "GRT", "TAO", "ONDO", "UNI", "ETHFI", "ATOM", "FIL", "AAVE", "MKR",
     "APT", "ARB", "OP", "INJ", "TIA", "SEI", "PEPE", "FET", "ICP", "ETC",
-    "HYPE", "MATIC",
+    "HYPE", "POL",
 ]
 
 STABLE_SYMBOLS = {
@@ -149,6 +149,11 @@ STABLE_SYMBOLS = {
     "PYUSD", "USDD", "FRAX", "LUSD", "GUSD", "USDG", "USDB", "EURC",
     "USDC.E", "USD0", "USD1",
 }
+
+# Canonical exchange aliases. Polygon migrated from MATIC to POL.
+DISPLAY_SYMBOLS = {"POL": "MATIC"}
+SYMBOL_ALIASES = {"MATIC": "POL", "POL": "POL"}
+
 
 # Yahoo Finance symbols.
 MACRO_SYMBOLS = {
@@ -273,7 +278,15 @@ def clamp(x, lo, hi):
 
 def is_stable(symbol):
     s = (symbol or "").upper().replace("-", "")
-    return s in STABLE_SYMBOLS or s.startswith("USD")
+    return s in {x.replace("-", "").upper() for x in STABLE_SYMBOLS}
+
+def canonical_symbol(symbol):
+    s = (symbol or "").upper().strip()
+    return SYMBOL_ALIASES.get(s, s)
+
+def display_symbol(symbol):
+    s = (symbol or "").upper().strip()
+    return DISPLAY_SYMBOLS.get(s, s)
 
 
 def safe_json(value):
@@ -572,9 +585,15 @@ def ensure_exchanges(force=False):
 
 def symbol_for(eid, coin):
     markets = MARKETS.get(eid, {})
+    coin = canonical_symbol(coin)
     for s in (f"{coin}/USDT", f"{coin}/USDT:USDT"):
         if s in markets:
             return s
+    # Last-resort legacy alias lookup for exchanges that still expose MATIC.
+    if coin == "POL":
+        for s in ("MATIC/USDT", "MATIC/USDT:MATIC", "MATIC/USDT:USDT"):
+            if s in markets:
+                return s
     return None
 
 
@@ -859,21 +878,32 @@ def rsi(values, n=14):
     return 100 - 100 / (1 + ag / al)
 
 
+def ema_series(values, n):
+    if len(values) < n:
+        return []
+    a = 2 / (n + 1)
+    e = sum(values[:n]) / n
+    out = [None] * (n - 1) + [e]
+    for x in values[n:]:
+        e = (x - e) * a + e
+        out.append(e)
+    return out
+
 def macd(values):
+    """Efficient MACD: one EMA12/EMA26 pass, then one signal EMA9 pass."""
     if len(values) < 40:
         return None, None, None
-    line = []
-    for i in range(26, len(values) + 1):
-        a = ema(values[:i], 12)
-        b = ema(values[:i], 26)
-        if a is not None and b is not None:
-            line.append(a - b)
-    signal = ema(line, 9)
+    e12 = ema_series(values, 12)
+    e26 = ema_series(values, 26)
+    line = [e12[i] - e26[i] for i in range(len(values)) if e12[i] is not None and e26[i] is not None]
+    if len(line) < 9:
+        return None, None, None
+    signal_series = ema_series(line, 9)
+    signal = signal_series[-1]
     if signal is None:
         return None, None, None
-    prev_signal = ema(line[:-1], 9) if len(line) > 10 else None
     hist = line[-1] - signal
-    return line[-1], signal, hist if prev_signal is not None else None
+    return line[-1], signal, hist
 
 
 def atr(rows, n=14):
@@ -1388,6 +1418,8 @@ def price_consensus(coin):
         else "MEDIUM" if len(vals) >= 3 and sp <= 3
         else "LOW"
     )
+    if errors:
+        append_changelog("PRICE_CONSENSUS", coin, None, "; ".join(errors[:8]), {"error_count": len(errors), "sources_ok": [x.get("source") for x in sources]})
     return med, sources, quality, sp, errors
 
 
@@ -1443,17 +1475,36 @@ def indicator_alignment(tf4):
     return direction, bullish, bearish, reasons, overbought, oversold
 
 
+def rsi_series(values, n=14):
+    """Wilder RSI series using the same method as rsi(), without O(n^2) slicing."""
+    if len(values) <= n:
+        return []
+    gains = []
+    losses = []
+    for i in range(1, len(values)):
+        d = values[i] - values[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    ag = sum(gains[:n]) / n
+    al = sum(losses[:n]) / n
+    out = [None] * n
+    out.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
+    for i in range(n, len(gains)):
+        ag = ((n - 1) * ag + gains[i]) / n
+        al = ((n - 1) * al + losses[i]) / n
+        out.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
+    return out
+
 def strong_divergence(rows):
     vals = closes(rows)
-    # RSI series
-    rsis = []
-    for i in range(15, len(vals) + 1):
-        rsis.append(rsi(vals[:i]))
-    if len(rsis) < 40:
+    rsis = rsi_series(vals, 14)
+    if not rsis or len(rsis) != len(vals):
         return None
-    # Align lengths by taking tail of price series.
-    p = vals[-len(rsis):]
-    return divergence_3_level(p, rsis)
+    p = [v for v, r in zip(vals, rsis) if r is not None]
+    r = [r for r in rsis if r is not None]
+    if len(r) < 40:
+        return None
+    return divergence_3_level(p, r)
 
 
 def weekly_pivot(rows):
@@ -1707,6 +1758,31 @@ def analyze_coin(coin, market_news, weights):
         direction = "SHORT"
         confidence = max(confidence, 65)
 
+    # If a 3-level divergence overrides the raw indicator direction, recompute
+    # directional RSI/MACD contributions so confidence matches the final signal.
+    if direction in ("LONG", "SHORT"):
+        rsi_points = 0.0
+        macd_points = 0.0
+        if rsi_value is not None:
+            if direction == "LONG":
+                if 52 <= rsi_value <= 68: rsi_points = weights["rsi"]
+                elif 68 < rsi_value <= 75: rsi_points = weights["rsi"] * 0.70
+                elif 75 < rsi_value <= 80: rsi_points = weights["rsi"] * 0.25
+                elif rsi_value > 80: rsi_points = weights["rsi"] * 0.10
+            else:
+                if 32 <= rsi_value < 45: rsi_points = weights["rsi"]
+                elif 25 <= rsi_value < 32: rsi_points = weights["rsi"] * 0.70
+                elif 20 <= rsi_value < 25: rsi_points = weights["rsi"] * 0.25
+                elif rsi_value < 20: rsi_points = weights["rsi"] * 0.10
+        if ml is not None and ms is not None:
+            if direction == "LONG" and ml > ms: macd_points = weights["macd"]
+            elif direction == "SHORT" and ml < ms: macd_points = weights["macd"]
+        old_ind = score_components["indicators"]
+        confidence += (rsi_points + macd_points) - old_ind
+        score_components["rsi"] = round(rsi_points, 2)
+        score_components["macd"] = round(macd_points, 2)
+        score_components["indicators"] = round(rsi_points + macd_points, 2)
+
     # Weekly/monthly are regime filters, not entry triggers. A direct
     # monthly contradiction blocks the setup; a weekly contradiction
     # requires an unusually strong confidence score.
@@ -1728,46 +1804,42 @@ def analyze_coin(coin, market_news, weights):
     # Hard gates
     # --------------------------------------------------------
     gate = "PASS"
-    gate_reason = "All mandatory gates passed"
     warning = None
+    gate_blocks = []
 
+    # Evaluate every mandatory blocker independently. This avoids the old
+    # elif-chain problem where only the first failure was reported.
     if regime_conflict:
-        gate = "BLOCK"
-        gate_reason = "Monthly regime contradicts signal"
-    elif quality == "LOW" or spread_pct > 3:
-        gate = "BLOCK"
-        gate_reason = "Data quality/conflict"
-    elif vol_ratio is None or vol_ratio <= MIN_VOLUME_RATIO:
-        gate = "BLOCK"
-        gate_reason = "Volume confirmation missing"
-    elif confidence < MIN_CONFIDENCE:
-        gate = "BLOCK"
-        gate_reason = "Confidence below threshold"
-    elif direction == "NONE":
-        gate = "BLOCK"
-        gate_reason = "Higher-timeframe alignment missing"
-    elif ((direction == "LONG" and w1 == "BEARISH") or (direction == "SHORT" and w1 == "BULLISH")) and confidence < max(MIN_CONFIDENCE + 15, 75):
-        gate = "BLOCK"
-        gate_reason = "Weekly regime conflict; stronger confirmation required"
-    elif market_news["impact"] == "HIGH":
+        gate_blocks.append("Monthly regime contradicts signal")
+    if quality == "LOW" or (spread_pct is not None and spread_pct > 3):
+        gate_blocks.append("Data quality/conflict")
+    if vol_ratio is None or vol_ratio <= MIN_VOLUME_RATIO:
+        gate_blocks.append("Volume confirmation missing")
+    if confidence < MIN_CONFIDENCE:
+        gate_blocks.append("Confidence below threshold")
+    if direction == "NONE":
+        gate_blocks.append("Higher-timeframe alignment missing")
+    if ((direction == "LONG" and w1 == "BEARISH") or (direction == "SHORT" and w1 == "BULLISH")) and confidence < max(MIN_CONFIDENCE + 15, 75):
+        gate_blocks.append("Weekly regime conflict; stronger confirmation required")
+
+    if market_news["impact"] == "HIGH":
         warning = "نوسان بالا"
-        # High-impact news is not always a full block. It is a warning
-        # unless the news directly contradicts the proposed direction.
-        if (
-            market_news["bias"] == "NEGATIVE" and direction == "LONG"
-        ) or (
-            market_news["bias"] == "POSITIVE" and direction == "SHORT"
-        ):
-            gate = "BLOCK"
-            gate_reason = "High-impact news contradicts signal"
-    elif direction == "LONG" and mom30 == "BEARISH":
+        if ((market_news["bias"] == "NEGATIVE" and direction == "LONG") or
+            (market_news["bias"] == "POSITIVE" and direction == "SHORT")):
+            gate_blocks.append("High-impact news contradicts signal")
+
+    if direction == "LONG" and mom30 == "BEARISH":
         warning = "شتاب مخالف"
-        gate = "BLOCK"
-        gate_reason = "30m momentum strongly opposes long"
-    elif direction == "SHORT" and mom30 == "BULLISH":
+        gate_blocks.append("30m momentum strongly opposes long")
+    if direction == "SHORT" and mom30 == "BULLISH":
         warning = "شتاب مخالف"
+        gate_blocks.append("30m momentum strongly opposes short")
+
+    if gate_blocks:
         gate = "BLOCK"
-        gate_reason = "30m momentum strongly opposes short"
+        gate_reason = " | ".join(gate_blocks)
+    else:
+        gate_reason = "All mandatory gates passed"
 
     levels = None
     leverage = 1.0
@@ -1882,6 +1954,7 @@ def analyze_coin(coin, market_news, weights):
         "gate_reason": gate_reason,
         "reason": " + ".join(reason_parts) or "تایید چندعاملی کافی نیست",
         "sources": [x["source"] for x in sources],
+        "price_errors": errors[:8],
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
     }
@@ -1954,13 +2027,19 @@ _BTC_REGIME_CACHE = {}
 
 
 def market_breadth(results):
-    valid = [r for r in results if r.get("h4_trend") in ("BULLISH", "BEARISH") and r.get("d1_trend") in ("BULLISH", "BEARISH")]
-    if not valid:
+    # Breadth sample = only assets with a genuine H4/D1 directional agreement.
+    # MIXED is excluded from both numerator and denominator.
+    aligned = [
+        r for r in results
+        if r.get("h4_trend") == r.get("d1_trend")
+        and r.get("h4_trend") in ("BULLISH", "BEARISH")
+    ]
+    if not aligned:
         return {"score": 50.0, "bullish": 0, "bearish": 0, "samples": 0, "state": "UNKNOWN"}
-    bullish = sum(1 for r in valid if r["h4_trend"] == "BULLISH" and r["d1_trend"] == "BULLISH")
-    bearish = sum(1 for r in valid if r["h4_trend"] == "BEARISH" and r["d1_trend"] == "BEARISH")
+    bullish = sum(1 for r in aligned if r["h4_trend"] == "BULLISH")
+    bearish = sum(1 for r in aligned if r["h4_trend"] == "BEARISH")
     score = bullish / max(bullish + bearish, 1) * 100
-    if len(valid) < MARKET_BREADTH_MIN_SAMPLES:
+    if len(aligned) < MARKET_BREADTH_MIN_SAMPLES:
         state = "LOW_SAMPLE"
     elif score >= 65:
         state = "BULLISH"
@@ -1968,7 +2047,7 @@ def market_breadth(results):
         state = "BEARISH"
     else:
         state = "MIXED"
-    return {"score": round(score, 1), "bullish": bullish, "bearish": bearish, "samples": len(valid), "state": state}
+    return {"score": round(score, 1), "bullish": bullish, "bearish": bearish, "samples": len(aligned), "state": state}
 
 
 def decision_rr(result):
@@ -2145,7 +2224,15 @@ def apply_decision_engine(results, btc_regime, breadth):
         elif raw in ("BULLISH WATCH", "BEARISH WATCH"):
             state = raw
         else:
-            state = "NO TRADE"
+            # Do not discard useful directional information merely because a
+            # hard gate blocked execution. A WATCH is informational, never an
+            # entry order, and requires the independent watch threshold.
+            if direction in ("LONG", "SHORT") and r.get("confidence", 0) >= MIN_WATCH_CONFIDENCE:
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                if r.get("gate_reason"):
+                    reasons.append(r["gate_reason"])
+            else:
+                state = "NO TRADE"
 
         r["decision_state"] = state
         r["decision_reasons"] = reasons
@@ -2176,7 +2263,7 @@ def atlas_decision_board(results, btc_regime, breadth):
     best = buys[0] if buys else (sells[0] if sells else None)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        "🎯 ATLAS v10 DECISION BOARD",
+        f"🎯 {VERSION} DECISION BOARD",
         f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
         f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
     ]
@@ -2887,7 +2974,7 @@ def asset_block(r):
     """
     action = r.get("action", "NO TRADE")
     lines = [
-        f"🔹 {r['coin']}",
+        f"🔹 {display_symbol(r['coin'])}",
         f"Price: {fmt(r['price'])} | 24H: {pct(r['change'])}",
         f"H4/D1/W1: {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')}",
         f"RSI: {r['rsi']:.1f}" if r.get('rsi') is not None else "RSI: N/A",
@@ -2918,6 +3005,8 @@ def asset_block(r):
         lines.append(f"⚠️ {r['warning']}")
     if f(r.get("spread")) is not None and r["spread"] > 3:
         lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
+    if r.get("price_errors"):
+        lines.append(f"⚠️ PRICE SOURCES FAILED: {len(r['price_errors'])}")
     return "\n".join(lines)
 
 
@@ -3209,17 +3298,18 @@ def market_summary(results, macro, news):
 
 def atlas_conclusion(results):
     threshold = MIN_CONFIDENCE
-    actionable = [x for x in results if x.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and x.get("confidence", 0) >= threshold]
-    buys = sorted([x for x in actionable if x.get("action") == "BUY CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
-    sells = sorted([x for x in actionable if x.get("action") == "SELL CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
-    rise = sorted([x for x in results if x.get("action") == "BULLISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
-    fall = sorted([x for x in results if x.get("action") == "BEARISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
+    actionable = [x for x in results if x.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and x.get("confidence", 0) >= threshold and not x.get("repeat_signal")]
+    buys = sorted([x for x in actionable if x.get("decision_state") == "BUY CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
+    sells = sorted([x for x in actionable if x.get("decision_state") == "SELL CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
+    rise = sorted([x for x in results if x.get("decision_state") == "BULLISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("entry_quality", 0), z.get("liquidity_score", 0)), reverse=True)
+    fall = sorted([x for x in results if x.get("decision_state") == "BEARISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("entry_quality", 0), z.get("liquidity_score", 0)), reverse=True)
 
+    label = lambda x: display_symbol(x.get("coin"))
     lines = ["━━━━━━━━━━━━━━━━━━", f"🎯 {VERSION} FINAL CONCLUSION"]
-    lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in buys[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
-    lines.append("🔴 SELL / REDUCE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in sells[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
-    lines.append("📈 RISE WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in rise[:5]) if rise else "ندارد"))
-    lines.append("📉 FALL WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in fall[:5]) if fall else "ندارد"))
+    lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(f"{label(x)} ({x['confidence']}%)" for x in buys[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
+    lines.append("🔴 SELL / REDUCE: " + (", ".join(f"{label(x)} ({x['confidence']}%)" for x in sells[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
+    lines.append("📈 RISE WATCH: " + (", ".join(f"{label(x)} ({x['confidence']}%)" for x in rise[:5]) if rise else "ندارد"))
+    lines.append("📉 FALL WATCH: " + (", ".join(f"{label(x)} ({x['confidence']}%)" for x in fall[:5]) if fall else "ندارد"))
 
     best = buys[0] if buys else (sells[0] if sells else None)
     best_side = "BUY" if buys else "SELL"
@@ -3227,7 +3317,7 @@ def atlas_conclusion(results):
         best, best_side = sells[0], "SELL"
     if best:
         lines += [
-            f"⭐ BEST SETUP: {best['coin']} — {best_side} — {best['confidence']}%",
+            f"⭐ BEST SETUP: {label(best)} — {best_side} — {best['confidence']}%",
             f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: {best.get('volume_ratio'):.2f}x" if best.get('volume_ratio') is not None else f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: N/A",
             f"   Entry: {fmt(best.get('entry'))} | SL: {fmt(best.get('sl'))} | TP1: {fmt(best.get('tp1'))} | TP2: {fmt(best.get('tp2'))}",
         ]
@@ -3235,7 +3325,7 @@ def atlas_conclusion(results):
         watch = rise[0] if rise else fall[0]
         side = "BULLISH WATCH" if rise else "BEARISH WATCH"
         lines += [
-            f"⭐ BEST WATCH: {watch['coin']} — {side} — {watch['confidence']}%",
+            f"⭐ BEST WATCH: {label(watch)} — {side} — {watch['confidence']}%",
             f"   Trigger: {(watch.get('candle_trigger') or {}).get('state','UNKNOWN')} | RSI: {watch.get('rsi'):.1f}" if watch.get('rsi') is not None else f"   Trigger: {(watch.get('candle_trigger') or {}).get('state','UNKNOWN')} | RSI: N/A",
             f"   S/R: {watch.get('sr_confidence','LOW')} | Volume: {watch.get('volume_ratio'):.2f}x" if watch.get('volume_ratio') is not None else f"   S/R: {watch.get('sr_confidence','LOW')} | Volume: N/A",
             "   تصمیم: هنوز ورود اجرایی نیست؛ منتظر تأیید ساختار/پولبک هستیم.",
@@ -3248,7 +3338,7 @@ def atlas_conclusion(results):
         ev = r.get("candle_events", {})
         new_events += sum(1 for x in ev.values() if isinstance(x, dict) and x.get("status") == "NEW_CLOSED")
     lines.append(f"Threshold: {threshold:.0f}% | Watch threshold: {MIN_WATCH_CONFIDENCE:.0f}% | Closed-candle events observed: {new_events}")
-    lines.append("🛡️ تصمیم ATLAS: BUY/SELL فقط پس از Gate + R/R + regime + ساختار؛ WATCH یعنی جهت جالب است اما ورود هنوز تأیید نشده.")
+    lines.append("🛡️ تصمیم ATLAS: BUY/SELL فقط پس از Gate + R/R + regime + ساختار؛ WATCH جهت معتبر ولی هنوز غیرقابل‌اجراست.")
     return "\n".join(lines)
 
 
@@ -3281,8 +3371,8 @@ def _ordered_report_results(results, top10, dynamic30):
     return ordered
 
 
-def _report_section_header(title, count, subtitle=None):
-    lines = ["━━━━━━━━━━━━━━━━━━", title, f"Assets in section: {count}"]
+def _report_section_header(title, count, available=None, subtitle=None):
+    lines = ["━━━━━━━━━━━━━━━━━━", title, f"Assets listed: {count} | Available: {available if available is not None else count}"]
     if subtitle:
         lines.append(subtitle)
     return "\n".join(lines)
@@ -3330,21 +3420,21 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     # never silently mix Dynamic-30 before the Priority-10 assets.
     blocks.append(_report_section_header(
         "1️⃣ ATLAS TOP 10 PRIORITY",
-        len(top10),
+        len(top10), len(priority_success),
         "BTC → ETH → BNB → XRP → SOL → TRX → HYPE → DOGE → ADA → MATIC",
     ))
     blocks.extend(asset_block(x) for x in priority_success)
 
     blocks.append(_report_section_header(
         "2️⃣ DYNAMIC TOP 30",
-        len(dynamic30),
+        len(dynamic30), len(dynamic_success),
         "Current CoinGecko market-cap ranking, refreshed every run; membership may change daily.",
     ))
     blocks.extend(asset_block(x) for x in dynamic_success)
 
     blocks.append(_report_section_header(
         "3️⃣ ATLAS STATIC RADAR",
-        len(static_success),
+        len(static_success), len(static_success),
         "Persistent surveillance assets not already present in sections 1 or 2.",
     ))
     blocks.extend(asset_block(x) for x in static_success)
@@ -3362,7 +3452,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v10 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v10.1 HARDENED DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
