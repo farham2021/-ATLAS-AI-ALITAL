@@ -1,7 +1,7 @@
+============================================================
+# ATLAS AI v10.1 — HARDENED HUMAN-LIKE DECISION ENGINE
 # ============================================================
-# ATLAS AI v10.1 — HUMAN-LIKE DECISION ENGINE
-# ============================================================
-# v10.1 architecture upgrade:
+# v10.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
 # - Daily S/R primary with high-confidence H4 fallback for continuity
@@ -16,10 +16,10 @@
 # - de-duplicated CoinGecko mover symbols
 # - stronger final conclusion: best setup, entry/SL/TP and actionable ranking
 # - unavailable asset count is explicitly reported for diagnostics
-# v10.1 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
+# v10.0 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
 # human-like overbought/oversold execution control, watch-quality ranking,
 # and accurate attempted/successful asset accounting.
-# v10.1 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
+# v10.0 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
 # then Static Radar; Telegram chunking now preserves radar section boundaries.
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
@@ -39,6 +39,7 @@
 #   - Telegram reports are split safely into multiple messages.
 #   - The same report can be mirrored to a Telegram supergroup.
 #   - Supabase is the primary persistence layer; SQLite is a local fallback.
+#   - GitHub Actions restores/saves the SQLite fallback between ephemeral runners.
 #   - Signal outcomes are evaluated later from historical candles.
 #   - Model weights are changed only after a mandatory backtest gate.
 #   - Every self-modification is written to the changelog.
@@ -112,7 +113,7 @@ MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.80"))
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
-# v10.1 Decision Engine: a signal is not a trade merely because indicators align.
+# v9 Decision Engine: a signal is not a trade merely because indicators align.
 MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
 BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
@@ -131,6 +132,22 @@ CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 # surveillance even if they leave CoinGecko's current top ranks.
 # Fixed priority radar requested for the first Telegram messages.
 # This order is deliberate and MUST NOT be replaced by CoinGecko rank ordering.
+# Exchange/market canonicalization. Polygon rebranded MATIC -> POL, but the
+# user's priority radar intentionally keeps the familiar MATIC label.
+CANONICAL_SYMBOL_ALIASES = {
+    "POL": "MATIC",
+}
+EXCHANGE_SYMBOL_ALIASES = {
+    "MATIC": ("MATIC", "POL"),
+}
+COINGECKO_ID_ALIASES = {
+    "MATIC": "polygon-ecosystem-token",
+}
+
+def canonical_symbol(symbol):
+    s = (symbol or "").upper().strip()
+    return CANONICAL_SYMBOL_ALIASES.get(s, s)
+
 ATLAS_PRIORITY_TOP10 = [
     "BTC", "ETH", "BNB", "XRP", "SOL",
     "TRX", "HYPE", "DOGE", "ADA", "MATIC",
@@ -271,17 +288,10 @@ def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
-# Exchange/data-symbol aliases. Keep the user's reporting symbol stable while
-# using the current market symbol underneath. Polygon migrated from MATIC to POL.
-SYMBOL_ALIASES = {"MATIC": "POL"}
-
-def canonical_data_symbol(symbol):
-    s = (symbol or "").upper().strip()
-    return SYMBOL_ALIASES.get(s, s)
-
 def is_stable(symbol):
-    # Do not use startswith("USD"): it can incorrectly classify non-stable assets.
-    s = canonical_data_symbol(symbol).replace("-", "")
+    # Never use startswith("USD"): that can incorrectly classify legitimate
+    # non-stable symbols. Use an explicit allow-list only.
+    s = canonical_symbol((symbol or "").upper().replace("-", ""))
     return s in STABLE_SYMBOLS
 
 
@@ -581,10 +591,12 @@ def ensure_exchanges(force=False):
 
 def symbol_for(eid, coin):
     markets = MARKETS.get(eid, {})
-    data_symbol = canonical_data_symbol(coin)
-    for s in (f"{data_symbol}/USDT", f"{data_symbol}/USDT:USDT"):
-        if s in markets:
-            return s
+    c = canonical_symbol(coin)
+    aliases = EXCHANGE_SYMBOL_ALIASES.get(c, (c,))
+    for alias in aliases:
+        for s in (f"{alias}/USDT", f"{alias}/USDT:USDT"):
+            if s in markets:
+                return s
     return None
 
 
@@ -718,9 +730,11 @@ def gecko_top(limit=40):
     })
     rows = safe_http_get(url, headers=headers, default=[])
     result = []
+    seen = set()
     for x in rows or []:
-        s = (x.get("symbol") or "").upper()
-        if s and not is_stable(s):
+        s = canonical_symbol(x.get("symbol"))
+        if s and not is_stable(s) and s not in seen:
+            seen.add(s)
             result.append({
                 "id": (x.get("id") or "").strip(),
                 "symbol": s,
@@ -744,7 +758,7 @@ def binance_top(limit=40):
     for sym, x in rows.items():
         if not sym.endswith("/USDT") or ":USDT" in sym:
             continue
-        coin = sym.split("/")[0].upper()
+        coin = canonical_symbol(sym.split("/")[0])
         if is_stable(coin):
             continue
         qv = f(x.get("quoteVolume"))
@@ -772,7 +786,7 @@ def build_universe():
 
     cg_symbols = []
     for x in cg:
-        s = (x.get("symbol") or "").upper()
+        s = canonical_symbol(x.get("symbol"))
         if s and not is_stable(s) and s not in cg_symbols:
             cg_symbols.append(s)
 
@@ -782,18 +796,13 @@ def build_universe():
     top10 = list(ATLAS_PRIORITY_TOP10)
 
     # Dynamic market-cap list: highest-ranked CoinGecko assets not already in
-    # the fixed priority list. Treat aliases such as POL/MATIC as the same asset.
-    top10_canonical = {canonical_data_symbol(x) for x in top10}
-    dynamic30 = [
-        s for s in cg_symbols
-        if s not in top10 and canonical_data_symbol(s) not in top10_canonical
-    ][:30]
+    # the fixed priority list. Fill from Binance only if CoinGecko is short.
+    dynamic30 = [s for s in cg_symbols if s not in top10][:30]
 
     if len(dynamic30) < 30:
         for x in binance_top(80):
-            s = (x.get("symbol") or "").upper()
-            if (s and not is_stable(s) and s not in top10 and s not in dynamic30
-                    and canonical_data_symbol(s) not in top10_canonical):
+            s = canonical_symbol(x.get("symbol"))
+            if s and not is_stable(s) and s not in top10 and s not in dynamic30:
                 dynamic30.append(s)
             if len(dynamic30) >= 30:
                 break
@@ -801,14 +810,9 @@ def build_universe():
     dynamic30 = dynamic30[:30]
 
     # Static radar comes last and cannot displace priority/dynamic assets.
-    dynamic_canonical = {canonical_data_symbol(x) for x in dynamic30}
     static = [
         x for x in ATLAS_STATIC
-        if (not is_stable(x)
-            and x not in top10
-            and x not in dynamic30
-            and canonical_data_symbol(x) not in top10_canonical
-            and canonical_data_symbol(x) not in dynamic_canonical)
+        if not is_stable(x) and x not in top10 and x not in dynamic30
     ]
 
     universe = list(dict.fromkeys(top10 + dynamic30 + static))
@@ -880,35 +884,33 @@ def rsi(values, n=14):
 
 
 def ema_series(values, n):
-    vals = [f(x) for x in values if f(x) is not None]
-    if len(vals) < n:
+    if len(values) < n:
         return []
-    a = 2 / (n + 1)
-    e = sum(vals[:n]) / n
-    out = [None] * (n - 1) + [e]
-    for x in vals[n:]:
-        e = (x - e) * a + e
+    alpha = 2 / (n + 1)
+    e = sum(values[:n]) / n
+    out = [e]
+    for x in values[n:]:
+        e = (x - e) * alpha + e
         out.append(e)
     return out
 
+
 def macd(values):
-    vals = [f(x) for x in values if f(x) is not None]
-    if len(vals) < 40:
+    """Return MACD line, signal and histogram in O(n)."""
+    if len(values) < 40:
         return None, None, None
-    fast = ema_series(vals, 12)
-    slow = ema_series(vals, 26)
-    line = [
-        (fast[i] - slow[i]) if fast[i] is not None and slow[i] is not None else None
-        for i in range(len(vals))
-    ]
-    compact = [x for x in line if x is not None]
-    signal_series = ema_series(compact, 9)
-    if not signal_series or signal_series[-1] is None:
+    fast = ema_series(values, 12)
+    slow = ema_series(values, 26)
+    if not fast or not slow:
         return None, None, None
-    ml = compact[-1]
-    ms = signal_series[-1]
-    hist = ml - ms
-    return ml, ms, hist
+    offset = len(fast) - len(slow)
+    line = [fast[i + offset] - slow[i] for i in range(len(slow))]
+    signal_series = ema_series(line, 9)
+    if not signal_series:
+        return line[-1], None, None
+    signal = signal_series[-1]
+    hist = line[-1] - signal
+    return line[-1], signal, hist
 
 
 def atr(rows, n=14):
@@ -1392,13 +1394,12 @@ def price_consensus(coin):
         if COINGECKO_API_KEY:
             headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
         rows = gecko_top(50)
-        data_symbol = canonical_data_symbol(coin)
         x = next(
-            (z for z in rows if canonical_data_symbol(z.get("symbol")) == data_symbol),
+            (z for z in rows if (z.get("symbol") or "").upper() == coin),
             None,
         )
         # CoinGecko /simple/price requires the canonical CoinGecko ID, not symbol.
-        gecko_id = (x or {}).get("id")
+        gecko_id = (x or {}).get("id") or COINGECKO_ID_ALIASES.get(canonical_symbol(coin))
         if gecko_id:
             url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode({
                 "ids": gecko_id,
@@ -1409,15 +1410,8 @@ def price_consensus(coin):
             if p is not None:
                 vals.append(p)
                 sources.append({"source": "CoinGecko", "price": p, "id": gecko_id})
-    except Exception:
-        pass
-
-    if errors:
-        append_changelog(
-            "PRICE_CONSENSUS", coin, None,
-            "; ".join(errors[:10]),
-            {"error_count": len(errors), "sources_ok": len(sources)}
-        )
+    except Exception as e:
+        errors.append(f"CoinGecko ERROR: {e}")
 
     if not vals:
         raise RuntimeError("NO PRICE DATA")
@@ -1438,11 +1432,13 @@ def price_consensus(coin):
 # SIGNAL SCORING
 # ============================================================
 
-def indicator_alignment(tf4):
+def indicator_alignment(tf4, macd_line=None, macd_signal=None):
     c = tf4["rows"]
     vals = closes(c)
     rr = tf4["rsi"]
-    ml, ms, hist = macd(vals)
+    ml, ms = macd_line, macd_signal
+    if ml is None and macd_signal is None:
+        ml, ms, _ = macd(vals)
 
     bullish = 0
     bearish = 0
@@ -1487,35 +1483,33 @@ def indicator_alignment(tf4):
 
 
 def rsi_series(values, n=14):
-    """Return a Wilder-smoothed RSI series in O(n), aligned to its first valid bar."""
-    vals = [f(x) for x in values if f(x) is not None]
-    if len(vals) <= n:
+    """Wilder RSI series using one O(n) pass, aligned to price values."""
+    if len(values) <= n:
         return []
-    gains = []
-    losses = []
-    for i in range(1, len(vals)):
-        d = vals[i] - vals[i - 1]
-        gains.append(max(d, 0.0))
-        losses.append(max(-d, 0.0))
-    ag = sum(gains[:n]) / n
-    al = sum(losses[:n]) / n
+    gains = [max(values[i] - values[i - 1], 0.0) for i in range(1, len(values))]
+    losses = [max(values[i - 1] - values[i], 0.0) for i in range(1, len(values))]
+    avg_gain = sum(gains[:n]) / n
+    avg_loss = sum(losses[:n]) / n
     out = [None] * n
-    out.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
+    out.append(100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss))
     for i in range(n, len(gains)):
-        ag = ((n - 1) * ag + gains[i]) / n
-        al = ((n - 1) * al + losses[i]) / n
-        out.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
-    return [x for x in out if x is not None]
+        avg_gain = ((n - 1) * avg_gain + gains[i]) / n
+        avg_loss = ((n - 1) * avg_loss + losses[i]) / n
+        out.append(100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss))
+    return out
+
 
 def strong_divergence(rows):
     vals = closes(rows)
-    rsis = rsi_series(vals, 14)
-    if len(rsis) < 40:
+    if len(vals) < 60:
         return None
-    # The RSI series begins at the first valid RSI observation, so align price
-    # to the same tail. This uses one consistent Wilder calculation throughout.
-    p = vals[-len(rsis):]
-    return divergence_3_level(p, rsis)
+    rsis = rsi_series(vals, 14)
+    pairs = [(p, r) for p, r in zip(vals, rsis) if r is not None]
+    if len(pairs) < 40:
+        return None
+    prices = [p for p, _ in pairs]
+    rsi_vals = [r for _, r in pairs]
+    return divergence_3_level(prices, rsi_vals)
 
 
 def weekly_pivot(rows):
@@ -1618,38 +1612,6 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
     return {"state":state,"close_location":round(loc,3),"range_pct":round(range_pct,3),"near_extreme":loc>=0.85 or loc<=0.15}
 
 
-def directional_momentum_points(direction, rsi_value, macd_line, macd_signal, weights):
-    """Score RSI/MACD using the FINAL trade direction, not a pre-override direction."""
-    rsi_points = 0.0
-    if rsi_value is not None:
-        if direction == "LONG":
-            if 52 <= rsi_value <= 68:
-                rsi_points = weights["rsi"]
-            elif 68 < rsi_value <= 75:
-                rsi_points = weights["rsi"] * 0.70
-            elif 75 < rsi_value <= 80:
-                rsi_points = weights["rsi"] * 0.25
-            elif rsi_value > 80:
-                rsi_points = weights["rsi"] * 0.10
-        elif direction == "SHORT":
-            if 32 <= rsi_value < 45:
-                rsi_points = weights["rsi"]
-            elif 25 <= rsi_value < 32:
-                rsi_points = weights["rsi"] * 0.70
-            elif 20 <= rsi_value < 25:
-                rsi_points = weights["rsi"] * 0.25
-            elif rsi_value < 20:
-                rsi_points = weights["rsi"] * 0.10
-
-    macd_points = 0.0
-    if macd_line is not None and macd_signal is not None:
-        if direction == "LONG" and macd_line > macd_signal:
-            macd_points = weights["macd"]
-        elif direction == "SHORT" and macd_line < macd_signal:
-            macd_points = weights["macd"]
-    return rsi_points, macd_points
-
-
 def analyze_coin(coin, market_news, weights):
     if is_stable(coin):
         return None
@@ -1672,8 +1634,12 @@ def analyze_coin(coin, market_news, weights):
     w1 = tfw.get("trend", "UNKNOWN")
     m1 = tfm.get("trend", "UNKNOWN")
 
+    vals4 = closes(tf4["rows"])
+    macd_line, macd_signal, macd_hist = macd(vals4)
     pattern, pattern_dir = candle_pattern(tf4["rows"])
-    ind_dir, bull_n, bear_n, indicator_reasons, overbought, oversold = indicator_alignment(tf4)
+    ind_dir, bull_n, bear_n, indicator_reasons, overbought, oversold = indicator_alignment(
+        tf4, macd_line, macd_signal
+    )
 
     divergence = strong_divergence(tf4["rows"])
 
@@ -1694,7 +1660,7 @@ def analyze_coin(coin, market_news, weights):
     mom30, _ = momentum_30m(coin)
 
     # Direction must be resolved BEFORE any trigger calculation uses it.
-    # an earlier version accidentally evaluated candle_trigger_state(..., direction, ...)
+    # v8.6.1 accidentally evaluated candle_trigger_state(..., direction, ...)
     # before direction was assigned, causing every asset analysis to raise
     # UnboundLocalError and leaving the report with Total scanned: 0.
 
@@ -1704,7 +1670,7 @@ def analyze_coin(coin, market_news, weights):
     # quality setups instead of clustering many assets at exactly 65%.
     # --------------------------------------------------------
     rsi_value = f(tf4.get("rsi"))
-    ml, ms, _hist = macd(closes(tf4["rows"]))
+    ml, ms, _hist = macd_line, macd_signal, macd_hist
 
     candle_points = 0.0
     candle_valid = False
@@ -1781,35 +1747,49 @@ def analyze_coin(coin, market_news, weights):
     }
 
     # --------------------------------------------------------
-    # Direction selection
+    # Direction selection + final directional score
     # --------------------------------------------------------
     direction = "NONE"
-    # H4 + D1 remain the primary trend filter. H1 is confirmation, not a
-    # mandatory hard gate; this prevents the model from going silent merely
-    # because a lower timeframe is temporarily counter-trend.
     if ind_dir == "BULLISH" and h4 == "BULLISH" and d1 == "BULLISH":
         direction = "LONG"
     elif ind_dir == "BEARISH" and h4 == "BEARISH" and d1 == "BEARISH":
         direction = "SHORT"
 
-    # Strong three-level divergence is the only exception to
-    # the normal higher-timeframe rule.
+    # A verified 3-level divergence may override H4, but the score is then
+    # recomputed using the FINAL direction. Never keep bullish RSI/MACD points
+    # after flipping a setup to SHORT, or vice versa.
     if divergence == "BULLISH_3_LEVEL" and h4 != "BULLISH":
         direction = "LONG"
-        confidence = max(confidence, 65)
     elif divergence == "BEARISH_3_LEVEL" and h4 != "BEARISH":
         direction = "SHORT"
-        confidence = max(confidence, 65)
 
-    # Reconcile momentum scores with the FINAL direction. A divergence
-    # override must not leave RSI/MACD points calculated for the old direction.
-    old_indicator_points = rsi_points + macd_points
-    rsi_points, macd_points = directional_momentum_points(
-        direction, rsi_value, ml, ms, weights
-    )
-    new_indicator_points = rsi_points + macd_points
-    confidence += new_indicator_points - old_indicator_points
-    indicator_points = new_indicator_points
+    if direction == "LONG":
+        if rsi_value is not None:
+            if 52 <= rsi_value <= 68:
+                rsi_points = weights["rsi"]
+            elif 68 < rsi_value <= 75:
+                rsi_points = weights["rsi"] * 0.70
+            elif 75 < rsi_value <= 80:
+                rsi_points = weights["rsi"] * 0.25
+            elif rsi_value > 80:
+                rsi_points = weights["rsi"] * 0.10
+        macd_points = weights["macd"] if (ml is not None and ms is not None and ml > ms) else 0.0
+    elif direction == "SHORT":
+        if rsi_value is not None:
+            if 32 <= rsi_value < 45:
+                rsi_points = weights["rsi"]
+            elif 25 <= rsi_value < 32:
+                rsi_points = weights["rsi"] * 0.70
+            elif 20 <= rsi_value < 25:
+                rsi_points = weights["rsi"] * 0.25
+            elif rsi_value < 20:
+                rsi_points = weights["rsi"] * 0.10
+        macd_points = weights["macd"] if (ml is not None and ms is not None and ml < ms) else 0.0
+
+    indicator_points = rsi_points + macd_points
+    confidence = candle_points + indicator_points + volume_points + higher_points + news_points
+    if divergence in ("BULLISH_3_LEVEL", "BEARISH_3_LEVEL"):
+        confidence = max(confidence, 65.0)
     score_components.update({
         "rsi": round(rsi_points, 2),
         "macd": round(macd_points, 2),
@@ -1834,52 +1814,35 @@ def analyze_coin(coin, market_news, weights):
         regime_conflict = True
 
     # --------------------------------------------------------
-    # Hard gates
+    # Hard gates — collect ALL blockers, not only the first one.
     # --------------------------------------------------------
-    # Collect every blocking condition instead of hiding secondary failures
-    # behind an elif chain. This improves diagnostics without changing the
-    # PASS/BLOCK decision itself.
-    gate_reasons = []
-    gate = "PASS"
-    gate_reason = "All mandatory gates passed"
+    hard_blocks = []
     warning = None
-
     if regime_conflict:
-        gate_reasons.append("Monthly regime contradicts signal")
+        hard_blocks.append("Monthly regime contradicts signal")
     if quality == "LOW" or spread_pct > 3:
-        gate_reasons.append("Data quality/conflict")
+        hard_blocks.append("Data quality/conflict")
     if vol_ratio is None or vol_ratio <= MIN_VOLUME_RATIO:
-        gate_reasons.append("Volume confirmation missing")
+        hard_blocks.append("Volume confirmation missing")
     if confidence < MIN_CONFIDENCE:
-        gate_reasons.append("Confidence below threshold")
+        hard_blocks.append("Confidence below threshold")
     if direction == "NONE":
-        gate_reasons.append("Higher-timeframe alignment missing")
-    if ((direction == "LONG" and w1 == "BEARISH") or
-        (direction == "SHORT" and w1 == "BULLISH")) and confidence < max(MIN_CONFIDENCE + 15, 75):
-        gate_reasons.append("Weekly regime conflict; stronger confirmation required")
-
-    if gate_reasons:
-        gate = "BLOCK"
-        gate_reason = " | ".join(dict.fromkeys(gate_reasons))
-
+        hard_blocks.append("Higher-timeframe alignment missing")
+    if ((direction == "LONG" and w1 == "BEARISH") or (direction == "SHORT" and w1 == "BULLISH")) and confidence < max(MIN_CONFIDENCE + 15, 75):
+        hard_blocks.append("Weekly regime conflict; stronger confirmation required")
     if market_news["impact"] == "HIGH":
         warning = "نوسان بالا"
-        if ((market_news["bias"] == "NEGATIVE" and direction == "LONG") or
-            (market_news["bias"] == "POSITIVE" and direction == "SHORT")):
-            gate = "BLOCK"
-            gate_reasons.append("High-impact news contradicts signal")
-
+        if (market_news["bias"] == "NEGATIVE" and direction == "LONG") or (market_news["bias"] == "POSITIVE" and direction == "SHORT"):
+            hard_blocks.append("High-impact news contradicts signal")
     if direction == "LONG" and mom30 == "BEARISH":
-        warning = "شتاب مخالف"
-        gate = "BLOCK"
-        gate_reasons.append("30m momentum strongly opposes long")
-    elif direction == "SHORT" and mom30 == "BULLISH":
-        warning = "شتاب مخالف"
-        gate = "BLOCK"
-        gate_reasons.append("30m momentum strongly opposes short")
+        warning = warning or "شتاب مخالف"
+        hard_blocks.append("30m momentum strongly opposes long")
+    if direction == "SHORT" and mom30 == "BULLISH":
+        warning = warning or "شتاب مخالف"
+        hard_blocks.append("30m momentum strongly opposes short")
 
-    if gate_reasons:
-        gate_reason = " | ".join(dict.fromkeys(gate_reasons))
+    gate = "BLOCK" if hard_blocks else "PASS"
+    gate_reason = " | ".join(dict.fromkeys(hard_blocks)) if hard_blocks else "All mandatory gates passed"
 
     levels = None
     leverage = 1.0
@@ -1888,15 +1851,15 @@ def analyze_coin(coin, market_news, weights):
     if gate == "PASS":
         if not effective_levels or effective_levels.get("confidence") == "LOW":
             gate = "BLOCK"
-            gate_reason = "Reliable Daily/H4 S/R not confirmed"
+            gate_reason = (gate_reason + " | " if gate_reason else "") + "Reliable Daily/H4 S/R not confirmed"
         elif sr_fallback and confidence < max(MIN_CONFIDENCE + 10, H4_FALLBACK_MIN_SCORE):
             gate = "BLOCK"
-            gate_reason = "H4 S/R fallback requires elevated confidence"
+            gate_reason = (gate_reason + " | " if gate_reason else "") + "H4 S/R fallback requires elevated confidence"
         else:
             levels = calculate_levels(tf4["rows"], direction, effective_levels)
             if levels is None:
                 gate = "BLOCK"
-                gate_reason = "Invalid price geometry"
+                gate_reason = (gate_reason + " | " if gate_reason else "") + "Invalid price geometry"
             else:
                 leverage = suggested_leverage(atrp)
                 four_h_event = snapshots.get("4h", {}).get("event", {})
@@ -1982,6 +1945,8 @@ def analyze_coin(coin, market_news, weights):
         "oversold": oversold,
         "quality": quality,
         "spread": spread_pct,
+        "price_source_errors": errors,
+        "price_sources": sources,
         "liquidity_score": liq_score,
         "liquidity": liq_label,
         "momentum_30m": mom30,
@@ -1994,14 +1959,13 @@ def analyze_coin(coin, market_news, weights):
         "gate_reason": gate_reason,
         "reason": " + ".join(reason_parts) or "تایید چندعاملی کافی نیست",
         "sources": [x["source"] for x in sources],
-        "price_consensus_errors": errors[:10],
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
     }
 
 
 # ============================================================
-# v10.1 DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
+# v9 DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
 # ============================================================
 
 def _trend_bias_from_rows(rows):
@@ -2067,13 +2031,15 @@ _BTC_REGIME_CACHE = {}
 
 
 def market_breadth(results):
-    valid = [r for r in results if r.get("h4_trend") in ("BULLISH", "BEARISH") and r.get("d1_trend") in ("BULLISH", "BEARISH")]
-    if not valid:
+    # Samples are ONLY the assets that are actually H4/D1 aligned. Mixed
+    # assets never inflate the denominator or create false confidence.
+    bullish = sum(1 for r in results if r.get("h4_trend") == "BULLISH" and r.get("d1_trend") == "BULLISH")
+    bearish = sum(1 for r in results if r.get("h4_trend") == "BEARISH" and r.get("d1_trend") == "BEARISH")
+    samples = bullish + bearish
+    if samples == 0:
         return {"score": 50.0, "bullish": 0, "bearish": 0, "samples": 0, "state": "UNKNOWN"}
-    bullish = sum(1 for r in valid if r["h4_trend"] == "BULLISH" and r["d1_trend"] == "BULLISH")
-    bearish = sum(1 for r in valid if r["h4_trend"] == "BEARISH" and r["d1_trend"] == "BEARISH")
-    score = bullish / max(bullish + bearish, 1) * 100
-    if len(valid) < MARKET_BREADTH_MIN_SAMPLES:
+    score = bullish / samples * 100
+    if samples < MARKET_BREADTH_MIN_SAMPLES:
         state = "LOW_SAMPLE"
     elif score >= 65:
         state = "BULLISH"
@@ -2081,7 +2047,7 @@ def market_breadth(results):
         state = "BEARISH"
     else:
         state = "MIXED"
-    return {"score": round(score, 1), "bullish": bullish, "bearish": bearish, "samples": len(valid), "state": state}
+    return {"score": round(score, 1), "bullish": bullish, "bearish": bearish, "samples": samples, "state": state}
 
 
 def decision_rr(result):
@@ -2257,6 +2223,14 @@ def apply_decision_engine(results, btc_regime, breadth):
 
         elif raw in ("BULLISH WATCH", "BEARISH WATCH"):
             state = raw
+        elif direction in ("LONG", "SHORT") and r.get("confidence", 0) >= MIN_WATCH_CONFIDENCE:
+            # A blocked setup can still be useful as a watch candidate. Never
+            # turn low-quality/conflicted data into a watch signal.
+            blockers = (r.get("gate_reason") or "").lower()
+            hard_data_block = any(k in blockers for k in ("data quality", "higher-timeframe alignment", "invalid price geometry"))
+            if not hard_data_block:
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("Setup زیر آستانه ورود اجرایی؛ برای پایش نگه داشته شد")
         else:
             state = "NO TRADE"
 
@@ -2289,7 +2263,7 @@ def atlas_decision_board(results, btc_regime, breadth):
     best = buys[0] if buys else (sells[0] if sells else None)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        "🎯 ATLAS v10 DECISION BOARD",
+        "🎯 ATLAS v10.1 DECISION BOARD",
         f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
         f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
     ]
@@ -3026,7 +3000,12 @@ def asset_block(r):
     else:
         lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
         lines.append(f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی نیست'}")
+        if r.get('gate_reason'):
+            lines.append(f"Gate: {r['gate_reason']}")
 
+    if r.get("price_source_errors"):
+        ok_sources = [x.get("source") for x in r.get("price_sources", []) if x.get("price") is not None]
+        lines.append("PRICE SOURCES: " + " | ".join(ok_sources[:5]) + f" | Errors: {len(r['price_source_errors'])}")
     if r.get("warning"):
         lines.append(f"⚠️ {r['warning']}")
     if f(r.get("spread")) is not None and r["spread"] > 3:
@@ -3412,10 +3391,8 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
 
     priority_success = [r for r in results if r.get("coin") in set(top10)]
     dynamic_success = [r for r in results if r.get("coin") in set(dynamic30)]
-    static_success = [
-        r for r in results
-        if r.get("coin") not in set(top10) and r.get("coin") not in set(dynamic30)
-    ]
+    static_set = set(ATLAS_STATIC)
+    static_success = [r for r in results if r.get("coin") in static_set and r.get("coin") not in set(top10) and r.get("coin") not in set(dynamic30)]
 
     header = [
         f"🤖 {VERSION} — SNIPER",
@@ -3443,14 +3420,14 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     # never silently mix Dynamic-30 before the Priority-10 assets.
     blocks.append(_report_section_header(
         "1️⃣ ATLAS TOP 10 PRIORITY",
-        len(top10),
+        len(priority_success),
         "BTC → ETH → BNB → XRP → SOL → TRX → HYPE → DOGE → ADA → MATIC",
     ))
     blocks.extend(asset_block(x) for x in priority_success)
 
     blocks.append(_report_section_header(
         "2️⃣ DYNAMIC TOP 30",
-        len(dynamic30),
+        len(dynamic_success),
         "Current CoinGecko market-cap ranking, refreshed every run; membership may change daily.",
     ))
     blocks.extend(asset_block(x) for x in dynamic_success)
@@ -3475,7 +3452,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v10 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v10.1 HARDENED HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -3549,7 +3526,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v10 human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF",
+            "notes": "v10.1 hardened human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF",
         },
     )
 
@@ -3587,7 +3564,7 @@ def report():
             append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
         time.sleep(REQUEST_SLEEP_SECONDS)
 
-    # v10.1: market regime and breadth are calculated after the raw radar scan,
+    # v9: market regime and breadth are calculated after the raw radar scan,
     # then the decision engine converts technical confirmations into actual
     # trade candidates. The existing 4-hour cadence is intentionally unchanged.
     btc_regime = btc_market_regime()
