@@ -1,7 +1,7 @@
 # ============================================================
-# ATLAS AI v9.2 — HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v10.0 — HUMAN-LIKE DECISION ENGINE
 # ============================================================
-# v9.0 architecture upgrade:
+# v10.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
 # - Daily S/R primary with high-confidence H4 fallback for continuity
@@ -16,10 +16,10 @@
 # - de-duplicated CoinGecko mover symbols
 # - stronger final conclusion: best setup, entry/SL/TP and actionable ranking
 # - unavailable asset count is explicitly reported for diagnostics
-# v9.1 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
+# v10.0 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
 # human-like overbought/oversold execution control, watch-quality ranking,
 # and accurate attempted/successful asset accounting.
-# v9.2 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
+# v10.0 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
 # then Static Radar; Telegram chunking now preserves radar section boundaries.
 # Purpose:
 #   Professional multi-timeframe market surveillance and signal engine.
@@ -69,7 +69,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v9.2"
+VERSION = "ATLAS v10.0"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -119,7 +119,7 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v91.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v10.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -1605,7 +1605,7 @@ def analyze_coin(coin, market_news, weights):
     # UnboundLocalError and leaving the report with Total scanned: 0.
 
     # --------------------------------------------------------
-    # v9.1 CONFIDENCE — component-level, not binary.
+    # v10.0 CONFIDENCE — component-level, not binary.
     # The six learned weights now produce different scores for different
     # quality setups instead of clustering many assets at exactly 65%.
     # --------------------------------------------------------
@@ -2021,6 +2021,49 @@ def _save_signal_memory(result, state):
              result.get("tp2"), now_utc().isoformat(), state))
 
 
+def setup_quality_score(r):
+    """Human-like entry quality score; informational but also used by the execution gate."""
+    score = 50.0
+    trigger = (r.get("candle_trigger") or {}).get("state")
+    if trigger in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BREAKDOWN_CLOSED", "RESISTANCE_REJECT"):
+        score += 15
+    elif trigger == "BULLISH_CLOSE" or trigger == "BEARISH_CLOSE":
+        score += 8
+    if r.get("h4_trend") == r.get("d1_trend") and r.get("h4_trend") in ("BULLISH", "BEARISH"):
+        score += 10
+    if r.get("overbought") or r.get("oversold"):
+        score -= 15
+    vr = f(r.get("volume_ratio"))
+    if vr is not None:
+        score += 10 if vr >= 1.35 else 5 if vr >= 1.0 else -5 if vr < 0.8 else 0
+    sr = r.get("sr_confidence")
+    score += 10 if sr == "HIGH" else 5 if sr == "MEDIUM" else 0
+    direction = r.get("direction")
+    w1 = r.get("w1_trend")
+    if direction == "LONG" and w1 == "BEARISH":
+        score -= 10
+    elif direction == "SHORT" and w1 == "BULLISH":
+        score -= 10
+    return int(clamp(round(score), 0, 100))
+
+
+def risk_quality_score(r, rr=None):
+    """Risk quality combines reward/risk, liquidity, data quality and structure."""
+    score = 40.0
+    rr = f(rr)
+    if rr is not None:
+        score += 25 if rr >= 3 else 20 if rr >= 2.5 else 15 if rr >= 2 else 0 if rr >= 1.5 else -20
+    liq = f(r.get("liquidity_score")) or 0
+    score += 15 if liq >= 70 else 8 if liq >= 45 else -8
+    q = r.get("quality")
+    score += 15 if q == "HIGH" else 8 if q == "MEDIUM" else -10
+    spread = f(r.get("spread"))
+    score += 10 if spread is not None and spread <= 1 else 5 if spread is not None and spread <= 3 else -20
+    if _near_opposing_level(r):
+        score -= 20
+    return int(clamp(round(score), 0, 100))
+
+
 def apply_decision_engine(results, btc_regime, breadth):
     """Turn raw confirmations into human-like decisions.
 
@@ -2032,6 +2075,9 @@ def apply_decision_engine(results, btc_regime, breadth):
         raw = r.get("action", "NO TRADE")
         rr = decision_rr(r)
         r["rr"] = round(rr, 2) if rr is not None else None
+        r["setup_score"] = int(r.get("confidence", 0))
+        r["entry_quality"] = setup_quality_score(r)
+        r["risk_quality"] = risk_quality_score(r, rr)
         state = "NO TRADE"
         reasons = []
         direction = r.get("direction")
@@ -2039,6 +2085,13 @@ def apply_decision_engine(results, btc_regime, breadth):
 
         if raw in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
             state = raw
+
+            if r.get("entry_quality", 0) < 70:
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append(f"Entry quality {r.get('entry_quality', 0)}/100 < 70")
+            if r.get("risk_quality", 0) < 70:
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append(f"Risk quality {r.get('risk_quality', 0)}/100 < 70")
 
             # Human-like risk control: do not chase extreme momentum.
             # A genuine closed-candle breakout/reclaim may still execute,
@@ -2123,7 +2176,7 @@ def atlas_decision_board(results, btc_regime, breadth):
     best = buys[0] if buys else (sells[0] if sells else None)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        "🎯 ATLAS v9 DECISION BOARD",
+        "🎯 ATLAS v10 DECISION BOARD",
         f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
         f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
     ]
@@ -2826,52 +2879,45 @@ def action_emoji(action):
 
 
 def asset_block(r):
+    """Compact decision-focused asset report.
+
+    Signal calculations still use the full MTF dataset; Telegram only shows
+    fields that materially affect a trading decision. This keeps the report
+    readable without weakening the engine.
+    """
+    action = r.get("action", "NO TRADE")
     lines = [
         f"🔹 {r['coin']}",
-        f"Price: {fmt(r['price'])}",
-        f"24H: {pct(r['change'])} ({r.get('change_source','N/A')})",
-        f"Trend H1/H4/D1/W1/M1: {r['h1_trend']} / {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')} / {r.get('m1_trend','UNKNOWN')}",
-        f"RSI14: {r['rsi']:.1f}" if r["rsi"] is not None else "RSI14: N/A",
+        f"Price: {fmt(r['price'])} | 24H: {pct(r['change'])}",
+        f"H4/D1/W1: {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')}",
+        f"RSI: {r['rsi']:.1f}" if r.get('rsi') is not None else "RSI: N/A",
         f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
-        f"Pattern: {r['pattern']}" + (" ✅" if r["pattern_valid"] else ""),
-        f"Volume: {'🟢' if r['volume']=='STRONG' else '🔴' if r['volume']=='WEAK' else '🟡'} {r['volume']}",
-        f"Volume Ratio: {r['volume_ratio']:.2f}x" if r["volume_ratio"] is not None else "Volume Ratio: N/A",
-        f"Liquidity: {r['liquidity']} ({r['liquidity_score']:.0f}/100)",
-        f"ATR: {r['atr_pct']:.2f}%" if r["atr_pct"] is not None else "ATR: N/A",
-        f"4H/D1 Alignment: {'✅' if r['h4_trend']==r['d1_trend'] else '⚠️'}",
-        f"4H Candle Trigger: {r.get('candle_trigger',{}).get('state','UNKNOWN')}",
-        f"4H Close Location: {r.get('candle_trigger',{}).get('close_location','N/A')}",
-        f"Daily Support: {fmt(r['support'])} | Strength: {r.get('support_score', 0)}/100 | Touches: {r.get('support_touches', 0)}",
-        f"Daily Resistance: {fmt(r['resistance'])} | Strength: {r.get('resistance_score', 0)}/100 | Touches: {r.get('resistance_touches', 0)}",
-        f"Daily S/R Confidence: {r.get('sr_confidence', 'LOW')}",
-        f"Weekly Pivot: {fmt(r['pivot'])}",
-        f"Confidence: {r['confidence']}%",
-        f"🎯 ACTION: {action_emoji(r['action'])}",
-        f"Data: {r['quality']}",
+        f"Pattern: {r['pattern']}" + (" ✅" if r.get("pattern_valid") else ""),
+        f"Volume: {r['volume']} | {r['volume_ratio']:.2f}x" if r.get('volume_ratio') is not None else f"Volume: {r['volume']} | N/A",
+        f"Liquidity: {r['liquidity']} | ATR: {r['atr_pct']:.2f}%" if r.get('atr_pct') is not None else f"Liquidity: {r['liquidity']} | ATR: N/A",
+        f"4H Trigger: {(r.get('candle_trigger') or {}).get('state','UNKNOWN')}",
+        f"Daily S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))} | {r.get('sr_confidence','LOW')}",
+        f"Scores: Setup {r.get('setup_score', r.get('confidence',0))}/100 | Entry {r.get('entry_quality',0)}/100 | Risk {r.get('risk_quality',0)}/100",
+        f"🎯 ACTION: {action_emoji(action)}",
     ]
 
-    if r.get("decision_reasons"):
-        lines.append("Decision: " + " | ".join(r["decision_reasons"]))
-
-    if r["action"] in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
         lines += [
-            f"Direction: {r['direction']}",
-            f"Entry: {fmt(r['entry'])}",
-            f"SL: {fmt(r['sl'])}",
-            f"TP1: {fmt(r['tp1'])}",
-            f"TP2: {fmt(r['tp2'])}",
-            f"Leverage: {r['leverage']:.1f}x",
-            f"Reason: {r['reason']}",
+            f"R/R: 1:{r.get('rr', 0):.2f} | Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))}",
+            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}",
+            f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی است'}",
         ]
+    elif r.get("decision_reasons"):
+        lines.append("Decision: " + " | ".join(r["decision_reasons"][:3]))
+        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
     else:
-        lines.append(f"Reason: {r['reason']}")
+        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
+        lines.append(f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی نیست'}")
 
-    if r["warning"]:
+    if r.get("warning"):
         lines.append(f"⚠️ {r['warning']}")
-
-    if r["spread"] > 3:
+    if f(r.get("spread")) is not None and r["spread"] > 3:
         lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
-
     return "\n".join(lines)
 
 
@@ -3071,7 +3117,7 @@ def market_intelligence_block(mi):
             lines.append(f"{x['symbol']}: price {fmt(x.get('price'))} | strongest above {a} | strongest below {b}")
     else:
         lines.append("🔥 Liquidation Heatmap: N/A (COINGLASS_API_KEY not configured or endpoint unavailable)")
-    lines.append("* ALT = total crypto dominance excluding BTC and the principal stablecoins; ETH remains inside ALT.")
+    lines.append("* ALT* = total crypto dominance excluding BTC and principal stablecoins; ETH is included in ALT*, so dominance lines are not additive.")
     return "\n".join(lines)
 
 
@@ -3271,7 +3317,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "📡 RADAR ORDER",
         "1️⃣ ATLAS TOP 10 PRIORITY → 2️⃣ DYNAMIC TOP 30 → 3️⃣ ATLAS STATIC RADAR",
         f"Priority Top 10: {len(top10)} | Available: {len(priority_success)}",
-        f"Dynamic Top 30: {len(dynamic30)} | Available: {len(dynamic_success)}",
+        f"Dynamic Top 30: {len(dynamic30)} | Available: {len(dynamic_success)} | refreshed now",
         f"ATLAS Static Radar: {len(ATLAS_STATIC)} | Available: {len(static_success)}",
         f"Total scanned: {len(results)}",
         f"Unavailable/failed: {unavailable}",
@@ -3292,7 +3338,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     blocks.append(_report_section_header(
         "2️⃣ DYNAMIC TOP 30",
         len(dynamic30),
-        "CoinGecko market-cap ranking, excluding the fixed ATLAS Top 10.",
+        "Current CoinGecko market-cap ranking, refreshed every run; membership may change daily.",
     ))
     blocks.extend(asset_block(x) for x in dynamic_success)
 
@@ -3316,7 +3362,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
         "No automatic orders.",
         "",
-        "🎯 ATLAS v9.2 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
+        "🎯 ATLAS v10 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
         "",
         "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
         "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
@@ -3390,7 +3436,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v9 human-like decision engine: regime + breadth + R/R + signal memory + closed-candle MTF",
+            "notes": "v10 human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF",
         },
     )
 
