@@ -2,9 +2,8 @@ name: ATLAS v10.1 Market Supervisor
 
 on:
   workflow_dispatch:
+
   schedule:
-    # Tehran 12:00 / 16:00 / 22:00
-    # GitHub Actions uses UTC.
     - cron: "30 8 * * *"
     - cron: "30 12 * * *"
     - cron: "30 18 * * *"
@@ -20,112 +19,74 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
+
   atlas:
+
     name: ATLAS v10.1 Market Supervisor
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 60
 
     steps:
 
-      # ==========================================================
+      # ============================================================
       # 1. CHECKOUT
-      # ==========================================================
+      # ============================================================
+
       - name: Checkout ATLAS repository
         uses: actions/checkout@v5
 
 
-      # ==========================================================
+      # ============================================================
       # 2. PYTHON
-      # ==========================================================
+      # ============================================================
+
       - name: Setup Python 3.12
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
 
-      # ==========================================================
-      # 3. INSTALL DEPENDENCIES
-      # ==========================================================
-      # IMPORTANT:
-      # We intentionally DO NOT use:
-      #   cache: pip
-      #   cache-dependency-path: requirements.txt
-      #
-      # because this repository does not require requirements.txt.
-      # ATLAS currently installs its required external dependency
-      # directly.
-      # ==========================================================
+      # ============================================================
+      # 3. DEPENDENCIES
+      # ============================================================
+
       - name: Install ATLAS dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --upgrade ccxt
 
-
-      # ==========================================================
-      # 4. VERIFY REPOSITORY
-      # ==========================================================
-      - name: Show ATLAS repository files
-        run: |
-          echo "===== ATLAS REPOSITORY ====="
-          pwd
-          ls -la
-          echo "============================"
-
-
-      # ==========================================================
-      # 5. PREPARE BOT
-      # ==========================================================
-      - name: Prepare ATLAS v10.1 source
-        run: |
-          if [ -f bot.py ]; then
-            echo "Found bot.py"
-          elif [ -f AtlasAI_v10_1_bot.py ]; then
-            echo "Found AtlasAI_v10_1_bot.py; copying to bot.py"
-            cp AtlasAI_v10_1_bot.py bot.py
-          elif [ -f AtlasAI_v10_1_bot_FIXED.py ]; then
-            echo "Found AtlasAI_v10_1_bot_FIXED.py; copying to bot.py"
-            cp AtlasAI_v10_1_bot_FIXED.py bot.py
-          elif [ -f ATLAS_bot_v10_1.py ]; then
-            echo "Found ATLAS_bot_v10_1.py; copying to bot.py"
-            cp ATLAS_bot_v10_1.py bot.py
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
           else
-            echo "ERROR: bot.py is missing."
-            echo "Expected one of:"
-            echo "  bot.py"
-            echo "  AtlasAI_v10_1_bot.py"
-            echo "  AtlasAI_v10_1_bot_FIXED.py"
-            echo "  ATLAS_bot_v10_1.py"
-            echo ""
-            echo "Repository files:"
-            ls -la
-            exit 1
+            python -m pip install --upgrade ccxt
           fi
 
-          echo "===== ACTIVE BOT ====="
-          ls -lh bot.py
-          head -n 5 bot.py
-          echo "====================="
 
-
-      # ==========================================================
-      # 6. RESTORE PERSISTENT ATLAS STATE
-      # ==========================================================
-      # GitHub runners are disposable.
+      # ============================================================
+      # 4. RESTORE PERSISTENT ATLAS STATE
+      #
+      # IMPORTANT:
+      # GitHub-hosted runners are temporary.
       #
       # This restores:
       # - SQLite signal memory
-      # - backtest state
-      # - candle-event state
-      # - local audit data
+      # - backtest cache
+      # - candle-event deduplication
+      # - signal memory
+      # - diagnostic state
       # - changelog
       #
-      # IMPORTANT:
-      # The current run uses a UNIQUE key.
-      # restore-keys finds the newest previous matching state.
-      # ==========================================================
+      # BEFORE bot.py starts.
+      # ============================================================
+
       - name: Restore ATLAS persistent state
         uses: actions/cache/restore@v4
+
         with:
+
           path: |
             atlas_v101.sqlite3
             changelog.txt
@@ -137,139 +98,184 @@ jobs:
             atlas-state-v101-${{ runner.os }}-
 
 
-      # ==========================================================
-      # 7. VERIFY RESTORED STATE
-      # ==========================================================
-      - name: Inspect restored ATLAS state
+      # ============================================================
+      # 5. PREPARE BOT.PY
+      # ============================================================
+
+      - name: Prepare ATLAS v10.1 source
         run: |
-          echo "===== RESTORED STATE ====="
 
-          if [ -f atlas_v101.sqlite3 ]; then
-            echo "SQLite state: FOUND"
-            ls -lh atlas_v101.sqlite3
+          echo "Repository root:"
+          pwd
+
+          echo "Repository files:"
+          ls -la
+
+          if [ -f bot.py ]; then
+
+            echo "Found bot.py"
+
+          elif [ -f AtlasAI_v10_1_bot_FIXED.py ]; then
+
+            echo "Found AtlasAI_v10_1_bot_FIXED.py"
+            cp AtlasAI_v10_1_bot_FIXED.py bot.py
+
+          elif [ -f AtlasAI_v10_1_bot.py ]; then
+
+            echo "Found AtlasAI_v10_1_bot.py"
+            cp AtlasAI_v10_1_bot.py bot.py
+
           else
-            echo "SQLite state: FIRST RUN / NOT FOUND"
+
+            echo "ERROR: ATLAS Python source not found."
+            echo "Expected:"
+            echo "  bot.py"
+            echo "  AtlasAI_v10_1_bot_FIXED.py"
+            echo "  AtlasAI_v10_1_bot.py"
+
+            exit 1
+
           fi
 
-          if [ -f changelog.txt ]; then
-            echo "Changelog: FOUND"
-            ls -lh changelog.txt
-          else
-            echo "Changelog: FIRST RUN / NOT FOUND"
-          fi
+          echo ""
+          echo "===== FIRST 10 LINES OF bot.py ====="
 
-          echo "=========================="
+          head -n 10 bot.py
+
+          echo ""
+          echo "===== bot.py FILE TYPE ====="
+
+          file bot.py
 
 
-      # ==========================================================
-      # 8. PYTHON SYNTAX CHECK
-      # ==========================================================
+      # ============================================================
+      # 6. VALIDATE PYTHON SOURCE
+      # ============================================================
+
       - name: Validate ATLAS v10.1 source
         run: |
+
           test -f bot.py
+
+          echo "Checking Python syntax..."
+
           python -m py_compile bot.py
+
           echo "ATLAS v10.1 syntax: OK"
 
 
-      # ==========================================================
-      # 9. SMOKE TEST
-      # ==========================================================
+      # ============================================================
+      # 7. SMOKE TEST
+      # ============================================================
+
       - name: Run ATLAS v10.1 smoke test
         run: |
+
           if [ -f atlas_v10_1_smoke_test.py ]; then
+
             python atlas_v10_1_smoke_test.py
-          elif [ -f atlas_v10_smoke_test.py ]; then
-            python atlas_v10_smoke_test.py
-          elif [ -f atlas_v9_1_smoke_test.py ]; then
-            python atlas_v9_1_smoke_test.py
+
           else
-            echo "No ATLAS smoke test found."
+
+            echo "Smoke test file not present."
+
             echo "Skipping optional smoke test."
+
           fi
 
 
-      # ==========================================================
-      # 10. RUN ATLAS
-      # ==========================================================
+      # ============================================================
+      # 8. RUN ATLAS
+      # ============================================================
+
       - name: Run ATLAS v10.1 Market Supervisor
+
         env:
 
-          # ---------------- TELEGRAM ----------------
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # ---------------- SUPABASE ----------------
           SUPABASE_URL: "https://tmnfhsuwtqfpglckfxwg.supabase.co"
+
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-          # ---------------- MARKET DATA ----------------
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # ---------------- NEWS ----------------
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-          # ---------------- ATLAS ----------------
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
           ATLAS_VERSION: "10.1"
+
           ATLAS_TIMEFRAME: "4H"
 
-          # ---------------- RISK ----------------
           RISK_PER_TRADE_PCT: "1.5"
+
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+
           ATLAS_MIN_CONFIDENCE: "60"
+
           ATLAS_MAX_LEVERAGE: "10"
 
-          # ---------------- BACKTEST ----------------
           ATLAS_BACKTEST_DAYS: "180"
+
           ATLAS_SIGNAL_HORIZON_BARS: "36"
+
           ATLAS_BACKTEST_IMPROVEMENT: "10"
+
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-          # ---------------- SIGNAL QUALITY ----------------
           ATLAS_MIN_VOLUME_RATIO: "0.80"
+
           ATLAS_H4_FALLBACK_MIN_SCORE: "70"
-          ATLAS_MIN_EXECUTABLE_RR: "2.0"
-          ATLAS_MIN_WATCH_CONFIDENCE: "55"
 
-          # ---------------- ANTI-DUPLICATION ----------------
-          ATLAS_CANDLE_EVENT_DEDUP: "1"
-          ATLAS_SIGNAL_MEMORY_HOURS: "12"
-
-          # ---------------- MARKET REGIME ----------------
-          ATLAS_BTC_REGIME_CACHE_MINUTES: "30"
-          ATLAS_MARKET_BREADTH_MIN_SAMPLES: "8"
-
-          # ---------------- API RATE CONTROL ----------------
           ATLAS_REQUEST_SLEEP_SECONDS: "0.50"
 
-          # ---------------- LOCAL STATE ----------------
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+
+          ATLAS_BTC_REGIME_CACHE_MINUTES: "30"
+
+          ATLAS_SIGNAL_MEMORY_HOURS: "12"
+
+          ATLAS_MARKET_BREADTH_MIN_SAMPLES: "8"
+
           ATLAS_SQLITE_FILE: "atlas_v101.sqlite3"
+
           ATLAS_CHANGELOG: "changelog.txt"
 
-          PYTHONUNBUFFERED: "1"
-
         run: |
+
           python bot.py
 
 
-      # ==========================================================
-      # 11. SAVE PERSISTENT STATE
-      # ==========================================================
-      # Cache entries are immutable.
+      # ============================================================
+      # 9. SAVE PERSISTENT STATE
       #
-      # Therefore every run receives a new key using github.run_id.
-      # The NEXT run restores the newest previous matching key.
+      # GitHub cache keys are immutable.
+      # Therefore every run creates a NEW key.
       #
-      # always() is intentional so diagnostics/state are saved even
-      # if the bot encounters an error after modifying the SQLite DB.
-      # ==========================================================
+      # Next run restores the newest matching cache through
+      # restore-keys above.
+      # ============================================================
+
       - name: Save ATLAS persistent state
         if: always()
+
         uses: actions/cache/save@v4
+
         with:
+
           path: |
             atlas_v101.sqlite3
             changelog.txt
@@ -277,13 +283,17 @@ jobs:
           key: atlas-state-v101-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
 
 
-      # ==========================================================
-      # 12. UPLOAD DIAGNOSTICS
-      # ==========================================================
+      # ============================================================
+      # 10. DIAGNOSTICS ARTIFACT
+      # ============================================================
+
       - name: Upload ATLAS diagnostics
         if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
+
           name: atlas-v10-1-diagnostics-${{ github.run_id }}
 
           path: |
@@ -291,4 +301,5 @@ jobs:
             changelog.txt
 
           if-no-files-found: ignore
+
           retention-days: 14
