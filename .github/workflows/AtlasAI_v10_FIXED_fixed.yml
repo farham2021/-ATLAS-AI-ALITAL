@@ -5,36 +5,68 @@ on:
 
   schedule:
     # سه اجرای ثابت روزانه
-    # UTC — معادل زمان‌های تعیین‌شده ATLAS
+    # UTC
     - cron: "30 7 * * *"
     - cron: "30 11 * * *"
     - cron: "30 15 * * *"
 
-permissions:
-  contents: write
+# ============================================================
+# جلوگیری از اجرای همزمان دو نسخه ATLAS
+# ============================================================
+concurrency:
+  group: atlas-v101-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+
   atlas:
+
     name: ATLAS v10.1 Market Supervisor
+
     runs-on: ubuntu-latest
 
     env:
+
+      # ======================================================
+      # RUNTIME
+      # ======================================================
+
       PYTHONUNBUFFERED: "1"
+
+      # ======================================================
+      # TELEGRAM
+      # ======================================================
 
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
+      # ======================================================
+      # SUPABASE
+      # ======================================================
+
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # ======================================================
+      # MARKET DATA
+      # ======================================================
 
       COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
       CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
       COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
+      # ======================================================
+      # NEWS / MACRO
+      # ======================================================
+
       CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
       ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+      # ======================================================
+      # ATLAS CORE
+      # ======================================================
 
       ATLAS_VERSION: "10.1"
       ATLAS_TIMEFRAME: "4H"
@@ -46,10 +78,18 @@ jobs:
       ATLAS_WATCH_CONFIDENCE: "55"
       ATLAS_MAX_LEVERAGE: "10"
 
+      # ======================================================
+      # BACKTEST
+      # ======================================================
+
       ATLAS_BACKTEST_DAYS: "180"
       ATLAS_SIGNAL_HORIZON_BARS: "36"
       ATLAS_BACKTEST_IMPROVEMENT: "10"
       BACKTEST_REFRESH_HOURS: "24"
+
+      # ======================================================
+      # PERSISTENT STATE
+      # ======================================================
 
       ATLAS_SQLITE_FILE: "atlas_v10.1.sqlite3"
       ATLAS_CHANGELOG: "changelog.txt"
@@ -59,6 +99,7 @@ jobs:
       # ==========================================================
       # 1. CHECKOUT
       # ==========================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -66,8 +107,9 @@ jobs:
 
 
       # ==========================================================
-      # 2. PYTHON
+      # 2. SETUP PYTHON
       # ==========================================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -78,13 +120,18 @@ jobs:
       # ==========================================================
       # 3. INSTALL DEPENDENCIES
       # ==========================================================
+
       - name: Install dependencies
         run: |
+
           python -m pip install --upgrade pip
 
           if [ -f requirements.txt ]; then
+            echo "Installing requirements.txt"
             pip install -r requirements.txt
           else
+            echo "requirements.txt not found"
+            echo "Installing fallback dependency: ccxt"
             pip install ccxt
           fi
 
@@ -92,18 +139,26 @@ jobs:
       # ==========================================================
       # 4. VERIFY BOT
       # ==========================================================
+
       - name: Verify ATLAS bot
         run: |
+
+          echo "========================================"
+          echo "ATLAS SOURCE VERIFICATION"
+          echo "========================================"
+
           test -f bot.py
+
           python -m py_compile bot.py
 
-          echo "========================================"
-          echo "ATLAS source verification"
-          echo "========================================"
+          echo "bot.py syntax: OK"
 
-          grep -n "ATLAS AI v10.1\|ATLAS v10.1" bot.py | head -5 || true
+          echo ""
+          echo "ATLAS version markers:"
 
-          echo "bot.py syntax OK"
+          grep -n \
+            "ATLAS AI v10.1\|ATLAS v10.1\|ATLAS_VERSION" \
+            bot.py | head -10 || true
 
 
       # ==========================================================
@@ -113,14 +168,16 @@ jobs:
       # IMPORTANT:
       # This MUST happen BEFORE python bot.py.
       #
-      # The run_id makes every SAVE key unique.
-      # restore-keys allows the next run to recover
-      # the most recent previous ATLAS state.
+      # Each run creates an immutable cache entry using run_id.
+      # restore-keys retrieves the newest previous state.
       #
       # ==========================================================
+
       - name: Restore ATLAS persistent state
+        id: atlas_restore
         uses: actions/cache/restore@v4
         with:
+
           path: |
             atlas_v10.1.sqlite3
             changelog.txt
@@ -133,12 +190,14 @@ jobs:
 
 
       # ==========================================================
-      # 6. SHOW RESTORED STATE
+      # 6. INSPECT RESTORED STATE
       # ==========================================================
+
       - name: Inspect restored ATLAS state
         run: |
+
           echo "========================================"
-          echo "ATLAS persistent state"
+          echo "ATLAS PERSISTENT STATE"
           echo "========================================"
 
           if [ -f atlas_v10.1.sqlite3 ]; then
@@ -159,8 +218,10 @@ jobs:
       # ==========================================================
       # 7. RUN ATLAS
       # ==========================================================
+
       - name: Run ATLAS v10.1
         run: |
+
           echo "========================================"
           echo "STARTING ATLAS v10.1"
           echo "========================================"
@@ -171,11 +232,13 @@ jobs:
       # ==========================================================
       # 8. VERIFY GENERATED STATE
       # ==========================================================
+
       - name: Verify ATLAS state after run
         if: always()
         run: |
+
           echo "========================================"
-          echo "ATLAS state after execution"
+          echo "ATLAS STATE AFTER EXECUTION"
           echo "========================================"
 
           if [ -f atlas_v10.1.sqlite3 ]; then
@@ -197,16 +260,16 @@ jobs:
       # 9. SAVE PERSISTENT ATLAS STATE
       # ==========================================================
       #
-      # MUST happen AFTER bot.py.
-      #
-      # Because cache entries are immutable, we use github.run_id
-      # in the key and restore the newest previous entry by prefix.
+      # Cache entries are immutable.
+      # Therefore run_id is intentionally part of the key.
       #
       # ==========================================================
+
       - name: Save ATLAS persistent state
         if: always()
         uses: actions/cache/save@v4
         with:
+
           path: |
             atlas_v10.1.sqlite3
             changelog.txt
@@ -215,20 +278,25 @@ jobs:
 
 
       # ==========================================================
-      # 10. OPTIONAL ARTIFACT BACKUP
+      # 10. ARTIFACT BACKUP
       # ==========================================================
       #
-      # This is NOT the primary persistence mechanism.
-      # It is only for debugging/audit/download.
+      # This is NOT the persistence mechanism.
+      # It is only for audit/debugging/manual download.
       #
       # ==========================================================
+
       - name: Upload ATLAS state artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
+
           name: atlas-v10.1-state-${{ github.run_number }}
+
           path: |
             atlas_v10.1.sqlite3
             changelog.txt
+
           if-no-files-found: ignore
+
           retention-days: 14
