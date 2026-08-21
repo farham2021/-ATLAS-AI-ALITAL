@@ -2,6 +2,7 @@ name: ATLAS v10.1 Market Supervisor
 
 on:
   workflow_dispatch:
+
   schedule:
     # اجرای اصلی هر 4 ساعت
     - cron: "0 */4 * * *"
@@ -14,110 +15,307 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
   atlas:
+
     name: ATLAS v10.1 Market Supervisor
+
     runs-on: ubuntu-latest
+
     env:
       PYTHONUNBUFFERED: "1"
+
+      # =========================
+      # ATLAS CORE
+      # =========================
       ATLAS_VERSION: "10.1"
       ATLAS_TIMEFRAME: "4H"
+
       RISK_PER_TRADE_PCT: "1.5"
       MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+
       ATLAS_MIN_CONFIDENCE: "60"
       ATLAS_MAX_LEVERAGE: "10"
+
+      # =========================
+      # BACKTEST
+      # =========================
       ATLAS_BACKTEST_DAYS: "180"
       ATLAS_SIGNAL_HORIZON_BARS: "36"
       ATLAS_BACKTEST_IMPROVEMENT: "10"
+
+      # =========================
+      # PERSISTENT STATE
+      # =========================
       ATLAS_SQLITE_FILE: "atlas_v101.sqlite3"
       ATLAS_CHANGELOG: "changelog.txt"
+
+      # =========================
+      # TELEGRAM
+      # =========================
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+      # =========================
+      # DATABASE
+      # =========================
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # =========================
+      # MARKET DATA
+      # =========================
       COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
       CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+
+      # =========================
+      # NEWS
+      # =========================
       CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
       ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+      # =========================
+      # DERIVATIVES
+      # =========================
       COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
+
     steps:
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v5
 
+
+      # ============================================================
+      # 2. PYTHON
+      # ============================================================
       - name: Setup Python 3.12
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: "pip"
 
+
+      # ============================================================
+      # 3. DEPENDENCIES
+      # ============================================================
       - name: Install ATLAS dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade ccxt
 
+
+      # ============================================================
+      # 4. RESTORE PERSISTENT ATLAS STATE
+      #
+      # IMPORTANT:
+      # SQLite + changelog are persistent across GitHub runners.
+      #
+      # github.run_number is intentionally part of the cache key
+      # because GitHub Actions cache entries are immutable.
+      #
+      # restore-keys find the newest previous ATLAS state.
+      # ============================================================
       - name: Restore ATLAS persistent state
         uses: actions/cache@v4
         with:
+
           path: |
             atlas_v101.sqlite3
             changelog.txt
+
           key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.1-${{ github.run_number }}
+
           restore-keys: |
             atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.1-
             atlas-state-${{ runner.os }}-${{ github.ref_name }}-
             atlas-state-${{ runner.os }}-
 
+
+      # ============================================================
+      # 5. VERIFY FILES
+      # ============================================================
       - name: Verify ATLAS files
         run: |
-          pwd
-          ls -la
-          ls -la .github/workflows || true
-          test -f bot.py
-          test -f atlas_v10_1_smoke_test.py
+          echo "=============================================="
+          echo " ATLAS FILE VERIFICATION"
+          echo "=============================================="
 
+          pwd
+
+          echo "--- Repository ---"
+          ls -la
+
+          echo "--- Workflows ---"
+          ls -la .github/workflows || true
+
+          echo "--- Required files ---"
+
+          test -f bot.py
+
+          if [ ! -f atlas_v10_1_smoke_test.py ]; then
+            echo "ERROR: atlas_v10_1_smoke_test.py not found"
+            exit 1
+          fi
+
+          echo "bot.py: OK"
+          echo "atlas_v10_1_smoke_test.py: OK"
+
+
+      # ============================================================
+      # 6. PYTHON SYNTAX VALIDATION
+      # ============================================================
       - name: Validate Python syntax
         run: |
+          echo "=============================================="
+          echo " PYTHON SYNTAX CHECK"
+          echo "=============================================="
+
           python -m py_compile bot.py
           python -m py_compile atlas_v10_1_smoke_test.py
 
-      - name: Run ATLAS v10.1 smoke test
-        run: python atlas_v10_1_smoke_test.py
+          echo "Python syntax: OK"
 
+
+      # ============================================================
+      # 7. SMOKE TEST
+      # ============================================================
+      - name: Run ATLAS v10.1 smoke test
+        run: |
+          echo "=============================================="
+          echo " ATLAS v10.1 SMOKE TEST"
+          echo "=============================================="
+
+          python atlas_v10_1_smoke_test.py
+
+
+      # ============================================================
+      # 8. SECRET VALIDATION
+      # ============================================================
       - name: Validate required secrets
         run: |
-          test -n "$TELEGRAM_TOKEN" || (echo "ERROR: TELEGRAM_TOKEN missing" && exit 1)
+
+          echo "=============================================="
+          echo " SECRET VALIDATION"
+          echo "=============================================="
+
+          test -n "$TELEGRAM_TOKEN" || (
+            echo "ERROR: TELEGRAM_TOKEN missing"
+            exit 1
+          )
+
           if [ -z "$TELEGRAM_CHAT_ID" ] && [ -z "$TELEGRAM_GROUP_CHAT_ID" ]; then
             echo "ERROR: TELEGRAM_CHAT_ID and TELEGRAM_GROUP_CHAT_ID are both missing"
             exit 1
           fi
+
           echo "Telegram configuration detected."
 
+
+      # ============================================================
+      # 9. SHOW RESTORED STATE
+      # ============================================================
+      - name: Inspect restored ATLAS state
+        run: |
+
+          echo "=============================================="
+          echo " RESTORED ATLAS STATE"
+          echo "=============================================="
+
+          if [ -f "$ATLAS_SQLITE_FILE" ]; then
+            echo "SQLite state found:"
+            ls -lh "$ATLAS_SQLITE_FILE"
+          else
+            echo "No previous SQLite state found."
+            echo "ATLAS will initialize a new state."
+          fi
+
+          if [ -f "$ATLAS_CHANGELOG" ]; then
+            echo "Changelog found:"
+            ls -lh "$ATLAS_CHANGELOG"
+
+            echo "--- Last 20 changelog entries ---"
+            tail -n 20 "$ATLAS_CHANGELOG" || true
+          else
+            echo "No previous changelog found."
+          fi
+
+
+      # ============================================================
+      # 10. RUN ATLAS
+      # ============================================================
       - name: Run ATLAS v10.1
         run: |
+
           echo "=============================================="
           echo " ATLAS v10.1 START"
           echo "=============================================="
+
           python --version
-          python -c "import ccxt; print('CCXT', ccxt.__version__)"
+
+          python -c "
+          import ccxt
+          print('CCXT', ccxt.__version__)
+          "
+
+          echo "SQLite file: $ATLAS_SQLITE_FILE"
+
           python bot.py
 
-      - name: Inspect ATLAS state
+
+      # ============================================================
+      # 11. INSPECT FINAL STATE
+      # ============================================================
+      - name: Inspect ATLAS final state
         if: always()
         run: |
-          echo "=============================================="
-          echo " ATLAS v10.1 STATE"
-          echo "=============================================="
-          if [ -f atlas_v101.sqlite3 ]; then ls -lh atlas_v101.sqlite3; else echo "atlas_v101.sqlite3 not created."; fi
-          if [ -f changelog.txt ]; then tail -n 40 changelog.txt; else echo "changelog.txt not created."; fi
 
+          echo "=============================================="
+          echo " ATLAS v10.1 FINAL STATE"
+          echo "=============================================="
+
+          echo "--- SQLite ---"
+
+          if [ -f "$ATLAS_SQLITE_FILE" ]; then
+            ls -lh "$ATLAS_SQLITE_FILE"
+          else
+            echo "WARNING: $ATLAS_SQLITE_FILE was not created."
+          fi
+
+          echo "--- Changelog ---"
+
+          if [ -f "$ATLAS_CHANGELOG" ]; then
+            ls -lh "$ATLAS_CHANGELOG"
+
+            echo "--- Last 40 changelog lines ---"
+            tail -n 40 "$ATLAS_CHANGELOG" || true
+          else
+            echo "WARNING: $ATLAS_CHANGELOG was not created."
+          fi
+
+
+      # ============================================================
+      # 12. UPLOAD STATE ARTIFACT
+      #
+      # This is a SECONDARY backup/debug artifact.
+      # The real persistence mechanism is actions/cache above.
+      # ============================================================
       - name: Upload ATLAS state artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
+
           name: atlas-v10.1-state-${{ github.run_number }}
+
           path: |
             atlas_v101.sqlite3
             changelog.txt
+
           if-no-files-found: ignore
+
           retention-days: 14
