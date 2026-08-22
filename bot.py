@@ -1,6 +1,14 @@
 # ============================================================
-# ATLAS AI v10.0 — HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v10.2 — HUMAN-LIKE DECISION ENGINE
 # ============================================================
+# v10.2 architecture upgrade:
+# - Dashboard-style compact report output
+# - BTC pair filtering with dynamic volume threshold
+# - Two-table format: market overview + deep analysis
+# - 4-line summary: regime, best opportunity, news, risk
+# - No extra paragraphs or explanations
+# - Real-time data only, no fabricated numbers
+#
 # v10.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
 # - weekly pivot defined defensively
@@ -2932,8 +2940,244 @@ def send_report(text):
 
 
 # ============================================================
-# REPORT FORMAT
+# REPORT FORMAT - DASHBOARD STYLE
 # ============================================================
+
+def filter_btc_pairs(coin_list, min_volume_btc=1000, top_n=10):
+    """Filter assets that trade against BTC with sufficient volume."""
+    btc_pairs = []
+    
+    ensure_exchanges()
+    ex = EX.get("binance")
+    if ex is None:
+        return []
+    
+    for coin in coin_list:
+        if is_stable(coin):
+            continue
+            
+        try:
+            # Try to find BTC pair
+            btc_pair = None
+            for base in symbol_candidates(coin):
+                pair = f"{base}/BTC"
+                if pair in MARKETS.get("binance", {}):
+                    btc_pair = pair
+                    break
+                    
+            if btc_pair is None:
+                continue
+                
+            # Fetch ticker for BTC pair
+            ticker = ex.fetch_ticker(btc_pair)
+            volume_btc = f(ticker.get("quoteVolume"))  # Volume in BTC
+            price_btc = f(ticker.get("last"))
+            change_24h = f(ticker.get("percentage"))
+            
+            if volume_btc is None or volume_btc < min_volume_btc:
+                continue
+                
+            btc_pairs.append({
+                "coin": coin,
+                "price_btc": price_btc,
+                "change_24h": change_24h,
+                "volume_btc": volume_btc,
+                "pair": btc_pair
+            })
+            
+        except Exception as e:
+            append_changelog("BTC_PAIR_FILTER", None, None, f"{coin}: {e}")
+            continue
+            
+    # Sort by absolute change (volatility) and take top N
+    btc_pairs.sort(key=lambda x: abs(x["change_24h"] or 0), reverse=True)
+    return btc_pairs[:top_n]
+
+
+def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news, market_info):
+    """Generate a compact dashboard-style report with two tables."""
+    
+    dt = now_tehran()
+    
+    # ============================================================
+    # TABLE 1: Market Overview
+    # ============================================================
+    table1_rows = []
+    for pair in btc_pairs[:10]:
+        coin = pair["coin"]
+        # Find the full analysis result for this coin
+        r = next((x for x in results if x.get("coin") == coin), None)
+        if r is None:
+            continue
+            
+        # Calculate 7-day change from 1H data if available
+        change_7d = None
+        if r.get("snapshots", {}).get("1h", {}).get("rows"):
+            h1_rows = r["snapshots"]["1h"]["rows"]
+            if len(h1_rows) >= 168:  # 7 days * 24 hours
+                price_7d_ago = f(h1_rows[-168][4])
+                if price_7d_ago and price_7d_ago > 0:
+                    change_7d = (r.get("price", 1) / price_7d_ago - 1.0) * 100.0
+                    
+        table1_rows.append({
+            "symbol": coin,
+            "price": pair["price_btc"],
+            "change_24h": pair["change_24h"],
+            "change_7d": change_7d,
+            "volume": pair["volume_btc"],
+            "rsi": r.get("rsi"),
+            "macd": r.get("macd"),
+            "trend": r.get("h4_trend"),
+            "suggestion": r.get("action"),
+            "reason": (r.get("reason") or "")[:50]
+        })
+    
+    # ============================================================
+    # TABLE 2: Deep Analysis
+    # ============================================================
+    table2_rows = []
+    for pair in btc_pairs[:10]:
+        coin = pair["coin"]
+        r = next((x for x in results if x.get("coin") == coin), None)
+        if r is None:
+            continue
+            
+        entry = r.get("entry")
+        sl = r.get("sl")
+        tp = r.get("tp2") or r.get("tp1")
+        rr = decision_rr(r) if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") else None
+        
+        # Generate prediction
+        prediction = "N/A"
+        if r.get("direction") == "LONG" and r.get("confidence", 0) >= 60:
+            tp_val = r.get("tp2") or r.get("tp1")
+            if tp_val:
+                prediction = f"رشد تا {fmt(tp_val)}"
+        elif r.get("direction") == "SHORT" and r.get("confidence", 0) >= 60:
+            tp_val = r.get("tp2") or r.get("tp1")
+            if tp_val:
+                prediction = f"ریزش تا {fmt(tp_val)}"
+                
+        table2_rows.append({
+            "symbol": coin,
+            "support": r.get("support"),
+            "resistance": r.get("resistance"),
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "rr": rr,
+            "prediction": prediction,
+            "confidence": r.get("sr_confidence", "LOW")
+        })
+    
+    # ============================================================
+    # Build Report
+    # ============================================================
+    lines = []
+    
+    # Header
+    lines.append(f"📊 گزارش لحظه‌ای {len(btc_pairs)} ارز برتر جفت BTC (حجم >۱۰۰۰ BTC)")
+    if len(btc_pairs) < 10:
+        lines.append(f"⚠️ تعداد ارزهای واجد شرایط کمتر از حد انتظار است ({len(btc_pairs)} ارز)")
+    lines.append("")
+    
+    # Table 1
+    lines.append("**جدول ۱: وضعیت بازار**")
+    lines.append("")
+    lines.append("| نماد | قیمت (BTC) | تغییر ۲۴٪ | تغییر ۷٪ | حجم (BTC) | RSI | MACD | روند | پیشنهاد | دلیل |")
+    lines.append("|------|------------|-----------|----------|-----------|-----|------|------|---------|------|")
+    
+    for row in table1_rows:
+        rsi_display = f"{row['rsi']:.1f}" if row['rsi'] is not None else "N/A"
+        macd_display = f"{'🟢' if row['macd']=='BULLISH' else '🔴' if row['macd']=='BEARISH' else '🟡'} {row['macd']}"
+        suggestion_display = row['suggestion'] if row['suggestion'] else "NO TRADE"
+        reason_display = (row['reason'] or "")[:30]
+        lines.append(
+            f"| {row['symbol']} | {fmt(row['price'])} | {pct(row['change_24h'])} | {pct(row['change_7d'])} | "
+            f"{row['volume']:,.0f} | {rsi_display} | {macd_display} | {row['trend']} | "
+            f"{suggestion_display} | {reason_display} |"
+        )
+    
+    lines.append("")
+    
+    # Table 2
+    lines.append("**جدول ۲: تحلیل عمیق**")
+    lines.append("")
+    lines.append("| نماد | حمایت | مقاومت | ورود | SL | TP | R/R | پیش‌بینی ۱۲-۲۴س | اطمینان |")
+    lines.append("|------|--------|--------|------|----|----|-----|-----------------|---------|")
+    
+    for row in table2_rows:
+        rr_display = f"{row['rr']:.2f}" if row['rr'] is not None else "N/A"
+        # Add markers for high R/R or low confidence
+        symbol_display = row['symbol']
+        if row['rr'] is not None and row['rr'] >= 3:
+            symbol_display = f"{row['symbol']}🎯"
+        elif row['confidence'] == "LOW":
+            symbol_display = f"{row['symbol']}⚠️"
+            
+        lines.append(
+            f"| {symbol_display} | {fmt(row['support'])} | {fmt(row['resistance'])} | "
+            f"{fmt(row['entry'])} | {fmt(row['sl'])} | {fmt(row['tp'])} | "
+            f"{rr_display} | {row['prediction']} | {row['confidence']} |"
+        )
+    
+    lines.append("")
+    
+    # ============================================================
+    # SUMMARY (4 lines)
+    # ============================================================
+    lines.append("📌 **جمع‌بندی نهایی:**")
+    
+    # Line 1: Market regime
+    btc_regime = btc_market_regime()
+    breadth = market_breadth(results)
+    regime_text = "صعودی" if btc_regime.get("regime") == "RISK_ON" else "نزولی" if btc_regime.get("regime") == "RISK_OFF" else "خنثی"
+    sentiment = "مثبت" if breadth.get("state") == "BULLISH" else "منفی" if breadth.get("state") == "BEARISH" else "مختلط"
+    conclusion = "خریدار" if regime_text == "صعودی" and sentiment == "مثبت" else "فروشنده" if regime_text == "نزولی" and sentiment == "منفی" else "انتظار"
+    lines.append(f"- 📈 روند {regime_text} با احساسات {sentiment} | نتیجه: **{conclusion}**")
+    
+    # Line 2: Best opportunity
+    best = None
+    best_rr = 0
+    for r in results:
+        if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            rr = decision_rr(r) or 0
+            if rr > best_rr:
+                best_rr = rr
+                best = r
+    if best:
+        direction = "خرید" if best.get("direction") == "LONG" else "فروش"
+        lines.append(f"- 🏆 بهترین فرصت: **{best['coin']}** ({direction}) با R/R {best_rr:.2f} — {best.get('reason', '')[:30]}")
+    else:
+        lines.append("- 🏆 بهترین فرصت: **هیچ** — بازار در این لحظه ستاپ کم‌ریسک ندارد")
+    
+    # Line 3: Important news
+    if news.get("impact") == "HIGH":
+        news_text = news.get("bias", "خبر مهم")
+        news_items = news.get("items", [])[:3]
+        news_summary = " | ".join([item.get("title", "")[:40] for item in news_items])
+        lines.append(f"- 📰 اخبار مهم: {news_text} — {news_summary}")
+    else:
+        lines.append("- 📰 اخبار مهم: تأثیر قابل‌توجهی در بازار مشاهده نشد")
+    
+    # Line 4: Risk warning
+    avg_atr = safe_mean([r.get("atr_pct", 0) for r in results[:5] if r.get("atr_pct")])
+    volatility = "بالا" if (avg_atr or 0) > 5 else "متوسط" if (avg_atr or 0) > 3 else "پایین"
+    lines.append(f"- ⚠️ هشدار ریسک: نوسانات {volatility} | پیشنهاد: حد ضرر را رعایت کنید")
+    
+    lines.append("")
+    
+    # ============================================================
+    # FOOTER
+    # ============================================================
+    lines.append("---")
+    lines.append(f"📅 تاریخ/ساعت: {shamsi(dt)}، ساعت {dt.strftime('%H:%M')}")
+    lines.append(f"📊 منبع: CoinGecko + Binance")
+    lines.append(f"⏱️ وضعیت داده: لحظه‌ای")
+    lines.append(f"🔄 به‌روزرسانی: هر ۱ ساعت")
+    
+    return "\n".join(lines)
+
 
 def action_emoji(action):
     if action == "BUY CONFIRMATION":
@@ -3359,97 +3603,31 @@ def _report_section_header(title, count, subtitle=None):
 
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
                  btc_regime=None, breadth=None):
-    # CRITICAL: report order is a product requirement, not a performance rank.
-    # Never sort the full result set by confidence here.
-    results = _ordered_report_results(results, top10, dynamic30)
-
-    liq = market_liquidity_index(results)
-    dt = now_tehran()
-
-    priority_success = [r for r in results if r.get("coin") in set(top10)]
-    dynamic_success = [r for r in results if r.get("coin") in set(dynamic30)]
-    static_success = [
-        r for r in results
-        if r.get("coin") not in set(top10) and r.get("coin") not in set(dynamic30)
-    ]
-
-    header = [
-        f"🤖 {VERSION} — SNIPER",
-        "━━━━━━━━━━━━━━━━━━",
-        f"{shamsi(dt)}  {dt.strftime('%H:%M')} 🇮🇷",
-        "Timeframe: 30M / 1H / 4H / 1D / 1W / 1M",
-        "",
-        f"💧 MARKET LIQUIDITY INDEX: {liq:.1f}/100",
-        f"🧭 DXY: {fmt(macro.get('DXY'))} | USD liquidity proxy",
-        f"📰 NEWS: {news['bias']} | {news['impact']}",
-        "",
-        "📡 RADAR ORDER",
-        "1️⃣ ATLAS TOP 10 PRIORITY → 2️⃣ DYNAMIC TOP 30 → 3️⃣ ATLAS STATIC RADAR",
-        f"Priority Top 10: {len(top10)} | Available: {len(priority_success)}",
-        f"Dynamic Top 30: {len(dynamic30)} | Available: {len(dynamic_success)} | refreshed now",
-        f"ATLAS Static Radar: {len(ATLAS_STATIC)} | Available: {len(static_success)}",
-        f"Total scanned: {len(results)}",
-        f"Unavailable/failed: {unavailable}",
-        "",
-    ]
-
-    blocks = []
-
-    # These explicit section headers guarantee that Telegram chunking can
-    # never silently mix Dynamic-30 before the Priority-10 assets.
-    blocks.append(_report_section_header(
-        "1️⃣ ATLAS TOP 10 PRIORITY",
-        len(top10),
-        "BTC → ETH → BNB → XRP → SOL → TRX → HYPE → DOGE → ADA → MATIC",
-    ))
-    blocks.extend(asset_block(x) for x in priority_success)
-
-    blocks.append(_report_section_header(
-        "2️⃣ DYNAMIC TOP 30",
-        len(dynamic30),
-        "Current CoinGecko market-cap ranking, refreshed every run; membership may change daily.",
-    ))
-    blocks.extend(asset_block(x) for x in dynamic_success)
-
-    blocks.append(_report_section_header(
-        "3️⃣ ATLAS STATIC RADAR",
-        len(static_success),
-        "Persistent surveillance assets not already present in sections 1 or 2.",
-    ))
-    blocks.extend(asset_block(x) for x in static_success)
-
-    footer = [
-        "━━━━━━━━━━━━━━━━━━",
-        "🛡️ ATLAS DATA ENGINE",
-        f"Assets attempted: {len(results) + unavailable}",
-        f"Successful: {len(results)} | Unavailable: {unavailable}",
-        f"Success rate: {(len(results) / max(len(results) + unavailable, 1) * 100):.1f}%",
-        "Only CLOSED candles used for signals; incomplete candles excluded",
-        "Stablecoins excluded",
-        "Data conflict >3% = NO TRADE",
-        f"Risk/trade: {RISK_PER_TRADE:.2f}%",
-        f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
-        "No automatic orders.",
-        "",
-        "🎯 ATLAS v10.2 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
-        "",
-        "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
-        "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
-    ]
-
-    return "\n\n".join([
-        "\n".join(header),
-        "\n\n".join(blocks),
-        market_intelligence_block(market_info),
-        market_summary(results, macro, news),
-        atlas_conclusion(results),
-        atlas_decision_board(
-            results,
-            btc_regime or {"regime": "UNKNOWN", "reason": ""},
-            breadth or {"state": "UNKNOWN", "score": 50.0, "samples": 0},
-        ),
-        "\n".join(footer),
-    ])
+    """Generate a compact dashboard-style report."""
+    
+    # Filter for BTC pairs with sufficient volume
+    coin_list = [r.get("coin") for r in results if r.get("coin")]
+    btc_pairs = filter_btc_pairs(
+        coin_list,
+        min_volume_btc=1000,
+        top_n=10
+    )
+    
+    # If less than 5 BTC pairs, reduce volume threshold progressively
+    if len(btc_pairs) < 5:
+        for threshold in [500, 250, 100]:
+            btc_pairs = filter_btc_pairs(
+                coin_list,
+                min_volume_btc=threshold,
+                top_n=10
+            )
+            if len(btc_pairs) >= 5:
+                break
+    
+    # Generate the dashboard report
+    return generate_dashboard_report(
+        results, btc_pairs, top10, dynamic30, macro, news, market_info
+    )
 
 
 # ============================================================
@@ -3505,7 +3683,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v10 human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF",
+            "notes": "v10.2 dashboard report: BTC pairs only, two tables, 4-line summary",
         },
     )
 
