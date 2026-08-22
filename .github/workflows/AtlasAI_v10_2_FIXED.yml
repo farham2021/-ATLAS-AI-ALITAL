@@ -1,8 +1,7 @@
-name: ATLAS v10.2 Market Supervisor
+name: ATLAS v10.3 Market Supervisor
 
 on:
   workflow_dispatch:
-
   schedule:
     # هر 4 ساعت
     - cron: "0 */4 * * *"
@@ -11,12 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: atlas-v10-2-${{ github.ref }}
+  group: atlas-v10-3-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   atlas:
-    name: ATLAS v10.2 Market Supervisor
+    name: ATLAS v10.3 Market Supervisor
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -26,7 +25,7 @@ jobs:
       # =========================
       # ATLAS VERSION / ENGINE
       # =========================
-      ATLAS_VERSION: "10.2"
+      ATLAS_VERSION: "10.3"
       ATLAS_TIMEFRAME: "4H"
 
       # =========================
@@ -63,7 +62,7 @@ jobs:
       # =========================
       # PERSISTENT LOCAL STATE
       # =========================
-      ATLAS_SQLITE_FILE: "atlas_v102.sqlite3"
+      ATLAS_SQLITE_FILE: "atlas_v103.sqlite3"
       ATLAS_CHANGELOG: "changelog.txt"
 
       # =========================
@@ -90,6 +89,15 @@ jobs:
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
+      # =========================
+      # TELEGRAM RATE LIMITS
+      # =========================
+      TELEGRAM_PRIVATE_DELAY: "1.5"
+      TELEGRAM_GROUP_DELAY: "3.0"
+      TELEGRAM_MAX_RETRIES: "5"
+      TELEGRAM_BASE_RETRY_DELAY: "3"
+      TELEGRAM_MAX_WAIT: "60"
+
     steps:
 
       # ==========================================================
@@ -101,37 +109,19 @@ jobs:
       # ==========================================================
       # 2. RESTORE PERSISTENT ATLAS STATE
       # ==========================================================
-      #
-      # GitHub-hosted runners are ephemeral.
-      #
-      # We restore:
-      # - SQLite
-      # - SQLite WAL
-      # - SQLite SHM
-      # - changelog
-      #
-      # This allows:
-      # - backtest cache
-      # - signal memory
-      # - candle deduplication
-      # - diagnostic history
-      # - self-healing state
-      #
-      # to survive between executions.
-      #
       - name: Restore ATLAS persistent state
         uses: actions/cache/restore@v4
         with:
           path: |
-            atlas_v102.sqlite3
-            atlas_v102.sqlite3-wal
-            atlas_v102.sqlite3-shm
+            atlas_v103.sqlite3
+            atlas_v103.sqlite3-wal
+            atlas_v103.sqlite3-shm
             changelog.txt
 
-          key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-${{ github.run_id }}
+          key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.3-${{ github.run_id }}
 
           restore-keys: |
-            atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-
+            atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.3-
             atlas-state-${{ runner.os }}-${{ github.ref_name }}-
             atlas-state-
 
@@ -152,10 +142,8 @@ jobs:
 
           python -m pip install --upgrade pip setuptools wheel
 
-          # Core dependencies
           python -m pip install --upgrade ccxt
 
-          # Optional: if requirements.txt exists, install it
           if [ -f requirements.txt ]; then
             python -m pip install -r requirements.txt
           fi
@@ -170,7 +158,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Check if bot.py exists in repository
           if [ -f bot.py ]; then
             echo "Found bot.py in repository"
           else
@@ -178,17 +165,7 @@ jobs:
             echo ""
             echo "Repository contents:"
             ls -la
-            echo ""
-            echo "Please ensure bot.py is committed to the repository."
             exit 1
-          fi
-
-          # Verify we have a valid bot.py
-          if ! python -c "import bot" 2>/dev/null; then
-            echo "WARNING: bot.py import check failed, but continuing..."
-            echo "This may indicate missing dependencies."
-          else
-            echo "bot.py import check: PASS"
           fi
 
       # ==========================================================
@@ -199,46 +176,29 @@ jobs:
           set -euo pipefail
 
           test -f bot.py
-
           python -m py_compile bot.py
-
-          echo "ATLAS v10.2 Python syntax: PASS"
+          echo "ATLAS v10.3 Python syntax: PASS"
 
       # ==========================================================
       # 7. OPTIONAL SMOKE TEST
       # ==========================================================
-      #
-      # IMPORTANT:
-      # Do NOT require a nonexistent v10.2 smoke-test file.
-      #
-      # If v10.2 smoke test exists -> run it.
-      # If v10.3 smoke test exists -> do NOT run it against v10.2
-      # because it may assert VERSION == v10.3.
-      #
-      # Therefore the smoke test is optional here.
-      #
-      - name: Run ATLAS v10.2 smoke test
+      - name: Run ATLAS v10.3 smoke test
         run: |
           set -euo pipefail
 
-          # Check for the correct smoke test file name
-          if [ -f atlas_v10_2_smoke_test.py ]; then
-            echo "Found ATLAS v10.2 smoke test."
-            python atlas_v10_2_smoke_test.py
+          if [ -f atlas_v10_3_smoke_test.py ]; then
+            echo "Found ATLAS v10.3 smoke test."
+            python atlas_v10_3_smoke_test.py
           elif [ -f atlas_smoke.py ]; then
             echo "Found atlas_smoke.py - checking version compatibility..."
-            # Run the smoke test if it's compatible with v10.2
-            if grep -q "ATLAS v10.2" atlas_smoke.py; then
-              echo "atlas_smoke.py is compatible with v10.2"
+            if grep -q "ATLAS v10.3" atlas_smoke.py; then
+              echo "atlas_smoke.py is compatible with v10.3"
               python atlas_smoke.py
             else
               echo "WARNING: atlas_smoke.py version mismatch. Skipping."
-              echo "This is not a fatal error - Python compilation already passed."
             fi
           else
-            echo "No ATLAS v10.2 smoke test found."
-            echo "Skipping optional smoke test."
-            echo "Python compilation already passed."
+            echo "No ATLAS v10.3 smoke test found. Skipping."
           fi
 
       # ==========================================================
@@ -248,13 +208,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Check that Telegram token is set (required)
           if [ -z "${TELEGRAM_TOKEN}" ]; then
             echo "ERROR: TELEGRAM_TOKEN is not set in secrets"
             exit 1
           fi
 
-          # Check that at least one destination is configured
           if [ -z "${TELEGRAM_CHAT_ID}" ] && [ -z "${TELEGRAM_GROUP_CHAT_ID}" ]; then
             echo "ERROR: Neither TELEGRAM_CHAT_ID nor TELEGRAM_GROUP_CHAT_ID is configured"
             exit 1
@@ -265,12 +223,12 @@ jobs:
       # ==========================================================
       # 9. RUN ATLAS
       # ==========================================================
-      - name: Run ATLAS v10.2 Market Supervisor
+      - name: Run ATLAS v10.3 Market Supervisor
         run: |
           set -euo pipefail
 
           echo "=============================================="
-          echo "ATLAS v10.2 MARKET SUPERVISOR"
+          echo "ATLAS v10.3 MARKET SUPERVISOR"
           echo "=============================================="
           echo "Python version:"
           python --version
@@ -284,7 +242,7 @@ jobs:
           python bot.py
 
           echo "=============================================="
-          echo "ATLAS v10.2 completed successfully"
+          echo "ATLAS v10.3 completed successfully"
           echo "=============================================="
 
       # ==========================================================
@@ -294,15 +252,15 @@ jobs:
         if: always()
         run: |
           echo "=============================================="
-          echo "ATLAS v10.2 STATE AFTER RUN"
+          echo "ATLAS v10.3 STATE AFTER RUN"
           echo "=============================================="
 
-          if [ -f atlas_v102.sqlite3 ]; then
+          if [ -f atlas_v103.sqlite3 ]; then
             echo "SQLite database:"
-            ls -lh atlas_v102.sqlite3
-            echo "Database size: $(du -h atlas_v102.sqlite3 | cut -f1)"
+            ls -lh atlas_v103.sqlite3
+            echo "Database size: $(du -h atlas_v103.sqlite3 | cut -f1)"
           else
-            echo "WARNING: atlas_v102.sqlite3 not created"
+            echo "WARNING: atlas_v103.sqlite3 not created"
           fi
 
           if [ -f changelog.txt ]; then
@@ -321,24 +279,17 @@ jobs:
       # ==========================================================
       # 11. SAVE PERSISTENT STATE
       # ==========================================================
-      #
-      # THIS IS CRITICAL.
-      #
-      # restore alone is not enough.
-      # The current runner's updated SQLite must be saved so the
-      # next GitHub Actions runner can restore it.
-      #
       - name: Save ATLAS persistent state
         if: always()
         uses: actions/cache/save@v4
         with:
           path: |
-            atlas_v102.sqlite3
-            atlas_v102.sqlite3-wal
-            atlas_v102.sqlite3-shm
+            atlas_v103.sqlite3
+            atlas_v103.sqlite3-wal
+            atlas_v103.sqlite3-shm
             changelog.txt
 
-          key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-${{ github.run_id }}
+          key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.3-${{ github.run_id }}
 
       # ==========================================================
       # 12. UPLOAD DIAGNOSTICS
@@ -347,31 +298,29 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-v10.2-diagnostics-${{ github.run_id }}
+          name: atlas-v10.3-diagnostics-${{ github.run_id }}
 
           path: |
-            atlas_v102.sqlite3
-            atlas_v102.sqlite3-wal
-            atlas_v102.sqlite3-shm
+            atlas_v103.sqlite3
+            atlas_v103.sqlite3-wal
+            atlas_v103.sqlite3-shm
             changelog.txt
 
           if-no-files-found: ignore
           retention-days: 14
 
       # ==========================================================
-      # 13. HEALTH CHECK (Optional)
+      # 13. HEALTH CHECK
       # ==========================================================
       - name: Check ATLAS health
         if: always()
         run: |
           echo "=============================================="
-          echo "ATLAS v10.2 HEALTH CHECK"
+          echo "ATLAS v10.3 HEALTH CHECK"
           echo "=============================================="
 
-          # Check if SQLite file was created/updated
-          if [ -f atlas_v102.sqlite3 ]; then
-            # Check if file was modified during this run
-            MOD_TIME=$(stat -c %Y atlas_v102.sqlite3 2>/dev/null || stat -f %m atlas_v102.sqlite3 2>/dev/null)
+          if [ -f atlas_v103.sqlite3 ]; then
+            MOD_TIME=$(stat -c %Y atlas_v103.sqlite3 2>/dev/null || stat -f %m atlas_v103.sqlite3 2>/dev/null)
             CURRENT_TIME=$(date +%s)
             AGE=$((CURRENT_TIME - MOD_TIME))
             if [ "$AGE" -lt 3600 ]; then
@@ -383,12 +332,11 @@ jobs:
             echo "❌ SQLite database not found"
           fi
 
-          # Check if changelog was updated
           if [ -f changelog.txt ]; then
             LAST_LINE=$(tail -n 1 changelog.txt 2>/dev/null || echo "")
-            if echo "$LAST_LINE" | grep -q "ATLAS v10.2"; then
-              echo "✅ Changelog contains ATLAS v10.2 entries"
+            if echo "$LAST_LINE" | grep -q "ATLAS v10.3"; then
+              echo "✅ Changelog contains ATLAS v10.3 entries"
             else
-              echo "⚠️  Changelog may not contain v10.2 entries"
+              echo "⚠️  Changelog may not contain v10.3 entries"
             fi
           fi
