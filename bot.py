@@ -611,6 +611,13 @@ def ensure_exchanges(force=False):
     return bool(EX)
 
 
+def coingecko_headers():
+    """Return headers for CoinGecko API requests."""
+    if COINGECKO_API_KEY:
+        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
+    return {}
+
+
 def symbol_for(eid, coin):
     markets = MARKETS.get(eid, {})
     for base in symbol_candidates(coin):
@@ -747,19 +754,13 @@ def best_ohlcv(coin, timeframe, limit=250):
 # DYNAMIC MARKET UNIVERSE WITH TOP 10 MARKET CAP
 # ============================================================
 
-def coingecko_headers():
-    if COINGECKO_API_KEY:
-        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
-    return {}
-
-
 def get_top_market_cap_assets(limit=10):
     """Get top N market cap assets from CoinGecko (primary source)."""
     headers = coingecko_headers()
     url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
         "vs_currency": "usd",
         "order": "market_cap_desc",
-        "per_page": str(limit + 10),  # Get extra to filter stablecoins
+        "per_page": str(limit + 10),
         "page": "1",
         "sparkline": "false",
         "price_change_percentage": "24h,7d",
@@ -831,6 +832,161 @@ def get_top_cmc_assets(limit=10):
             break
     
     return result
+
+
+def global_market_intelligence():
+    """Fetch global market intelligence data from CoinGecko and Alternative.me."""
+    out = {
+        "market_cap": None,
+        "volume_24h": None,
+        "market_change_24h": None,
+        "volume_change_24h": None,
+        "btc_dominance": None,
+        "eth_dominance": None,
+        "stablecoin_dominance": None,
+        "altcoin_dominance": None,
+        "fear_greed": None,
+        "fear_greed_label": None,
+        "fear_greed_ts": None,
+        "top_gainers": [],
+        "top_losers": [],
+        "heatmap": [],
+        "source": "CoinGecko + Alternative.me",
+    }
+    
+    try:
+        # 1. Get global data from CoinGecko
+        global_data = safe_http_get(
+            "https://api.coingecko.com/api/v3/global",
+            headers=coingecko_headers(),
+            default={}
+        )
+        
+        if isinstance(global_data, dict):
+            d = global_data.get("data") or {}
+            cap = d.get("total_market_cap") or {}
+            vol = d.get("total_volume") or {}
+            dom = d.get("market_cap_percentage") or {}
+            
+            out["market_cap"] = f(cap.get("usd"))
+            out["volume_24h"] = f(vol.get("usd"))
+            out["market_change_24h"] = f(d.get("market_cap_change_percentage_24h_usd"))
+            out["volume_change_24h"] = f(d.get("volume_change_percentage_24h_usd"))
+            out["btc_dominance"] = f(dom.get("btc"))
+            out["eth_dominance"] = f(dom.get("eth"))
+            
+            stable_ids = ("usdt", "usdc", "usde", "dai", "fdusd", "usds", "usdd")
+            stable_dom = sum(f(dom.get(k), 0) or 0 for k in stable_ids)
+            out["stablecoin_dominance"] = stable_dom if stable_dom > 0 else None
+            btc = out["btc_dominance"] or 0
+            stable = out["stablecoin_dominance"] or 0
+            out["altcoin_dominance"] = max(0.0, 100.0 - btc - stable)
+        
+        # 2. Get Fear & Greed
+        fg = safe_http_get("https://api.alternative.me/fng/?limit=1", default={})
+        if isinstance(fg, dict):
+            try:
+                item = (fg.get("data") or [])[0]
+                out["fear_greed"] = int(item.get("value"))
+                out["fear_greed_label"] = item.get("value_classification")
+                out["fear_greed_ts"] = item.get("timestamp")
+            except (IndexError, TypeError, ValueError):
+                pass
+        
+        # 3. Get top gainers and losers (from top 300)
+        headers = coingecko_headers()
+        markets = []
+        for page, per_page in ((1, 250), (2, 50)):
+            url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
+                "vs_currency": "usd",
+                "order": "market_cap_desc",
+                "per_page": str(per_page),
+                "page": str(page),
+                "sparkline": "false",
+                "price_change_percentage": "24h",
+            })
+            rows = safe_http_get(url, headers=headers, default=[])
+            if isinstance(rows, list):
+                markets.extend(rows)
+            if len(markets) >= 300:
+                break
+            time.sleep(0.15)
+        
+        clean = []
+        for x in markets[:300]:
+            if not isinstance(x, dict):
+                continue
+            sym = (x.get("symbol") or "").upper()
+            if not sym or is_stable(sym):
+                continue
+            ch = f(x.get("price_change_percentage_24h"))
+            price = f(x.get("current_price"))
+            if ch is None or price is None:
+                continue
+            clean.append({
+                "symbol": sym,
+                "change_24h": ch,
+                "price": price,
+            })
+        
+        clean.sort(key=lambda x: x["change_24h"], reverse=True)
+        out["top_gainers"] = clean[:7]
+        out["top_losers"] = list(reversed(clean[-7:])) if clean else []
+        
+    except Exception as e:
+        append_changelog("MARKET_INTELLIGENCE", None, None, str(e))
+    
+    return out
+
+
+def gecko_top(limit=40):
+    headers = coingecko_headers()
+    url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": str(limit),
+        "page": "1",
+        "sparkline": "false",
+    })
+    rows = safe_http_get(url, headers=headers, default=[])
+    result = []
+    seen = set()
+    for x in rows or []:
+        s = (x.get("symbol") or "").upper()
+        if s and not is_stable(s) and s not in seen:
+            seen.add(s)
+            result.append({
+                "id": (x.get("id") or "").strip(),
+                "symbol": s,
+                "name": x.get("name"),
+                "rank": x.get("market_cap_rank"),
+                "market_cap": f(x.get("market_cap")),
+            })
+    return result
+
+
+def binance_top(limit=40):
+    ensure_exchanges()
+    try:
+        ex = EX.get("binance")
+        if ex is None:
+            return []
+        rows = ex.fetch_tickers()
+    except Exception:
+        return []
+    result = []
+    for sym, x in rows.items():
+        if not sym.endswith("/USDT") or ":USDT" in sym:
+            continue
+        coin = sym.split("/")[0].upper()
+        if is_stable(coin):
+            continue
+        qv = f(x.get("quoteVolume"))
+        if qv is None:
+            continue
+        result.append({"symbol": coin, "quote_volume": qv})
+    result.sort(key=lambda x: x["quote_volume"], reverse=True)
+    return result[:limit]
 
 
 def build_universe():
@@ -922,56 +1078,6 @@ def build_universe():
         )
     
     return universe, top10_symbols, priority10, dynamic30
-
-
-def gecko_top(limit=40):
-    headers = coingecko_headers()
-    url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
-        "vs_currency": "usd",
-        "order": "market_cap_desc",
-        "per_page": str(limit),
-        "page": "1",
-        "sparkline": "false",
-    })
-    rows = safe_http_get(url, headers=headers, default=[])
-    result = []
-    seen = set()
-    for x in rows or []:
-        s = (x.get("symbol") or "").upper()
-        if s and not is_stable(s) and s not in seen:
-            seen.add(s)
-            result.append({
-                "id": (x.get("id") or "").strip(),
-                "symbol": s,
-                "name": x.get("name"),
-                "rank": x.get("market_cap_rank"),
-                "market_cap": f(x.get("market_cap")),
-            })
-    return result
-
-
-def binance_top(limit=40):
-    ensure_exchanges()
-    try:
-        ex = EX.get("binance")
-        if ex is None:
-            return []
-        rows = ex.fetch_tickers()
-    except Exception:
-        return []
-    result = []
-    for sym, x in rows.items():
-        if not sym.endswith("/USDT") or ":USDT" in sym:
-            continue
-        coin = sym.split("/")[0].upper()
-        if is_stable(coin):
-            continue
-        qv = f(x.get("quoteVolume"))
-        if qv is None:
-            continue
-        result.append({"symbol": coin, "quote_volume": qv})
-    result.sort(key=lambda x: x["quote_volume"], reverse=True)
-    return result[:limit]
 
 
 # ============================================================
@@ -3023,8 +3129,7 @@ def send_report(text):
         destinations.append({
             "id": TELEGRAM_CHAT_ID,
             "name": "PRIVATE_CHAT",
-            "delay": TELEGRAM_PRIVATE_DELAY
-        })
+            "delay": TELEGRAM_PRIVATE_DELAY        })
     
     if TELEGRAM_GROUP_CHAT_ID and TELEGRAM_GROUP_CHAT_ID not in [d["id"] for d in destinations]:
         destinations.append({
