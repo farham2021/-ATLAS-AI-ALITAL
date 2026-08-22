@@ -1,13 +1,18 @@
 # ============================================================
-# ATLAS AI v10.2 — HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v10.3 — COMPLETE DASHBOARD WITH TOP 10 MARKET CAP
 # ============================================================
-# v10.2 architecture upgrade:
-# - Dashboard-style compact report output
+# v10.3 architecture upgrade:
+# - Top 10 market cap assets from CoinGecko (primary) with fallback to Binance
+# - Multi-source price validation: CoinGecko + Binance + optional CMC
 # - BTC pair filtering with dynamic volume threshold
 # - Two-table format: market overview + deep analysis
 # - 4-line summary: regime, best opportunity, news, risk
 # - No extra paragraphs or explanations
 # - Real-time data only, no fabricated numbers
+# - Smart Telegram rate limit handling with exponential backoff
+# - Simultaneous delivery to private chat and supergroup
+# - Duplicate report prevention with hash-based deduplication
+# - CoinGecko global market intelligence for market cap ranking
 #
 # v10.0 architecture upgrade:
 # - canonical CoinGecko IDs for /simple/price
@@ -61,11 +66,13 @@ import re
 import json
 import math
 import time
+import random
 import sqlite3
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 import traceback
+import hashlib
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from statistics import mean, median
@@ -77,7 +84,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.2"
+VERSION = "ATLAS v10.3"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -88,6 +95,13 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_CHAT_ID", "").strip()
+
+# Telegram rate limit settings
+TELEGRAM_PRIVATE_DELAY = float(os.environ.get("TELEGRAM_PRIVATE_DELAY", "1.5"))
+TELEGRAM_GROUP_DELAY = float(os.environ.get("TELEGRAM_GROUP_DELAY", "3.0"))
+TELEGRAM_MAX_RETRIES = int(os.environ.get("TELEGRAM_MAX_RETRIES", "5"))
+TELEGRAM_BASE_RETRY_DELAY = float(os.environ.get("TELEGRAM_BASE_RETRY_DELAY", "3"))
+TELEGRAM_MAX_WAIT = float(os.environ.get("TELEGRAM_MAX_WAIT", "60"))
 
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
@@ -103,6 +117,7 @@ ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "").strip()
 CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
 COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
+CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
 MAX_PORTFOLIO_RISK = float(
@@ -127,7 +142,7 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v102.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v103.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -309,7 +324,7 @@ def safe_json(value):
 
 def http_get(url, timeout=15, headers=None):
     h = {
-        "User-Agent": "ATLAS-AI/10.2",
+        "User-Agent": "ATLAS-AI/10.3",
         "Accept": "application/json,application/xml,text/xml,*/*",
     }
     if headers:
@@ -577,10 +592,12 @@ def init_exchanges():
                 raise RuntimeError(f"{eid}: empty market catalog")
             EX[eid] = ex
             MARKETS[eid] = markets
+            print(f"✅ {eid} initialized with {len(markets)} markets")
         except Exception as e:
             EX.pop(eid, None)
             MARKETS.pop(eid, None)
             append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
+            print(f"❌ {eid} failed: {e}")
 
 
 EX = {}
@@ -600,6 +617,16 @@ def symbol_for(eid, coin):
         for s in (f"{base}/USDT", f"{base}/USDT:USDT"):
             if s in markets:
                 return s
+    return None
+
+
+def symbol_for_btc(eid, coin):
+    """Find the BTC trading pair for a given coin on the specified exchange."""
+    markets = MARKETS.get(eid, {})
+    for base in symbol_candidates(coin):
+        pair = f"{base}/BTC"
+        if pair in markets:
+            return pair
     return None
 
 
@@ -717,13 +744,188 @@ def best_ohlcv(coin, timeframe, limit=250):
 
 
 # ============================================================
-# DYNAMIC MARKET UNIVERSE
+# DYNAMIC MARKET UNIVERSE WITH TOP 10 MARKET CAP
 # ============================================================
 
-def gecko_top(limit=40):
-    headers = {}
+def coingecko_headers():
     if COINGECKO_API_KEY:
-        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
+    return {}
+
+
+def get_top_market_cap_assets(limit=10):
+    """Get top N market cap assets from CoinGecko (primary source)."""
+    headers = coingecko_headers()
+    url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": str(limit + 10),  # Get extra to filter stablecoins
+        "page": "1",
+        "sparkline": "false",
+        "price_change_percentage": "24h,7d",
+    })
+    
+    rows = safe_http_get(url, headers=headers, default=[])
+    if not isinstance(rows, list):
+        rows = []
+    
+    result = []
+    for x in rows:
+        s = (x.get("symbol") or "").upper()
+        if s and not is_stable(s):
+            result.append({
+                "symbol": s,
+                "name": x.get("name"),
+                "rank": x.get("market_cap_rank"),
+                "market_cap": f(x.get("market_cap")),
+                "price": f(x.get("current_price")),
+                "change_24h": f(x.get("price_change_percentage_24h")),
+                "change_7d": f(x.get("price_change_percentage_7d_in_currency")),
+                "volume": f(x.get("total_volume")),
+                "gecko_id": x.get("id"),
+                "source": "CoinGecko"
+            })
+        if len(result) >= limit:
+            break
+    
+    return result
+
+
+def get_top_cmc_assets(limit=10):
+    """Get top N market cap assets from CoinMarketCap (fallback)."""
+    if not CMC_API_KEY:
+        return []
+    
+    headers = {
+        "X-CMC_PRO_API_KEY": CMC_API_KEY,
+        "Accept": "application/json"
+    }
+    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?" + urllib.parse.urlencode({
+        "limit": str(limit + 10),
+        "sort": "market_cap",
+        "sort_dir": "desc",
+        "convert": "USD"
+    })
+    
+    data = safe_http_get(url, headers=headers, default={})
+    if not isinstance(data, dict) or data.get("status", {}).get("error_code") != 0:
+        return []
+    
+    result = []
+    for x in data.get("data", []):
+        s = (x.get("symbol") or "").upper()
+        if s and not is_stable(s):
+            quote = x.get("quote", {}).get("USD", {})
+            result.append({
+                "symbol": s,
+                "name": x.get("name"),
+                "rank": x.get("cmc_rank"),
+                "market_cap": f(quote.get("market_cap")),
+                "price": f(quote.get("price")),
+                "change_24h": f(quote.get("percent_change_24h")),
+                "change_7d": f(quote.get("percent_change_7d")),
+                "volume": f(quote.get("volume_24h")),
+                "source": "CoinMarketCap"
+            })
+        if len(result) >= limit:
+            break
+    
+    return result
+
+
+def build_universe():
+    """
+    Build the radar in a deterministic reporting order.
+
+    Reporting contract:
+      1) Top 10 market-cap assets from CoinGecko (primary) or CMC (fallback)
+      2) ATLAS_PRIORITY_TOP10 fixed order
+      3) Dynamic Top-30 market-cap assets from CoinGecko
+      4) ATLAS_STATIC assets, excluding everything already present
+
+    The order is intentionally independent of confidence, liquidity or price.
+    """
+    # Get top 10 market cap assets
+    top_market_cap = get_top_market_cap_assets(10)
+    
+    # Fallback to CMC if CoinGecko fails
+    if len(top_market_cap) < 5:
+        cmc_data = get_top_cmc_assets(10)
+        if cmc_data:
+            top_market_cap = cmc_data
+    
+    # Extract symbols from top market cap
+    top10_symbols = [x["symbol"] for x in top_market_cap if x.get("symbol")]
+    
+    # If we still don't have enough, use the fixed priority list
+    if len(top10_symbols) < 5:
+        top10_symbols = list(ATLAS_PRIORITY_TOP10)
+    
+    # Get dynamic top 30 from CoinGecko
+    cg = gecko_top(60)
+    cg_symbols = []
+    for x in cg:
+        s = (x.get("symbol") or "").upper()
+        if s and not is_stable(s) and s not in cg_symbols:
+            cg_symbols.append(s)
+    
+    # Filter out top 10 from dynamic list
+    top10_set = set(top10_symbols)
+    dynamic30 = [s for s in cg_symbols if s not in top10_set][:30]
+    
+    if len(dynamic30) < 30:
+        for x in binance_top(80):
+            s = (x.get("symbol") or "").upper()
+            if s and not is_stable(s) and s not in top10_set and s not in dynamic30:
+                dynamic30.append(s)
+            if len(dynamic30) >= 30:
+                break
+    
+    dynamic30 = dynamic30[:30]
+    
+    # Static radar comes last
+    static = [
+        x for x in ATLAS_STATIC
+        if not is_stable(x) and x not in top10_set and x not in dynamic30
+    ]
+    
+    # Build universe in order: Top 10 Market Cap -> Priority Top 10 -> Dynamic 30 -> Static
+    priority10 = list(ATLAS_PRIORITY_TOP10)
+    universe = list(dict.fromkeys(top10_symbols + priority10 + dynamic30 + static))
+    universe = [x for x in universe if not is_stable(x)]
+    
+    print(f"📡 Universe built: {len(universe)} assets")
+    print(f"   Top 10 Market Cap: {len(top10_symbols)}")
+    print(f"   Priority Top 10: {len(priority10)}")
+    print(f"   Dynamic Top 30: {len(dynamic30)}")
+    print(f"   Static Radar: {len(static)}")
+    
+    for symbol in universe:
+        source = (
+            "TOP10_MARKET_CAP" if symbol in top10_symbols
+            else "TOP10_PRIORITY" if symbol in priority10
+            else "DYNAMIC30" if symbol in dynamic30
+            else "ATLAS_STATIC"
+        )
+        STORE.insert(
+            "atlas_assets",
+            {
+                "symbol": symbol,
+                "rank": next(
+                    (x.get("rank") for x in top_market_cap if x.get("symbol") == symbol), None
+                ),
+                "source": source,
+                "is_stablecoin": False,
+                "active": True,
+                "last_seen_at": now_utc().isoformat(),
+            },
+        )
+    
+    return universe, top10_symbols, priority10, dynamic30
+
+
+def gecko_top(limit=40):
+    headers = coingecko_headers()
     url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
         "vs_currency": "usd",
         "order": "market_cap_desc",
@@ -733,9 +935,11 @@ def gecko_top(limit=40):
     })
     rows = safe_http_get(url, headers=headers, default=[])
     result = []
+    seen = set()
     for x in rows or []:
         s = (x.get("symbol") or "").upper()
-        if s and not is_stable(s):
+        if s and not is_stable(s) and s not in seen:
+            seen.add(s)
             result.append({
                 "id": (x.get("id") or "").strip(),
                 "symbol": s,
@@ -768,78 +972,6 @@ def binance_top(limit=40):
         result.append({"symbol": coin, "quote_volume": qv})
     result.sort(key=lambda x: x["quote_volume"], reverse=True)
     return result[:limit]
-
-
-def build_universe():
-    """
-    Build the radar in a deterministic reporting order.
-
-    Reporting contract:
-      1) ATLAS_PRIORITY_TOP10, in the exact configured order.
-      2) Dynamic Top-30 market-cap assets from CoinGecko, excluding priority assets.
-      3) ATLAS_STATIC assets, excluding everything already present.
-
-    The order is intentionally independent of confidence, liquidity or price.
-    Those factors may rank setups inside the final conclusion, but they must
-    never reorder the asset-report sequence.
-    """
-    cg = gecko_top(60)
-
-    cg_symbols = []
-    for x in cg:
-        s = (x.get("symbol") or "").upper()
-        if s and not is_stable(s) and s not in cg_symbols:
-            cg_symbols.append(s)
-
-    # Fixed user-priority universe. It is called Top-10 Priority rather than
-    # "current market-cap Top 10" because MATIC/HYPE may not currently rank
-    # inside CoinGecko's literal top ten.
-    top10 = list(ATLAS_PRIORITY_TOP10)
-
-    # Dynamic market-cap list: highest-ranked CoinGecko assets not already in
-    # the fixed priority list. Fill from Binance only if CoinGecko is short.
-    dynamic30 = [s for s in cg_symbols if s not in top10][:30]
-
-    if len(dynamic30) < 30:
-        for x in binance_top(80):
-            s = (x.get("symbol") or "").upper()
-            if s and not is_stable(s) and s not in top10 and s not in dynamic30:
-                dynamic30.append(s)
-            if len(dynamic30) >= 30:
-                break
-
-    dynamic30 = dynamic30[:30]
-
-    # Static radar comes last and cannot displace priority/dynamic assets.
-    static = [
-        x for x in ATLAS_STATIC
-        if not is_stable(x) and x not in top10 and x not in dynamic30
-    ]
-
-    universe = list(dict.fromkeys(top10 + dynamic30 + static))
-    universe = [x for x in universe if not is_stable(x)]
-
-    for symbol in universe:
-        source = (
-            "TOP10_PRIORITY" if symbol in top10
-            else "DYNAMIC30" if symbol in dynamic30
-            else "ATLAS_STATIC"
-        )
-        STORE.insert(
-            "atlas_assets",
-            {
-                "symbol": symbol,
-                "rank": next(
-                    (x["rank"] for x in cg if x["symbol"] == symbol), None
-                ),
-                "source": source,
-                "is_stablecoin": False,
-                "active": True,
-                "last_seen_at": now_utc().isoformat(),
-            },
-        )
-
-    return universe, top10, dynamic30
 
 
 # ============================================================
@@ -966,11 +1098,7 @@ def volume_state(rows):
 
 
 def support_resistance(rows):
-    """Legacy fallback S/R from a candle set.
-
-    The primary ATLAS S/R engine is ``daily_key_levels`` below. This
-    function remains as a safe fallback when Daily data is unavailable.
-    """
+    """Legacy fallback S/R from a candle set."""
     lows = [f(x[3]) for x in rows[-30:] if f(x[3]) is not None]
     highs = [f(x[2]) for x in rows[-30:] if f(x[2]) is not None]
     if not lows or not highs:
@@ -1372,7 +1500,6 @@ def asset_liquidity(coin, ticker_sources):
         return 0.0, "LOW"
 
     v = sum(volumes)
-    # Logarithmic score, deliberately conservative.
     score = clamp((math.log10(v + 1) / 10) * 100, 0, 100)
 
     label = "HIGH" if score >= 70 else "MEDIUM" if score >= 45 else "LOW"
@@ -1405,15 +1532,12 @@ def price_consensus(coin):
 
     # CoinGecko validation
     try:
-        headers = {}
-        if COINGECKO_API_KEY:
-            headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+        headers = coingecko_headers()
         rows = gecko_top(50)
         x = next(
             (z for z in rows if (z.get("symbol") or "").upper() == canonical_symbol(coin)),
             None,
         )
-        # CoinGecko /simple/price requires the canonical CoinGecko ID.
         gecko_id = COINGECKO_IDS.get(canonical_symbol(coin)) or (x or {}).get("id")
         if gecko_id:
             url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode({
@@ -1532,9 +1656,6 @@ def calculate_levels(rows, direction, daily_levels=None):
         return None
 
     if direction == "LONG":
-        # Correct geometry: resistance must be above price when it is used
-        # as a breakout reference. If historical resistance is below price,
-        # it is treated as already broken, and the next target uses ATR.
         resistance = max(res, price)
         entry = price if price >= res else res * 1.002
         sl = min(sup * 0.995, entry - 1.5 * a)
@@ -1549,7 +1670,6 @@ def calculate_levels(rows, direction, daily_levels=None):
         tp1 = min(entry - 2 * risk, support - 1.0 * a)
         tp2 = min(entry - 3 * risk, tp1 - risk)
 
-    # Sanity checks prevent the previous v7 price/resistance contradiction.
     if direction == "LONG":
         if not (sl < entry < tp1 <= tp2):
             return None
@@ -1649,15 +1769,8 @@ def analyze_coin(coin, market_news, weights):
 
     mom30, _ = momentum_30m(coin)
 
-    # Direction must be resolved BEFORE any trigger calculation uses it.
-    # v8.6.1 accidentally evaluated candle_trigger_state(..., direction, ...)
-    # before direction was assigned, causing every asset analysis to raise
-    # UnboundLocalError and leaving the report with Total scanned: 0.
-
     # --------------------------------------------------------
     # v10.0 CONFIDENCE — component-level, not binary.
-    # The six learned weights now produce different scores for different
-    # quality setups instead of clustering many assets at exactly 65%.
     # --------------------------------------------------------
     rsi_value = f(tf4.get("rsi"))
     ml, ms, _hist = macd(closes(tf4["rows"]))
@@ -1672,10 +1785,7 @@ def analyze_coin(coin, market_news, weights):
         elif aligned == 1:
             candle_points = weights["candle_pattern"] * 0.35
 
-    # RSI is graded. Extreme overbought/oversold never earns full confirmation.
     rsi_points = 0.0
-    # Direction is selected immediately below; use the raw indicator direction
-    # here so the score remains deterministic before gate evaluation.
     if rsi_value is not None:
         if ind_dir == "BULLISH":
             if 52 <= rsi_value <= 68:
@@ -1740,24 +1850,16 @@ def analyze_coin(coin, market_news, weights):
     # Direction selection
     # --------------------------------------------------------
     direction = "NONE"
-    # H4 + D1 remain the primary trend filter. H1 is confirmation, not a
-    # mandatory hard gate; this prevents the model from going silent merely
-    # because a lower timeframe is temporarily counter-trend.
     if ind_dir == "BULLISH" and h4 == "BULLISH" and d1 == "BULLISH":
         direction = "LONG"
     elif ind_dir == "BEARISH" and h4 == "BEARISH" and d1 == "BEARISH":
         direction = "SHORT"
 
-    # Strong three-level divergence is the only exception to
-    # the normal higher-timeframe rule.
     if divergence == "BULLISH_3_LEVEL" and h4 != "BULLISH":
         direction = "LONG"
     elif divergence == "BEARISH_3_LEVEL" and h4 != "BEARISH":
         direction = "SHORT"
 
-    # Divergence can legitimately override the raw indicator direction.
-    # Re-score RSI/MACD from the FINAL direction so confidence components
-    # never describe a different side than the proposed trade.
     if divergence in ("BULLISH_3_LEVEL", "BEARISH_3_LEVEL"):
         rsi_points = 0.0
         if rsi_value is not None:
@@ -1795,12 +1897,8 @@ def analyze_coin(coin, market_news, weights):
             "indicators": round(indicator_points, 2),
         })
 
-    # Weekly/monthly are regime filters, not entry triggers. A direct
-    # monthly contradiction blocks the setup; a weekly contradiction
-    # requires an unusually strong confidence score.
     regime_conflict = False
 
-    # Candle trigger is calculated only after direction has been resolved.
     trigger = candle_trigger_state(
         tf4.get("rows", []),
         direction,
@@ -1813,8 +1911,7 @@ def analyze_coin(coin, market_news, weights):
         regime_conflict = True
 
     # --------------------------------------------------------
-    # Hard gates — collect ALL blockers so diagnostics never hide
-    # secondary failures behind the first elif branch.
+    # Hard gates — collect ALL blockers
     # --------------------------------------------------------
     hard_blocks = []
     warning = None
@@ -1862,13 +1959,8 @@ def analyze_coin(coin, market_news, weights):
                 gate_reason = "Invalid price geometry"
             else:
                 leverage = suggested_leverage(atrp)
-                four_h_event = snapshots.get("4h", {}).get("event", {})
                 trigger_ok_long = trigger["state"] in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BULLISH_CLOSE") and direction == "LONG"
                 trigger_ok_short = trigger["state"] in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT", "BEARISH_CLOSE") and direction == "SHORT"
-                # The latest fully CLOSED 4H candle is authoritative.
-                # We do not require the GitHub run itself to occur inside the
-                # small NEW_CLOSED event window; this keeps the three fixed
-                # daily report times from going silent when a run is delayed.
                 if trigger_ok_long:
                     action = "BUY CONFIRMATION"
                 elif trigger_ok_short:
@@ -1964,7 +2056,7 @@ def analyze_coin(coin, market_news, weights):
 
 
 # ============================================================
-# v10.2 DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
+# v10.3 DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
 # ============================================================
 
 def _trend_bias_from_rows(rows):
@@ -1989,11 +2081,7 @@ def _trend_bias_from_rows(rows):
 
 
 def btc_market_regime(force=False):
-    """Classify BTC as RISK_ON / NEUTRAL / RISK_OFF using closed 4H/1D data.
-
-    This is deliberately a regime filter, not a trading trigger. It is cached
-    in-process so a report does not repeatedly hammer the exchange.
-    """
+    """Classify BTC as RISK_ON / NEUTRAL / RISK_OFF using closed 4H/1D data."""
     global _BTC_REGIME_CACHE
     now = time.time()
     if not force and _BTC_REGIME_CACHE:
@@ -2099,7 +2187,7 @@ def _save_signal_memory(result, state):
 
 
 def setup_quality_score(r):
-    """Human-like entry quality score; informational but also used by the execution gate."""
+    """Human-like entry quality score."""
     score = 50.0
     trigger = (r.get("candle_trigger") or {}).get("state")
     if trigger in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BREAKDOWN_CLOSED", "RESISTANCE_REJECT"):
@@ -2142,12 +2230,7 @@ def risk_quality_score(r, rr=None):
 
 
 def apply_decision_engine(results, btc_regime, breadth):
-    """Turn raw confirmations into human-like decisions.
-
-    A setup must be technically aligned AND tradable. Poor R/R, adverse BTC
-    regime, nearby opposing structure, or an unchanged signal are downgraded
-    to WATCH rather than being presented as fresh executable trades.
-    """
+    """Turn raw confirmations into human-like decisions."""
     for r in results:
         raw = r.get("action", "NO TRADE")
         rr = decision_rr(r)
@@ -2170,9 +2253,6 @@ def apply_decision_engine(results, btc_regime, breadth):
                 state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
                 reasons.append(f"Risk quality {r.get('risk_quality', 0)}/100 < 70")
 
-            # Human-like risk control: do not chase extreme momentum.
-            # A genuine closed-candle breakout/reclaim may still execute,
-            # but an extreme RSI without structural confirmation becomes WATCH.
             trigger_state = (r.get("candle_trigger") or {}).get("state")
             if direction == "LONG" and r.get("overbought"):
                 if not (trigger_state in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM") and r.get("confidence", 0) >= 75 and (r.get("volume_ratio") or 0) >= 1.35):
@@ -2298,7 +2378,6 @@ DEFAULT_WEIGHTS = {
 
 def get_weights():
     weights = DEFAULT_WEIGHTS.copy()
-    # Carry the latest learned weights forward across v8.x versions.
     rows = STORE.select(
         "atlas_model_weights",
         {"select": "feature,weight,model_version,updated_at", "order": "updated_at.desc", "limit": "200"},
@@ -2345,7 +2424,7 @@ def update_weight(feature, factor, reason, evidence):
 
 
 def self_diagnostic():
-    """Adapt weights only after the backtest gate, using durable local signal IDs."""
+    """Adapt weights only after the backtest gate."""
     init_sqlite()
     with sqlite_conn() as c:
         rows=c.execute("""
@@ -2511,11 +2590,7 @@ def _save_backtest_gate(passed, details):
 
 
 def h4_fallback_levels(rows, current_price=None):
-    """Conservative H4 fallback used only when Daily S/R is unavailable.
-
-    It is deliberately weaker than Daily S/R and therefore requires a higher
-    confidence threshold before it can produce a confirmation signal.
-    """
+    """Conservative H4 fallback used only when Daily S/R is unavailable."""
     if not rows or len(rows) < 80:
         return None
     price = f(current_price) or f(rows[-1][4])
@@ -2545,12 +2620,7 @@ def h4_fallback_levels(rows, current_price=None):
 
 
 def mandatory_backtest_gate(universe):
-    """Run a compact portfolio backtest before any weight change.
-
-    The gate is mandatory, but the expensive calculation is cached for a
-    configurable period (default 24h) so a 4H scheduler does not rerun the
-    full backtest on every execution.
-    """
+    """Run a compact portfolio backtest before any weight change."""
     cached = _cached_backtest_gate()
     if cached is not None:
         return cached
@@ -2576,7 +2646,6 @@ def mandatory_backtest_gate(universe):
     pf = safe_mean([x.get("profit_factor") for x in samples], 0.0)
     dd = max((safe_float(x.get("max_drawdown"), 0.0) or 0.0) for x in samples)
 
-    # If no baseline exists, establish it without changing the model.
     old = STORE.select(
         "atlas_backtests",
         {
@@ -2805,15 +2874,88 @@ def evaluate_open_outcomes():
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM — WITH RATE LIMIT HANDLING
 # ============================================================
+
+def _telegram_send_chunk(chat_id, text):
+    """Send a single message chunk to Telegram."""
+    data = urllib.parse.urlencode({
+        "chat_id": str(chat_id),
+        "text": text,
+        "disable_web_page_preview": "true",
+    }).encode()
+    
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    
+    with urllib.request.urlopen(req, timeout=30) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        if not data.get("ok"):
+            error_desc = data.get("description", "Unknown error")
+            raise RuntimeError(f"Telegram sendMessage failed: {error_desc}")
+        return data
+
+
+def send_with_retry(chat_id, text, max_retries=None, base_delay=None):
+    """Send a message with exponential backoff and retry on rate limits."""
+    if max_retries is None:
+        max_retries = TELEGRAM_MAX_RETRIES
+    if base_delay is None:
+        base_delay = TELEGRAM_BASE_RETRY_DELAY
+    
+    for attempt in range(max_retries):
+        try:
+            _telegram_send_chunk(chat_id, text)
+            return True
+            
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                retry_after = int(e.headers.get('Retry-After', base_delay))
+                wait_time = min(retry_after * (2 ** attempt) + random.uniform(0, 1), TELEGRAM_MAX_WAIT)
+                
+                print(f"⚠️ Telegram rate limit (429). Waiting {wait_time:.1f}s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+                
+            else:
+                append_changelog("TELEGRAM_SEND", None, None, f"HTTP {e.code}: {e.reason}")
+                return False
+                
+        except Exception as e:
+            append_changelog("TELEGRAM_SEND", None, None, f"Unexpected error: {e}")
+            wait_time = min(base_delay * (2 ** attempt), TELEGRAM_MAX_WAIT)
+            time.sleep(wait_time)
+    
+    print(f"❌ Failed to send message to {chat_id} after {max_retries} attempts")
+    return False
+
+
+def telegram_send_one(chat_id, text):
+    """Send a Telegram message with automatic chunking for long messages."""
+    if not TELEGRAM_TOKEN or not chat_id:
+        raise RuntimeError("Telegram secrets missing")
+    
+    if len(text) > 4096:
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks:
+            success = send_with_retry(chat_id, chunk)
+            if not success:
+                return False
+            time.sleep(0.5)
+        return True
+    else:
+        return send_with_retry(chat_id, text)
+
 
 def telegram_api_get_me():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN missing")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
-        headers={"User-Agent": "ATLAS-AI/8.7"},
+        headers={"User-Agent": "ATLAS-AI/10.3"},
     )
     with urllib.request.urlopen(req, timeout=20) as r:
         raw = r.read().decode("utf-8", errors="replace")
@@ -2823,40 +2965,18 @@ def telegram_api_get_me():
     return data.get("result") or {}
 
 
-def telegram_send_one(chat_id, text):
-    if not TELEGRAM_TOKEN or not chat_id:
-        raise RuntimeError("Telegram secrets missing")
-
-    data = urllib.parse.urlencode({
-        "chat_id": str(chat_id),
-        "text": text,
-        "disable_web_page_preview": "true",
-    }).encode()
-
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        raw = r.read().decode("utf-8", errors="replace")
-    data = json.loads(raw)
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram sendMessage failed: {data}")
-    return data
-
-
 def telegram_preflight():
-    """Validate Telegram credentials before the expensive market run."""
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is missing from GitHub Secrets")
     if not TELEGRAM_CHAT_ID and not TELEGRAM_GROUP_CHAT_ID:
         raise RuntimeError("No Telegram destination configured: TELEGRAM_CHAT_ID / TELEGRAM_GROUP_CHAT_ID")
+    
     me = telegram_api_get_me()
     append_changelog(
         "TELEGRAM_PREFLIGHT", None, None,
         f"Telegram API reachable as @{me.get('username') or me.get('first_name') or 'bot'}"
     )
+    print(f"✅ Telegram bot connected: @{me.get('username') or 'unknown'}")
     return me
 
 
@@ -2881,7 +3001,6 @@ def split_telegram(text, max_chars=3900):
             if len(block) <= max_chars:
                 current = block
             else:
-                # Hard split only as last resort.
                 for i in range(0, len(block), max_chars):
                     parts.append(block[i:i + max_chars])
                 current = ""
@@ -2893,54 +3012,88 @@ def split_telegram(text, max_chars=3900):
 
 
 def send_report(text):
-    """Deliver once per configured destination, with independent retry state."""
-    import hashlib
+    """Deliver report to both private chat and supergroup with rate limit handling."""
     parts = split_telegram(text)
     report_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    
     init_sqlite()
+    
     destinations = []
-    for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-        if destination and destination not in destinations:
-            destinations.append(destination)
+    if TELEGRAM_CHAT_ID:
+        destinations.append({
+            "id": TELEGRAM_CHAT_ID,
+            "name": "PRIVATE_CHAT",
+            "delay": TELEGRAM_PRIVATE_DELAY
+        })
+    
+    if TELEGRAM_GROUP_CHAT_ID and TELEGRAM_GROUP_CHAT_ID not in [d["id"] for d in destinations]:
+        destinations.append({
+            "id": TELEGRAM_GROUP_CHAT_ID,
+            "name": "SUPERGROUP",
+            "delay": TELEGRAM_GROUP_DELAY
+        })
+    
     if not destinations:
         msg = "No Telegram destination configured"
         append_changelog("TELEGRAM", None, None, msg)
         return len(parts), 0, [msg]
-
+    
     sent = 0
     errors = []
-    for destination in destinations:
+    
+    print(f"\n📤 Sending report to {len(destinations)} destination(s)")
+    
+    for dest in destinations:
+        chat_id = dest["id"]
+        dest_name = dest["name"]
+        delay = dest["delay"]
+        
         with sqlite_conn() as c:
             already = c.execute(
                 "select 1 from telegram_sent_reports where report_hash=? and destination=?",
-                (report_hash, destination),
+                (report_hash, chat_id),
             ).fetchone()
+        
         if already:
+            print(f"⏭️ Skipping {dest_name}: duplicate report detected")
             continue
-
-        destination_ok = True
+        
+        print(f"📤 Sending {len(parts)} parts to {dest_name}...")
+        
+        dest_success = True
         for i, part in enumerate(parts, 1):
-            try:
-                telegram_send_one(destination, part)
+            print(f"  Part {i}/{len(parts)}...", end=" ", flush=True)
+            
+            success = send_with_retry(chat_id, part)
+            
+            if success:
                 sent += 1
-                time.sleep(0.7)
-            except Exception as e:
-                destination_ok = False
-                err = f"Telegram destination {destination}, part {i}: {e}"
-                errors.append(err)
-                append_changelog("TELEGRAM", None, None, err, {"traceback": traceback.format_exc()})
+                print("✅")
+            else:
+                dest_success = False
+                errors.append(f"Telegram {dest_name}, part {i}: failed after retries")
+                print("❌")
                 break
-        if destination_ok:
+            
+            if i < len(parts):
+                actual_delay = delay + random.uniform(0, 0.5)
+                time.sleep(actual_delay)
+        
+        if dest_success:
             with sqlite_conn() as c:
                 c.execute(
                     "insert or ignore into telegram_sent_reports(report_hash,destination,sent_at) values(?,?,?)",
-                    (report_hash, destination, now_utc().isoformat()),
+                    (report_hash, chat_id, now_utc().isoformat()),
                 )
+            print(f"✅ All {len(parts)} parts sent to {dest_name}")
+        else:
+            print(f"❌ Failed to send all parts to {dest_name}")
+    
     return len(parts), sent, errors
 
 
 # ============================================================
-# REPORT FORMAT - DASHBOARD STYLE
+# REPORT FORMAT - DASHBOARD STYLE WITH TOP 10 MARKET CAP
 # ============================================================
 
 def filter_btc_pairs(coin_list, min_volume_btc=1000, top_n=10):
@@ -2950,27 +3103,32 @@ def filter_btc_pairs(coin_list, min_volume_btc=1000, top_n=10):
     ensure_exchanges()
     ex = EX.get("binance")
     if ex is None:
+        append_changelog("BTC_FILTER", None, None, "Binance exchange not available")
         return []
+    
+    # Get all BTC pairs from Binance
+    btc_markets = [s for s in MARKETS.get("binance", {}).keys() if s.endswith("/BTC")]
+    print(f"🔍 Found {len(btc_markets)} BTC pairs on Binance")
+    
+    # Build a set of coins that have BTC pairs
+    btc_coins = set()
+    for pair in btc_markets:
+        coin = pair.split("/")[0]
+        btc_coins.add(coin)
     
     for coin in coin_list:
         if is_stable(coin):
             continue
+        
+        # Skip if coin doesn't have BTC pair
+        if coin not in btc_coins:
+            continue
             
         try:
-            # Try to find BTC pair
-            btc_pair = None
-            for base in symbol_candidates(coin):
-                pair = f"{base}/BTC"
-                if pair in MARKETS.get("binance", {}):
-                    btc_pair = pair
-                    break
-                    
-            if btc_pair is None:
-                continue
-                
-            # Fetch ticker for BTC pair
+            btc_pair = f"{coin}/BTC"
+            
             ticker = ex.fetch_ticker(btc_pair)
-            volume_btc = f(ticker.get("quoteVolume"))  # Volume in BTC
+            volume_btc = f(ticker.get("quoteVolume"))
             price_btc = f(ticker.get("last"))
             change_24h = f(ticker.get("percentage"))
             
@@ -2985,16 +3143,44 @@ def filter_btc_pairs(coin_list, min_volume_btc=1000, top_n=10):
                 "pair": btc_pair
             })
             
+            print(f"  ✅ {coin}: {btc_pair} | Vol: {volume_btc:.0f} BTC | Change: {change_24h:.2f}%")
+            
         except Exception as e:
             append_changelog("BTC_PAIR_FILTER", None, None, f"{coin}: {e}")
             continue
-            
-    # Sort by absolute change (volatility) and take top N
+    
+    # If no BTC pairs found, try alternative approach
+    if not btc_pairs:
+        print("⚠️ No BTC pairs found. Trying alternative approach...")
+        for pair in btc_markets[:50]:
+            try:
+                ticker = ex.fetch_ticker(pair)
+                volume_btc = f(ticker.get("quoteVolume"))
+                price_btc = f(ticker.get("last"))
+                change_24h = f(ticker.get("percentage"))
+                coin = pair.split("/")[0]
+                
+                if volume_btc is None or volume_btc < min_volume_btc:
+                    continue
+                    
+                btc_pairs.append({
+                    "coin": coin,
+                    "price_btc": price_btc,
+                    "change_24h": change_24h,
+                    "volume_btc": volume_btc,
+                    "pair": pair
+                })
+            except Exception as e:
+                continue
+    
     btc_pairs.sort(key=lambda x: abs(x["change_24h"] or 0), reverse=True)
+    
+    print(f"✅ Filtered to {len(btc_pairs)} BTC pairs with volume > {min_volume_btc} BTC")
+    
     return btc_pairs[:top_n]
 
 
-def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news, market_info):
+def generate_dashboard_report(results, btc_pairs, top10_symbols, priority10, dynamic30, macro, news, market_info):
     """Generate a compact dashboard-style report with two tables."""
     
     dt = now_tehran()
@@ -3005,16 +3191,14 @@ def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news,
     table1_rows = []
     for pair in btc_pairs[:10]:
         coin = pair["coin"]
-        # Find the full analysis result for this coin
         r = next((x for x in results if x.get("coin") == coin), None)
         if r is None:
             continue
             
-        # Calculate 7-day change from 1H data if available
         change_7d = None
         if r.get("snapshots", {}).get("1h", {}).get("rows"):
             h1_rows = r["snapshots"]["1h"]["rows"]
-            if len(h1_rows) >= 168:  # 7 days * 24 hours
+            if len(h1_rows) >= 168:
                 price_7d_ago = f(h1_rows[-168][4])
                 if price_7d_ago and price_7d_ago > 0:
                     change_7d = (r.get("price", 1) / price_7d_ago - 1.0) * 100.0
@@ -3047,7 +3231,6 @@ def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news,
         tp = r.get("tp2") or r.get("tp1")
         rr = decision_rr(r) if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") else None
         
-        # Generate prediction
         prediction = "N/A"
         if r.get("direction") == "LONG" and r.get("confidence", 0) >= 60:
             tp_val = r.get("tp2") or r.get("tp1")
@@ -3075,8 +3258,13 @@ def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news,
     # ============================================================
     lines = []
     
-    # Header
+    # Header with source info
+    source_info = "CoinGecko"
+    if market_info and market_info.get("source"):
+        source_info = market_info.get("source")
+    
     lines.append(f"📊 گزارش لحظه‌ای {len(btc_pairs)} ارز برتر جفت BTC (حجم >۱۰۰۰ BTC)")
+    lines.append(f"📡 منبع داده: {source_info} + Binance")
     if len(btc_pairs) < 10:
         lines.append(f"⚠️ تعداد ارزهای واجد شرایط کمتر از حد انتظار است ({len(btc_pairs)} ارز)")
     lines.append("")
@@ -3108,7 +3296,6 @@ def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news,
     
     for row in table2_rows:
         rr_display = f"{row['rr']:.2f}" if row['rr'] is not None else "N/A"
-        # Add markers for high R/R or low confidence
         symbol_display = row['symbol']
         if row['rr'] is not None and row['rr'] >= 3:
             symbol_display = f"{row['symbol']}🎯"
@@ -3172,436 +3359,14 @@ def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news,
     # ============================================================
     lines.append("---")
     lines.append(f"📅 تاریخ/ساعت: {shamsi(dt)}، ساعت {dt.strftime('%H:%M')}")
-    lines.append(f"📊 منبع: CoinGecko + Binance")
+    lines.append(f"📊 منبع: {source_info} + Binance")
     lines.append(f"⏱️ وضعیت داده: لحظه‌ای")
     lines.append(f"🔄 به‌روزرسانی: هر ۱ ساعت")
     
     return "\n".join(lines)
 
 
-def action_emoji(action):
-    if action == "BUY CONFIRMATION":
-        return "🟢 BUY CONFIRMATION"
-    if action == "SELL CONFIRMATION":
-        return "🔴 SELL CONFIRMATION"
-    if action == "BULLISH WATCH":
-        return "🟢 BULLISH WATCH"
-    if action == "BEARISH WATCH":
-        return "🔴 BEARISH WATCH"
-    return "⛔ NO TRADE"
-
-
-def asset_block(r):
-    """Compact decision-focused asset report.
-
-    Signal calculations still use the full MTF dataset; Telegram only shows
-    fields that materially affect a trading decision. This keeps the report
-    readable without weakening the engine.
-    """
-    action = r.get("action", "NO TRADE")
-    lines = [
-        f"🔹 {r['coin']}",
-        f"Price: {fmt(r['price'])} | 24H: {pct(r['change'])}",
-        f"H4/D1/W1: {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')}",
-        f"RSI: {r['rsi']:.1f}" if r.get('rsi') is not None else "RSI: N/A",
-        f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
-        f"Pattern: {r['pattern']}" + (" ✅" if r.get("pattern_valid") else ""),
-        f"Volume: {r['volume']} | {r['volume_ratio']:.2f}x" if r.get('volume_ratio') is not None else f"Volume: {r['volume']} | N/A",
-        f"Liquidity: {r['liquidity']} | ATR: {r['atr_pct']:.2f}%" if r.get('atr_pct') is not None else f"Liquidity: {r['liquidity']} | ATR: N/A",
-        f"4H Trigger: {(r.get('candle_trigger') or {}).get('state','UNKNOWN')}",
-        f"Daily S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))} | {r.get('sr_confidence','LOW')}",
-        f"Scores: Setup {r.get('setup_score', r.get('confidence',0))}/100 | Entry {r.get('entry_quality',0)}/100 | Risk {r.get('risk_quality',0)}/100",
-        f"🎯 ACTION: {action_emoji(action)}",
-    ]
-
-    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-        lines += [
-            f"R/R: 1:{r.get('rr', 0):.2f} | Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))}",
-            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}",
-            f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی است'}",
-        ]
-    elif r.get("decision_reasons"):
-        lines.append("Decision: " + " | ".join(r["decision_reasons"][:3]))
-        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
-    else:
-        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
-        lines.append(f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی نیست'}")
-
-    if r.get("warning"):
-        lines.append(f"⚠️ {r['warning']}")
-    if f(r.get("spread")) is not None and r["spread"] > 3:
-        lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
-    return "\n".join(lines)
-
-
-# ============================================================
-# MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
-# ============================================================
-
-def coingecko_headers():
-    if COINGECKO_API_KEY:
-        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
-    return {}
-
-
-def global_market_intelligence():
-    """Fetch one compact daily market snapshot from CoinGecko + F&G.
-
-    Uses /global for aggregate market regime and /coins/markets for the
-    top-300 universe so gainers/losers are calculated locally rather than
-    depending on the paid top_gainers_losers endpoint.
-    """
-    out = {
-        "market_cap": None, "volume_24h": None, "market_change_24h": None,
-        "volume_change_24h": None, "btc_dominance": None,
-        "eth_dominance": None, "stablecoin_dominance": None,
-        "altcoin_dominance": None, "fear_greed": None,
-        "fear_greed_label": None, "fear_greed_ts": None,
-        "top_gainers": [], "top_losers": [], "heatmap": [],
-        "source": "CoinGecko + Alternative.me + optional CoinGlass",
-    }
-
-    global_data = safe_http_get(
-        "https://api.coingecko.com/api/v3/global",
-        headers=coingecko_headers(), default={}
-    )
-    if isinstance(global_data, dict):
-        d = global_data.get("data") or {}
-        cap = d.get("total_market_cap") or {}
-        vol = d.get("total_volume") or {}
-        dom = d.get("market_cap_percentage") or {}
-        out["market_cap"] = f(cap.get("usd"))
-        out["volume_24h"] = f(vol.get("usd"))
-        out["market_change_24h"] = f(d.get("market_cap_change_percentage_24h_usd"))
-        out["volume_change_24h"] = f(d.get("volume_change_percentage_24h_usd"))
-        out["btc_dominance"] = f(dom.get("btc"))
-        out["eth_dominance"] = f(dom.get("eth"))
-        # Stablecoin dominance is approximated from the principal stablecoins
-        # exposed by CoinGecko. This avoids double-counting non-stable assets.
-        stable_ids = ("usdt", "usdc", "usde", "dai", "fdusd", "usds", "usdd")
-        stable_dom = sum(f(dom.get(k), 0) or 0 for k in stable_ids)
-        out["stablecoin_dominance"] = stable_dom if stable_dom > 0 else None
-        btc = out["btc_dominance"] or 0
-        stable = out["stablecoin_dominance"] or 0
-        out["altcoin_dominance"] = max(0.0, 100.0 - btc - stable)
-
-    # Top 300 market-cap snapshot. Two calls are enough because CoinGecko
-    # supports up to 250 records per page on the markets endpoint.
-    markets = []
-    for page, per_page in ((1, 250), (2, 50)):
-        url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
-            "vs_currency": "usd", "order": "market_cap_desc",
-            "per_page": str(per_page), "page": str(page), "sparkline": "false",
-            "price_change_percentage": "1h,24h,7d",
-        })
-        rows = safe_http_get(url, headers=coingecko_headers(), default=[])
-        if isinstance(rows, list):
-            markets.extend(rows)
-        if len(markets) >= 300:
-            break
-        time.sleep(0.15)
-
-    clean = []
-    for x in markets[:300]:
-        if not isinstance(x, dict):
-            continue
-        sym = (x.get("symbol") or "").upper()
-        if not sym or is_stable(sym):
-            continue
-        ch = f(x.get("price_change_percentage_24h"))
-        price = f(x.get("current_price"))
-        vol = f(x.get("total_volume"))
-        rank = x.get("market_cap_rank")
-        if ch is None or price is None:
-            continue
-        clean.append({
-            "symbol": sym, "name": x.get("name") or sym,
-            "rank": rank, "price": price, "volume": vol,
-            "change_24h": ch, "high_24h": f(x.get("high_24h")),
-            "low_24h": f(x.get("low_24h")),
-            "change_1h": f(x.get("price_change_percentage_1h_in_currency")),
-            "change_7d": f(x.get("price_change_percentage_7d_in_currency")),
-        })
-    # CoinGecko can expose duplicate symbols (same ticker used by different assets).
-    # Keep the highest-ranked occurrence so the report is not misleading.
-    unique = {}
-    for item in sorted(clean, key=lambda x: (x.get("rank") or 999999)):
-        unique.setdefault(item["symbol"], item)
-    clean = list(unique.values())
-    clean.sort(key=lambda x: x["change_24h"], reverse=True)
-    out["top_gainers"] = clean[:7]
-    out["top_losers"] = list(reversed(clean[-7:])) if clean else []
-
-    fg = safe_http_get("https://api.alternative.me/fng/?limit=1", default={})
-    if isinstance(fg, dict):
-        try:
-            item = (fg.get("data") or [])[0]
-            out["fear_greed"] = int(item.get("value"))
-            out["fear_greed_label"] = item.get("value_classification")
-            out["fear_greed_ts"] = item.get("timestamp")
-        except (IndexError, TypeError, ValueError):
-            pass
-
-    out["heatmap"] = liquidation_heatmap_summary(("BTC", "ETH"))
-    return out
-
-
-def liquidation_heatmap_summary(symbols=("BTC", "ETH")):
-    """Optional CoinGlass heatmap summary.
-
-    CoinGlass currently requires an API key for API access. Therefore the
-    module is deliberately non-blocking: without a key it returns an empty
-    list and never prevents the core ATLAS report from running.
-    """
-    if not COINGLASS_API_KEY:
-        return []
-    headers = {"CG-API-KEY": COINGLASS_API_KEY, "accept": "application/json"}
-    result = []
-    for symbol in symbols:
-        url = "https://open-api-v4.coinglass.com/api/futures/liquidation/aggregated-heatmap/model1?" + urllib.parse.urlencode({
-            "symbol": symbol, "range": "24h"
-        })
-        d = safe_http_get(url, timeout=15, headers=headers, default={})
-        if not isinstance(d, dict) or d.get("code") not in (None, "0", 0):
-            continue
-        data = d.get("data") or {}
-        y_axis = data.get("y_axis") or []
-        cells = data.get("liquidation_leverage_data") or []
-        price = None
-        candles = data.get("price_candlesticks") or []
-        if candles and isinstance(candles[-1], (list, tuple)) and len(candles[-1]) >= 5:
-            price = f(candles[-1][4])
-        levels = []
-        for cell in cells:
-            if not isinstance(cell, (list, tuple)) or len(cell) < 3:
-                continue
-            yi, intensity = safe_float(cell[1]), safe_float(cell[2])
-            if yi is None or intensity is None:
-                continue
-            yi = int(yi)
-            if 0 <= yi < len(y_axis):
-                lvl = f(y_axis[yi])
-                if lvl and lvl > 0:
-                    levels.append((lvl, intensity))
-        above = sorted([x for x in levels if price is not None and x[0] > price], key=lambda z: z[1], reverse=True)
-        below = sorted([x for x in levels if price is not None and x[0] < price], key=lambda z: z[1], reverse=True)
-        result.append({
-            "symbol": symbol, "price": price,
-            "above": above[:3], "below": below[:3],
-        })
-    return result
-
-
-def market_intelligence_block(mi):
-    lines = ["━━━━━━━━━━━━━━━━━━", "🌐 GLOBAL MARKET PULSE"]
-    if mi.get("market_cap") is not None:
-        lines.append(f"Total Market Cap: ${mi['market_cap']/1e12:.2f}T")
-    if mi.get("volume_24h") is not None:
-        lines.append(f"24H Market Volume: ${mi['volume_24h']/1e9:.2f}B")
-    if mi.get("market_change_24h") is not None:
-        lines.append(f"Market Cap 24H: {pct(mi['market_change_24h'])}")
-    if mi.get("volume_change_24h") is not None:
-        lines.append(f"Volume 24H Change: {pct(mi['volume_change_24h'])}")
-    if mi.get("fear_greed") is not None:
-        lines.append(f"😨 Fear & Greed: {mi['fear_greed']} — {mi.get('fear_greed_label','N/A')} (Alternative.me)")
-    dom = []
-    if mi.get("btc_dominance") is not None: dom.append(f"BTC {mi['btc_dominance']:.2f}%")
-    if mi.get("eth_dominance") is not None: dom.append(f"ETH {mi['eth_dominance']:.2f}%")
-    if mi.get("altcoin_dominance") is not None: dom.append(f"ALT* {mi['altcoin_dominance']:.2f}%")
-    if dom: lines.append("Dominance: " + " | ".join(dom))
-    if mi.get("stablecoin_dominance") is not None:
-        lines.append(f"Stablecoin dominance: {mi['stablecoin_dominance']:.2f}%")
-
-    gainers = mi.get("top_gainers") or []
-    losers = mi.get("top_losers") or []
-    if gainers:
-        lines.append("🚀 TOP GAINERS — Top 300: " + " | ".join(f"{x['symbol']} {pct(x['change_24h'])}" for x in gainers[:5]))
-    if losers:
-        lines.append("🔻 TOP LOSERS — Top 300: " + " | ".join(f"{x['symbol']} {pct(x['change_24h'])}" for x in losers[:5]))
-
-    hm = mi.get("heatmap") or []
-    if hm:
-        lines.append("🔥 LIQUIDATION HEATMAP — CoinGlass")
-        for x in hm:
-            above = x.get("above") or []
-            below = x.get("below") or []
-            a = fmt(above[0][0]) if above else "N/A"
-            b = fmt(below[0][0]) if below else "N/A"
-            lines.append(f"{x['symbol']}: price {fmt(x.get('price'))} | strongest above {a} | strongest below {b}")
-    else:
-        lines.append("🔥 Liquidation Heatmap: N/A (COINGLASS_API_KEY not configured or endpoint unavailable)")
-    lines.append("* ALT* = total crypto dominance excluding BTC and principal stablecoins; ETH is included in ALT*, so dominance lines are not additive.")
-    return "\n".join(lines)
-
-
-def market_summary(results, macro, news):
-    tradable = [
-        x for x in results
-        if x["action"] in ("BUY CONFIRMATION", "SELL CONFIRMATION")
-    ]
-    bullish = sum(1 for x in results if x["h4_trend"] == "BULLISH")
-    bearish = sum(1 for x in results if x["h4_trend"] == "BEARISH")
-
-    if bullish > bearish * 1.25:
-        regime = "تمایل غالب صعودی"
-    elif bearish > bullish * 1.25:
-        regime = "تمایل غالب نزولی"
-    else:
-        regime = "بازار دوطرفه / خنثی"
-
-    dxy = macro.get("DXY")
-    fg = safe_http_get(
-        "https://api.alternative.me/fng/?limit=1",
-        default={},
-    )
-    fg_value = None
-    fg_label = ""
-    try:
-        fg_value = int(fg["data"][0]["value"])
-        fg_label = fg["data"][0]["value_classification"]
-    except Exception:
-        pass
-
-    lines = [
-        "━━━━━━━━━━━━━━━━━━",
-        "🧠 ATLAS MARKET INTELLIGENCE",
-        f"Bias: {regime}",
-        f"4H Bullish: {bullish} | 4H Bearish: {bearish}",
-        f"Actionable setups: {len(tradable)}",
-        f"DXY: {fmt(dxy)} | USD liquidity proxy" if dxy is not None else "DXY: N/A | USD liquidity proxy unavailable",
-        f"Fear & Greed: {fg_value} — {fg_label}" if fg_value is not None else "Fear & Greed: N/A",
-        f"News: {news['bias']} / Impact: {news['impact']}",
-    ]
-
-    if macro.get("GOLD"):
-        lines.append(f"Gold: {fmt(macro['GOLD'])}")
-    if macro.get("SILVER"):
-        lines.append(f"Silver: {fmt(macro['SILVER'])}")
-    if macro.get("COPPER"):
-        lines.append(f"Copper: {fmt(macro['COPPER'])}")
-    if macro.get("WTI"):
-        lines.append(f"WTI: {fmt(macro['WTI'])}")
-    if macro.get("BRENT"):
-        lines.append(f"Brent: {fmt(macro['BRENT'])}")
-
-    if tradable:
-        lines.append("")
-        lines.append("🏆 BEST SETUPS")
-        for i, x in enumerate(
-            sorted(
-                tradable,
-                key=lambda z: (z["confidence"], z["liquidity_score"]),
-                reverse=True,
-            )[:8],
-            1,
-        ):
-            lines.append(
-                f"{i}. {x['coin']} — {x['direction']} — "
-                f"{x['confidence']}% — {x['liquidity']}"
-            )
-    else:
-        lines += [
-            "",
-            "⛔ هیچ ستاپی با تمام شروط ATLAS تأیید نشد.",
-            "عدم قطعیت بالا - سیگنال صادر نشد",
-        ]
-
-    lines += [
-        "",
-        "📌 جمع‌بندی:",
-        "ATLAS فقط زمانی سیگنال معاملاتی می‌دهد که روند H4 و D1، "
-        "اندیکاتورها، حجم و ساختار قیمت هم‌جهت باشند.",
-        "سیگنال خلاف روند تایم‌فریم بالاتر بدون واگرایی 3 سطحی حذف می‌شود.",
-        "خبر پرریسک یا داده متناقض می‌تواند سیگنال را متوقف کند.",
-        "استیبل‌کوین‌ها از چرخه سیگنال‌دهی حذف شده‌اند.",
-        "",
-        "تنظیمات بر اساس داده‌ی محدود اخیر انجام شده و ممکن است در آینده عملکرد متفاوتی داشته باشد.",
-    ]
-    return "\n".join(lines)
-
-
-def atlas_conclusion(results):
-    threshold = MIN_CONFIDENCE
-    actionable = [x for x in results if x.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and x.get("confidence", 0) >= threshold]
-    buys = sorted([x for x in actionable if x.get("action") == "BUY CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
-    sells = sorted([x for x in actionable if x.get("action") == "SELL CONFIRMATION"], key=lambda z: (z.get("confidence", 0), z.get("rr") or 0, z.get("liquidity_score", 0)), reverse=True)
-    rise = sorted([x for x in results if x.get("action") == "BULLISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
-    fall = sorted([x for x in results if x.get("action") == "BEARISH WATCH" and x.get("confidence", 0) >= MIN_WATCH_CONFIDENCE], key=lambda z: (z.get("confidence", 0), z.get("liquidity_score", 0)), reverse=True)
-
-    lines = ["━━━━━━━━━━━━━━━━━━", f"🎯 {VERSION} FINAL CONCLUSION"]
-    lines.append("🟢 BUY / ACCUMULATE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in buys[:5]) if buys else "هیچ خریدی با تأیید کامل صادر نشد."))
-    lines.append("🔴 SELL / REDUCE: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in sells[:5]) if sells else "هیچ فروش تأییدشده‌ای صادر نشد."))
-    lines.append("📈 RISE WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in rise[:5]) if rise else "ندارد"))
-    lines.append("📉 FALL WATCH: " + (", ".join(f"{x['coin']} ({x['confidence']}%)" for x in fall[:5]) if fall else "ندارد"))
-
-    best = buys[0] if buys else (sells[0] if sells else None)
-    best_side = "BUY" if buys else "SELL"
-    if buys and sells and sells[0].get("confidence", 0) > buys[0].get("confidence", 0):
-        best, best_side = sells[0], "SELL"
-    if best:
-        lines += [
-            f"⭐ BEST SETUP: {best['coin']} — {best_side} — {best['confidence']}%",
-            f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: {best.get('volume_ratio'):.2f}x" if best.get('volume_ratio') is not None else f"   H4/D1: {best.get('h4_trend')} / {best.get('d1_trend')} | S/R: {best.get('sr_confidence','LOW')} | Volume: N/A",
-            f"   Entry: {fmt(best.get('entry'))} | SL: {fmt(best.get('sl'))} | TP1: {fmt(best.get('tp1'))} | TP2: {fmt(best.get('tp2'))}",
-        ]
-    elif rise or fall:
-        watch = rise[0] if rise else fall[0]
-        side = "BULLISH WATCH" if rise else "BEARISH WATCH"
-        lines += [
-            f"⭐ BEST WATCH: {watch['coin']} — {side} — {watch['confidence']}%",
-            f"   Trigger: {(watch.get('candle_trigger') or {}).get('state','UNKNOWN')} | RSI: {watch.get('rsi'):.1f}" if watch.get('rsi') is not None else f"   Trigger: {(watch.get('candle_trigger') or {}).get('state','UNKNOWN')} | RSI: N/A",
-            f"   S/R: {watch.get('sr_confidence','LOW')} | Volume: {watch.get('volume_ratio'):.2f}x" if watch.get('volume_ratio') is not None else f"   S/R: {watch.get('sr_confidence','LOW')} | Volume: N/A",
-            "   تصمیم: هنوز ورود اجرایی نیست؛ منتظر تأیید ساختار/پولبک هستیم.",
-        ]
-    else:
-        lines.append("⭐ BEST SETUP: NONE — بازار در این اجرا ستاپ کم‌ریسک و تأییدشده نداد.")
-
-    new_events = 0
-    for r in results:
-        ev = r.get("candle_events", {})
-        new_events += sum(1 for x in ev.values() if isinstance(x, dict) and x.get("status") == "NEW_CLOSED")
-    lines.append(f"Threshold: {threshold:.0f}% | Watch threshold: {MIN_WATCH_CONFIDENCE:.0f}% | Closed-candle events observed: {new_events}")
-    lines.append("🛡️ تصمیم ATLAS: BUY/SELL فقط پس از Gate + R/R + regime + ساختار؛ WATCH یعنی جهت جالب است اما ورود هنوز تأیید نشده.")
-    return "\n".join(lines)
-
-
-def _ordered_report_results(results, top10, dynamic30):
-    """Return results in the contractual Telegram radar order."""
-    by_coin = {}
-    for r in results:
-        coin = (r.get("coin") or "").upper()
-        if coin and coin not in by_coin:
-            by_coin[coin] = r
-
-    ordered = []
-    seen = set()
-
-    for group in (top10, dynamic30, ATLAS_STATIC):
-        for coin in group:
-            coin = coin.upper()
-            if coin in by_coin and coin not in seen:
-                ordered.append(by_coin[coin])
-                seen.add(coin)
-
-    # Defensive tail: anything introduced by a future data source but not
-    # assigned to one of the three groups still appears at the end.
-    for r in results:
-        coin = (r.get("coin") or "").upper()
-        if coin and coin not in seen:
-            ordered.append(r)
-            seen.add(coin)
-
-    return ordered
-
-
-def _report_section_header(title, count, subtitle=None):
-    lines = ["━━━━━━━━━━━━━━━━━━", title, f"Assets in section: {count}"]
-    if subtitle:
-        lines.append(subtitle)
-    return "\n".join(lines)
-
-
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
+def build_report(results, top10_symbols, priority10, dynamic30, macro, news, market_info, unavailable=0,
                  btc_regime=None, breadth=None):
     """Generate a compact dashboard-style report."""
     
@@ -3626,7 +3391,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     
     # Generate the dashboard report
     return generate_dashboard_report(
-        results, btc_pairs, top10, dynamic30, macro, news, market_info
+        results, btc_pairs, top10_symbols, priority10, dynamic30, macro, news, market_info
     )
 
 
@@ -3683,7 +3448,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v10.2 dashboard report: BTC pairs only, two tables, 4-line summary",
+            "notes": "v10.3 dashboard: Top 10 Market Cap + BTC pairs + 2 tables",
         },
     )
 
@@ -3704,7 +3469,7 @@ def checkpoint_sqlite():
 def report():
     init_sqlite()
     evaluate_open_outcomes()
-    universe, top10, dynamic30 = build_universe()
+    universe, top10_symbols, priority10, dynamic30 = build_universe()
 
     # Governance: backtest MUST pass before self-healing can change weights.
     backtest_ok, bt = mandatory_backtest_gate(universe)
@@ -3720,14 +3485,22 @@ def report():
     market_info = global_market_intelligence()
     results = []
     unavailable = 0
-    for coin in universe:
+    
+    print(f"\n🔍 Analyzing {len(universe)} assets...")
+    
+    for idx, coin in enumerate(universe, 1):
         try:
+            print(f"  {idx}/{len(universe)}: {coin}...", end=" ", flush=True)
             r = analyze_coin(coin, news, weights)
             if r:
                 results.append(r)
+                print("✅")
+            else:
+                print("⏭️ (no signal)")
         except Exception as e:
             unavailable += 1
             append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
+            print(f"❌ {str(e)[:50]}")
         time.sleep(REQUEST_SLEEP_SECONDS)
 
     # v9: market regime and breadth are calculated after the raw radar scan,
@@ -3741,7 +3514,10 @@ def report():
         # Only genuinely executable decisions become open trade signals.
         r["action"] = r.get("decision_state", r.get("action"))
         store_signal(r)
-    text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
+    
+    print(f"\n📊 Report generated: {len(results)} assets analyzed, {unavailable} unavailable")
+    
+    text = build_report(results, top10_symbols, priority10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
     return text, results, macro, news, market_info, unavailable
 
 
@@ -3761,7 +3537,9 @@ def main():
         )
         save_run(results, parts, macro, news, unavailable)
 
+        print("\n" + "="*60)
         print(text)
+        print("="*60)
         print("")
         print(
             f"{VERSION} sent: {sent} Telegram messages "
@@ -3792,12 +3570,11 @@ def main():
                 for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
                     if destination:
                         try:
-                            telegram_send_one(destination, alert)
+                            send_with_retry(destination, alert, max_retries=3)
                         except Exception as te:
                             print(f"Telegram error alert failed for {destination}: {te}")
         except Exception:
             pass
-        # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
         return 1
 
 
