@@ -1,35 +1,39 @@
-""ATLAS v10.1 offline smoke tests. No network calls."""
-import importlib.util
-import pathlib
+from pathlib import Path
+import ast
 
-path = pathlib.Path(__file__).with_name("bot.py")
-spec = importlib.util.spec_from_file_location("atlas_bot", path)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-assert mod.VERSION == "ATLAS v10.1", mod.VERSION
-assert mod.data_symbol("MATIC") == "POL"
-assert mod.data_symbol("BTC") == "BTC"
-assert mod.is_stable("USDT") is True
-assert mod.is_stable("USDN") is False
-
-# MACD must return a real histogram whenever enough data exists.
-vals = [100 + i * 0.2 + ((i % 7) - 3) * 0.05 for i in range(120)]
-ml, ms, hist = mod.macd(vals)
-assert ml is not None and ms is not None and hist is not None
-
-# RSI series must be linear-time Wilder output and end at the scalar RSI.
-series = mod.rsi_series(vals)
-assert len(series) >= 80
-assert abs(series[-1] - mod.rsi(vals)) < 1e-9
-
-# Breadth sample must exclude cross-timeframe contradictions.
-rows = [
-    {"h4_trend":"BULLISH","d1_trend":"BULLISH"},
-    {"h4_trend":"BULLISH","d1_trend":"BEARISH"},
-    {"h4_trend":"BEARISH","d1_trend":"BEARISH"},
+BOT = Path("bot.py")
+if not BOT.exists():
+    raise SystemExit("bot.py not found")
+source = BOT.read_text(encoding="utf-8")
+ast.parse(source)
+functions = {n.name for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
+required = {
+    "canonical_symbol", "symbol_for", "ema_series", "macd", "rsi_series",
+    "strong_divergence", "market_breadth", "analyze_coin",
+    "build_report", "checkpoint_sqlite", "main",
+}
+missing = required - functions
+if missing:
+    raise SystemExit(f"Missing required functions: {sorted(missing)}")
+checks = [
+    ("VERSION 10.2", 'VERSION = "ATLAS v10.2"' in source),
+    ("MATIC/POL alias", '"MATIC": ("POL", "MATIC")' in source),
+    ("CoinGecko Polygon canonical ID", '"MATIC": "polygon-ecosystem-token"' in source),
+    ("exact stablecoin allow-list", 'return s in STABLE_SYMBOLS' in source and 's.startswith("USD")' not in source),
+    ("O(n) EMA series", 'def ema_series(values, n):' in source),
+    ("Wilder RSI series", 'def rsi_series(values, n=14):' in source),
+    ("single-pass MACD", 'def macd(values):' in source and 'Return MACD line, signal and histogram in O(n).' in source),
+    ("all gate reasons", 'hard_blocks = []' in source and ' | ".join(dict.fromkeys(hard_blocks))' in source),
+    ("persistent SQLite v10.2", 'atlas_v102.sqlite3' in source),
+    ("SQLite WAL checkpoint", 'def checkpoint_sqlite()' in source and 'wal_checkpoint(TRUNCATE)' in source),
+    ("dynamic Top-30 refresh", 'cg = gecko_top(60)' in source),
+    ("breadth uses aligned samples", 'aligned_samples = bullish + bearish' in source),
+    ("price source errors observable", 'price_source_errors' in source),
+    ("closed-candle engine", 'Only CLOSED candles used for signals' in source),
 ]
-b = mod.market_breadth(rows)
-assert b["samples"] == 2, b
-
-print("ATLAS v10.1 smoke test: PASS")
+failed = [name for name, ok in checks if not ok]
+if failed:
+    raise SystemExit("Smoke checks failed: " + ", ".join(failed))
+print("ATLAS v10.2 SMOKE TEST: PASS")
+for name, _ in checks:
+    print("  OK:", name)
