@@ -69,7 +69,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.2"
+VERSION = "ATLAS v10.3"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -2804,6 +2804,189 @@ def evaluate_open_outcomes():
             append_changelog("OUTCOME_EVAL",None,None,f"{row['coin']}: {e}",{"traceback":traceback.format_exc()})
 
 
+
+# ============================================================
+# ATLAS v10.3 — PERSONAL PORTFOLIO ENGINE
+# ============================================================
+# This module keeps the existing GLOBAL MARKET SUPERVISOR intact and adds
+# a separate Persian 4H report for the user's personal radar/portfolio.
+# The list below is based on the portfolio screenshots previously supplied
+# in this project; it is intentionally separate from ATLAS_STATIC market radar.
+
+ATLAS_PERSONAL_CRYPTO = [
+    "BTC", "ETH", "SOL", "BNB", "ADA", "XRP", "DOGE", "CAKE",
+    "SUI", "LINK", "RNDR", "HBAR", "DOT", "TON", "ARB", "HYPE",
+    "POL", "HFT", "X", "DOGS", "PTB", "XAUT", "LAB", "GRAM",
+    "ZEC", "LYN",
+]
+
+PHYSICAL_ASSETS = {
+    "GOLD": {"name": "طلا فیزیکی", "symbol": "GOLD", "unit": "گرم/ارزش فیزیکی"},
+    "SILVER": {"name": "نقره فیزیکی", "symbol": "SILVER", "unit": "گرم/ارزش فیزیکی"},
+    "COPPER": {"name": "مس فیزیکی", "symbol": "COPPER", "unit": "کیلو/ارزش فیزیکی"},
+}
+
+def _fa_action(action):
+    return {
+        "BUY CONFIRMATION": "🟢 خرید / افزایش پله‌ای",
+        "SELL CONFIRMATION": "🔴 فروش / کاهش ریسک",
+        "BULLISH WATCH": "🟡 صبر برای ورود بهتر",
+        "BEARISH WATCH": "🟠 احتیاط / عدم افزایش",
+        "NO TRADE": "⚪ فعلاً معامله نکن",
+    }.get(action or "NO TRADE", "⚪ فعلاً معامله نکن")
+
+def _fa_trading_view(r):
+    action = r.get("action", "NO TRADE")
+    if action == "BUY CONFIRMATION":
+        return "🟢 BUY / خرید پله‌ای"
+    if action == "SELL CONFIRMATION":
+        return "🔴 TAKE PROFIT / کاهش"
+    if action == "BULLISH WATCH":
+        return "🟡 BUY ON DIP / منتظر اصلاح"
+    if action == "BEARISH WATCH":
+        return "🟠 WAIT / بدون ورود جدید"
+    return "⚪ WAIT"
+
+def personal_crypto_block(r):
+    action = r.get("action", "NO TRADE")
+    lines = [
+        f"🔹 {r.get('coin','?')}",
+        f"قیمت: {fmt(r.get('price'))} | تغییر 24H: {pct(r.get('change'))}",
+        f"روند 4H / 1D / 1W: {r.get('h4_trend','UNKNOWN')} / {r.get('d1_trend','UNKNOWN')} / {r.get('w1_trend','UNKNOWN')}",
+        f"RSI: {r.get('rsi'):.1f}" if r.get('rsi') is not None else "RSI: N/A",
+        f"MACD: {r.get('macd','UNKNOWN')}",
+        f"حجم: {r.get('volume','N/A')} | نسبت حجم: {r.get('volume_ratio'):.2f}x" if r.get('volume_ratio') is not None else "حجم: N/A",
+        f"4H Trigger: {(r.get('candle_trigger') or {}).get('state','UNKNOWN')}",
+        f"حمایت / مقاومت: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))}",
+        f"امتیاز Setup / Entry / Risk: {r.get('setup_score',r.get('confidence',0))}/100 | {r.get('entry_quality',0)}/100 | {r.get('risk_quality',0)}/100",
+        f"🎯 تصمیم ATLAS: {_fa_action(action)}",
+        f"📈 نوسان‌گیری: {_fa_trading_view(r)}",
+    ]
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+        lines += [
+            f"R/R: 1:{r.get('rr',0):.2f} | Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))}",
+            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}",
+        ]
+    if r.get('decision_reasons'):
+        lines.append("دلیل: " + " | ".join(r['decision_reasons'][:3]))
+    elif r.get('reason'):
+        lines.append("دلیل: " + str(r['reason']))
+    if r.get('warning'):
+        lines.append(f"⚠️ {r['warning']}")
+    if f(r.get('spread')) is not None and r['spread'] > 3:
+        lines.append(f"🛑 DATA CONFLICT: {r['spread']:.2f}% — سیگنال متوقف شد")
+    return "\n".join(lines)
+
+def physical_asset_block(name, price, change_5d, trend, macro_key):
+    if price is None:
+        return f"🔸 {name}\n⚠️ داده بازار در این اجرا در دسترس نیست؛ ATLAS سیگنال صادر نمی‌کند."
+    if trend == "BULLISH":
+        action = "🟢 HOLD / افزایش فقط روی اصلاح"
+    elif trend == "BEARISH":
+        action = "🟠 HOLD / فعلاً افزایش نده"
+    else:
+        action = "🟡 WAIT / بدون تعقیب قیمت"
+    return "\n".join([
+        f"🔸 {name}",
+        f"قیمت جهانی مرجع: {price:,.4f}",
+        f"تغییر تقریبی 5 روزه: {change_5d:+.2f}%" if change_5d is not None else "تغییر 5 روزه: N/A",
+        f"روند کوتاه‌مدت: {trend}",
+        f"🎯 تصمیم ATLAS: {action}",
+        "این بخش وضعیت بازار جهانی را برای دارایی فیزیکی تو می‌سنجد؛ ارزش ریالی/وزن فیزیکی فقط در صورت ثبت مقدار دارایی محاسبه می‌شود.",
+    ])
+
+def _macro_asset_snapshot(symbol):
+    rows = yahoo_chart(symbol, "1h", "5d")
+    c = closes(rows)
+    if not c:
+        return None, None, "UNKNOWN"
+    price = c[-1]
+    change = ((c[-1] / c[0]) - 1) * 100 if c[0] else None
+    s20, s50 = sma(c, min(20,len(c))), sma(c, min(50,len(c)))
+    trend = "BULLISH" if s20 and s50 and price > s20 > s50 else "BEARISH" if s20 and s50 and price < s20 < s50 else "MIXED"
+    return price, change, trend
+
+def build_personal_report(results, macro, market_info, news, unavailable=0):
+    dt = now_tehran()
+    liq = market_liquidity_index(results) if results else 50.0
+    by_coin = {r.get('coin'): r for r in results}
+    ordered = [by_coin[c] for c in ATLAS_PERSONAL_CRYPTO if c in by_coin]
+    missing = [c for c in ATLAS_PERSONAL_CRYPTO if c not in by_coin]
+
+    buys = [r for r in ordered if r.get('action') == 'BUY CONFIRMATION']
+    sells = [r for r in ordered if r.get('action') == 'SELL CONFIRMATION']
+    watches = [r for r in ordered if r.get('action') in ('BULLISH WATCH','BEARISH WATCH')]
+
+    header = [
+        "🤖 ATLAS AI v10.3 — PERSONAL WEALTH ENGINE",
+        "━━━━━━━━━━━━━━━━━━",
+        f"{shamsi(dt)}  {dt.strftime('%H:%M')} 🇮🇷",
+        "📊 گزارش اختصاصی سبد شخصی — 4H",
+        "",
+        f"💧 شاخص نقدینگی بازار: {liq:.1f}/100",
+        f"🧭 DXY: {fmt(macro.get('DXY'))}",
+        f"📈 BTC Dominance: {fmt(market_info.get('btc_dominance'))}%" if market_info.get('btc_dominance') is not None else "📈 BTC Dominance: N/A",
+        f"😨 Fear & Greed: {market_info.get('fear_greed_label','N/A')} ({market_info.get('fear_greed','N/A')})",
+        f"📰 فضای خبری: {news.get('bias','UNKNOWN')} | {news.get('impact','UNKNOWN')}",
+        "",
+        "🧠 قانون ATLAS: سبد شخصی از رادار بازار جداست؛ داده ناقص = بدون سیگنال.",
+    ]
+
+    blocks = ["━━━━━━━━━━━━━━━━━━", "💼 CRYPTO PERSONAL PORTFOLIO", f"دارایی‌های بررسی‌شده: {len(ordered)} | ناموفق/فاقد داده: {len(missing)+unavailable}"]
+    blocks.extend(personal_crypto_block(r) for r in ordered)
+
+    phys = ["━━━━━━━━━━━━━━━━━━", "🥇🥈🟤 PHYSICAL ASSET MODULE"]
+    for name, meta in PHYSICAL_ASSETS.items():
+        symbol = MACRO_SYMBOLS.get(meta["symbol"])
+        # MACRO_SYMBOLS may contain fallback tuples; use the first symbol.
+        if isinstance(symbol, (tuple,list)): symbol = symbol[0]
+        price, chg, trend = _macro_asset_snapshot(symbol)
+        phys.append(physical_asset_block(meta['name'], price, chg, trend, symbol))
+
+    summary = [
+        "━━━━━━━━━━━━━━━━━━",
+        "🎯 جمع‌بندی مدیر ATLAS",
+        f"🟢 خرید/افزایش پله‌ای: {', '.join(r.get('coin') for r in buys) if buys else 'مورد تأییدشده‌ای نیست'}",
+        f"🔴 کاهش/فروش: {', '.join(r.get('coin') for r in sells) if sells else 'مورد تأییدشده‌ای نیست'}",
+        f"🟡 تحت نظر: {', '.join(r.get('coin') for r in watches[:10]) if watches else 'مورد خاصی نیست'}",
+        "",
+        "💡 برای سرمایه‌گذاری، Core سبد بدون دلیل تکنیکال قوی قربانی نوسان‌گیری نمی‌شود.",
+        "💡 برای نوسان‌گیری، فقط دارایی‌هایی با تأیید 4H/1D و کیفیت داده مناسب قابل بررسی‌اند.",
+        "",
+        "🛡️ DATA QUALITY GATE: فعال",
+        f"موارد فاقد داده/ناموفق: {len(missing)+unavailable}",
+        "Only CLOSED candles used for crypto signals.",
+        "No automatic orders.",
+        "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. ATLAS در ابهام معامله را متوقف می‌کند.",
+    ]
+    return "\n\n".join(["\n".join(header), "\n\n".join(blocks), "\n\n".join(phys), "\n".join(summary)])
+
+def personal_report():
+    init_sqlite()
+    weights = get_weights()
+    news = news_feed()
+    macro = macro_snapshot()
+    market_info = global_market_intelligence()
+    results = []
+    unavailable = 0
+    for coin in ATLAS_PERSONAL_CRYPTO:
+        try:
+            r = analyze_coin(coin, news, weights)
+            if r:
+                results.append(r)
+        except Exception as e:
+            unavailable += 1
+            append_changelog("PERSONAL_ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
+        time.sleep(REQUEST_SLEEP_SECONDS)
+
+    btc_regime = btc_market_regime()
+    breadth = market_breadth(results)
+    results = apply_decision_engine(results, btc_regime, breadth)
+    for r in results:
+        r["action"] = r.get("decision_state", r.get("action"))
+    text = build_personal_report(results, macro, market_info, news, unavailable)
+    return text, results, macro, news, market_info, unavailable
+
 # ============================================================
 # TELEGRAM
 # ============================================================
@@ -3572,47 +3755,35 @@ def report():
 
 def main():
     try:
-        # Fail early and visibly if Telegram itself is unavailable.
         telegram_preflight()
+        mode = os.environ.get("ATLAS_MODE", "GLOBAL").strip().upper()
 
-        text, results, macro, news, market_info, unavailable = report()
-        parts, sent, errors = send_report(text)
-
-        save_context(
-            macro,
-            news,
-            market_liquidity_index(results),
-            market_info,
-        )
-        save_run(results, parts, macro, news, unavailable)
-
-        print(text)
-        print("")
-        print(
-            f"{VERSION} sent: {sent} Telegram messages "
-            f"across {parts} report parts; errors={len(errors)}"
-        )
+        if mode == "PERSONAL":
+            text, results, macro, news, market_info, unavailable = personal_report()
+            parts, sent, errors = send_report(text)
+            save_context(macro, news, market_liquidity_index(results), market_info)
+            save_run(results, parts, macro, news, unavailable)
+            print(text)
+            print(f"{VERSION} PERSONAL sent: {sent} Telegram messages across {parts} report parts; errors={len(errors)}")
+        else:
+            text, results, macro, news, market_info, unavailable = report()
+            parts, sent, errors = send_report(text)
+            save_context(macro, news, market_liquidity_index(results), market_info)
+            save_run(results, parts, macro, news, unavailable)
+            print(text)
+            print(f"{VERSION} GLOBAL sent: {sent} Telegram messages across {parts} report parts; errors={len(errors)}")
 
         if errors or sent == 0:
-            raise RuntimeError(
-                "Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"])
-            )
+            raise RuntimeError("Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
         return 0
 
     except Exception as e:
         tb = traceback.format_exc()
         append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
-
-        # If Telegram credentials are valid, send a compact diagnostic instead
-        # of silently marking the GitHub Action successful.
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert = (
-                    f"🚨 {VERSION} FAILED\n"
-                    f"Reason: {str(e)[:900]}\n\n"
-                    "Check the GitHub Actions log and changelog.txt."
-                )
+                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck the GitHub Actions log and changelog.txt."
                 for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
                     if destination:
                         try:
@@ -3621,7 +3792,6 @@ def main():
                             print(f"Telegram error alert failed for {destination}: {te}")
         except Exception:
             pass
-        # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
         return 1
 
 
