@@ -1,0 +1,90 @@
+name: ATLAS AI v10.2 COMPACT
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "GLOBAL"
+        type: choice
+        options:
+          - GLOBAL
+  schedule:
+    - cron: "30 4 * * *"
+    - cron: "30 10 * * *"
+    - cron: "30 16 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-ai-compact
+  cancel-in-progress: false
+
+jobs:
+  atlas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install ccxt
+
+      - name: Validate repository
+        run: |
+          set -euo pipefail
+          test -f bot.py
+          python -m py_compile bot.py
+
+      - name: Run ATLAS smoke test
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          python atlas_smoke_test.py
+
+      - name: Validate required Telegram secrets
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${TELEGRAM_TOKEN:-}" || { echo "TELEGRAM_TOKEN is missing"; exit 1; }
+          test -n "${TELEGRAM_CHAT_ID:-}" || { echo "TELEGRAM_CHAT_ID is missing"; exit 1; }
+
+      - name: Run ATLAS
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ATLAS_MIN_CONFIDENCE: ${{ vars.ATLAS_MIN_CONFIDENCE }}
+          ATLAS_MIN_WATCH_CONFIDENCE: ${{ vars.ATLAS_MIN_WATCH_CONFIDENCE }}
+          ATLAS_MIN_EXECUTABLE_RR: ${{ vars.ATLAS_MIN_EXECUTABLE_RR }}
+          ATLAS_MIN_VOLUME_RATIO: ${{ vars.ATLAS_MIN_VOLUME_RATIO }}
+          ATLAS_MAX_LEVERAGE: ${{ vars.ATLAS_MAX_LEVERAGE }}
+          RISK_PER_TRADE_PCT: ${{ vars.RISK_PER_TRADE_PCT }}
+          MAX_PORTFOLIO_OPEN_RISK_PCT: ${{ vars.MAX_PORTFOLIO_OPEN_RISK_PCT }}
+          ATLAS_SQLITE_FILE: atlas_state.db
+        run: |
+          set -euo pipefail
+          python bot.py
