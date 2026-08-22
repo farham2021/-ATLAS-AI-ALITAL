@@ -152,7 +152,16 @@ jobs:
 
           python -m pip install --upgrade pip setuptools wheel
 
+          # Core dependencies
           python -m pip install --upgrade ccxt
+
+          # Optional: if requirements.txt exists, install it
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          fi
+
+          echo "Installed packages:"
+          python -m pip list
 
       # ==========================================================
       # 5. PREPARE BOT
@@ -161,29 +170,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Check if bot.py exists in repository
           if [ -f bot.py ]; then
-            echo "Found bot.py"
-          elif [ -f AtlasAI_v10_2_bot.py ]; then
-            echo "Found AtlasAI_v10_2_bot.py"
-            cp AtlasAI_v10_2_bot.py bot.py
-          elif [ -f AtlasAI_v10_bot.py ]; then
-            echo "Found AtlasAI_v10_bot.py"
-            cp AtlasAI_v10_bot.py bot.py
-          elif [ -f ATLAS_bot_v10.py ]; then
-            echo "Found ATLAS_bot_v10.py"
-            cp ATLAS_bot_v10.py bot.py
+            echo "Found bot.py in repository"
           else
-            echo "ERROR: ATLAS bot source not found."
-            echo ""
-            echo "Expected one of:"
-            echo "  bot.py"
-            echo "  AtlasAI_v10_2_bot.py"
-            echo "  AtlasAI_v10_bot.py"
-            echo "  ATLAS_bot_v10.py"
+            echo "ERROR: bot.py not found in repository"
             echo ""
             echo "Repository contents:"
-            find . -maxdepth 2 -type f | sort
+            ls -la
+            echo ""
+            echo "Please ensure bot.py is committed to the repository."
             exit 1
+          fi
+
+          # Verify we have a valid bot.py
+          if ! python -c "import bot" 2>/dev/null; then
+            echo "WARNING: bot.py import check failed, but continuing..."
+            echo "This may indicate missing dependencies."
+          else
+            echo "bot.py import check: PASS"
           fi
 
       # ==========================================================
@@ -216,9 +221,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Check for the correct smoke test file name
           if [ -f atlas_v10_2_smoke_test.py ]; then
             echo "Found ATLAS v10.2 smoke test."
             python atlas_v10_2_smoke_test.py
+          elif [ -f atlas_smoke.py ]; then
+            echo "Found atlas_smoke.py - checking version compatibility..."
+            # Run the smoke test if it's compatible with v10.2
+            if grep -q "ATLAS v10.2" atlas_smoke.py; then
+              echo "atlas_smoke.py is compatible with v10.2"
+              python atlas_smoke.py
+            else
+              echo "WARNING: atlas_smoke.py version mismatch. Skipping."
+              echo "This is not a fatal error - Python compilation already passed."
+            fi
           else
             echo "No ATLAS v10.2 smoke test found."
             echo "Skipping optional smoke test."
@@ -226,7 +242,28 @@ jobs:
           fi
 
       # ==========================================================
-      # 8. RUN ATLAS
+      # 8. VALIDATE TELEGRAM SECRETS
+      # ==========================================================
+      - name: Validate Telegram configuration
+        run: |
+          set -euo pipefail
+
+          # Check that Telegram token is set (required)
+          if [ -z "${TELEGRAM_TOKEN}" ]; then
+            echo "ERROR: TELEGRAM_TOKEN is not set in secrets"
+            exit 1
+          fi
+
+          # Check that at least one destination is configured
+          if [ -z "${TELEGRAM_CHAT_ID}" ] && [ -z "${TELEGRAM_GROUP_CHAT_ID}" ]; then
+            echo "ERROR: Neither TELEGRAM_CHAT_ID nor TELEGRAM_GROUP_CHAT_ID is configured"
+            exit 1
+          fi
+
+          echo "Telegram configuration: PASS"
+
+      # ==========================================================
+      # 9. RUN ATLAS
       # ==========================================================
       - name: Run ATLAS v10.2 Market Supervisor
         run: |
@@ -235,11 +272,54 @@ jobs:
           echo "=============================================="
           echo "ATLAS v10.2 MARKET SUPERVISOR"
           echo "=============================================="
+          echo "Python version:"
+          python --version
+          echo ""
+          echo "CCXT version:"
+          python -c "import ccxt; print(ccxt.__version__)" || echo "CCXT not found"
+          echo ""
+          echo "Starting ATLAS analysis..."
+          echo "=============================================="
 
           python bot.py
 
+          echo "=============================================="
+          echo "ATLAS v10.2 completed successfully"
+          echo "=============================================="
+
       # ==========================================================
-      # 9. SAVE PERSISTENT STATE
+      # 10. INSPECT STATE AFTER RUN
+      # ==========================================================
+      - name: Inspect ATLAS state
+        if: always()
+        run: |
+          echo "=============================================="
+          echo "ATLAS v10.2 STATE AFTER RUN"
+          echo "=============================================="
+
+          if [ -f atlas_v102.sqlite3 ]; then
+            echo "SQLite database:"
+            ls -lh atlas_v102.sqlite3
+            echo "Database size: $(du -h atlas_v102.sqlite3 | cut -f1)"
+          else
+            echo "WARNING: atlas_v102.sqlite3 not created"
+          fi
+
+          if [ -f changelog.txt ]; then
+            echo ""
+            echo "Changelog size:"
+            ls -lh changelog.txt
+            echo ""
+            echo "Last 20 changelog entries:"
+            echo "----------------------------------------"
+            tail -n 20 changelog.txt
+            echo "----------------------------------------"
+          else
+            echo "WARNING: changelog.txt not created"
+          fi
+
+      # ==========================================================
+      # 11. SAVE PERSISTENT STATE
       # ==========================================================
       #
       # THIS IS CRITICAL.
@@ -261,7 +341,7 @@ jobs:
           key: atlas-state-${{ runner.os }}-${{ github.ref_name }}-v10.2-${{ github.run_id }}
 
       # ==========================================================
-      # 10. UPLOAD DIAGNOSTICS
+      # 12. UPLOAD DIAGNOSTICS
       # ==========================================================
       - name: Upload ATLAS diagnostics
         if: always()
@@ -277,3 +357,38 @@ jobs:
 
           if-no-files-found: ignore
           retention-days: 14
+
+      # ==========================================================
+      # 13. HEALTH CHECK (Optional)
+      # ==========================================================
+      - name: Check ATLAS health
+        if: always()
+        run: |
+          echo "=============================================="
+          echo "ATLAS v10.2 HEALTH CHECK"
+          echo "=============================================="
+
+          # Check if SQLite file was created/updated
+          if [ -f atlas_v102.sqlite3 ]; then
+            # Check if file was modified during this run
+            MOD_TIME=$(stat -c %Y atlas_v102.sqlite3 2>/dev/null || stat -f %m atlas_v102.sqlite3 2>/dev/null)
+            CURRENT_TIME=$(date +%s)
+            AGE=$((CURRENT_TIME - MOD_TIME))
+            if [ "$AGE" -lt 3600 ]; then
+              echo "✅ SQLite database updated within the last hour"
+            else
+              echo "⚠️  SQLite database may not have been updated (age: ${AGE}s)"
+            fi
+          else
+            echo "❌ SQLite database not found"
+          fi
+
+          # Check if changelog was updated
+          if [ -f changelog.txt ]; then
+            LAST_LINE=$(tail -n 1 changelog.txt 2>/dev/null || echo "")
+            if echo "$LAST_LINE" | grep -q "ATLAS v10.2"; then
+              echo "✅ Changelog contains ATLAS v10.2 entries"
+            else
+              echo "⚠️  Changelog may not contain v10.2 entries"
+            fi
+          fi
