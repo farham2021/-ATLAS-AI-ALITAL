@@ -1,4 +1,4 @@
-# ============================================================
+============================================================
 # ATLAS AI v10.0 — HUMAN-LIKE DECISION ENGINE
 # ============================================================
 # v10.0 architecture upgrade:
@@ -69,7 +69,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.1"
+VERSION = "ATLAS v10.2 COMPACT"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -1540,22 +1540,26 @@ def calculate_levels(rows, direction, daily_levels=None):
         entry = price if price >= res else res * 1.002
         sl = min(sup * 0.995, entry - 1.5 * a)
         risk = max(entry - sl, entry * 0.005)
-        tp1 = max(entry + 2 * risk, resistance + 1.0 * a)
-        tp2 = max(entry + 3 * risk, tp1 + risk)
+        tp1 = max(entry + 1.0 * risk, resistance + 0.25 * a)
+        tp2 = max(entry + 2.0 * risk, tp1 + 0.75 * risk)
+        tp3 = max(entry + 3.0 * risk, tp2 + 0.75 * risk)
+        tp4 = max(entry + 4.0 * risk, tp3 + 0.75 * risk)
     else:
         support = min(sup, price)
         entry = price if price <= sup else sup * 0.998
         sl = max(res * 1.005, entry + 1.5 * a)
         risk = max(sl - entry, entry * 0.005)
-        tp1 = min(entry - 2 * risk, support - 1.0 * a)
-        tp2 = min(entry - 3 * risk, tp1 - risk)
+        tp1 = min(entry - 1.0 * risk, support - 0.25 * a)
+        tp2 = min(entry - 2.0 * risk, tp1 - 0.75 * risk)
+        tp3 = min(entry - 3.0 * risk, tp2 - 0.75 * risk)
+        tp4 = min(entry - 4.0 * risk, tp3 - 0.75 * risk)
 
     # Sanity checks prevent the previous v7 price/resistance contradiction.
     if direction == "LONG":
-        if not (sl < entry < tp1 <= tp2):
+        if not (sl < entry < tp1 <= tp2 <= tp3 <= tp4):
             return None
     else:
-        if not (sl > entry > tp1 >= tp2):
+        if not (sl > entry > tp1 >= tp2 >= tp3 >= tp4):
             return None
 
     return {
@@ -1563,6 +1567,8 @@ def calculate_levels(rows, direction, daily_levels=None):
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
+        "tp3": tp3,
+        "tp4": tp4,
         "atr": a,
         "support": sup,
         "resistance": res,
@@ -1895,10 +1901,18 @@ def analyze_coin(coin, market_news, weights):
             if base_24h and base_24h > 0:
                 change_24h = (price / base_24h - 1.0) * 100.0
 
+    change_7d = None
+    d1_rows = tfd.get("rows", [])
+    if len(d1_rows) >= 8 and price is not None:
+        base_7d = f(d1_rows[-8][4])
+        if base_7d and base_7d > 0:
+            change_7d = (price / base_7d - 1.0) * 100.0
+
     return {
         "coin": coin,
         "price": price,
         "change": change_24h,
+        "change_7d": change_7d,
         "change_source": "ticker" if any(f(x.get("change")) is not None for x in sources) else "H1_24H_FALLBACK",
         "trend": h4,
         "h1_trend": h1,
@@ -1927,6 +1941,8 @@ def analyze_coin(coin, market_news, weights):
         "sl": levels["sl"] if levels else None,
         "tp1": levels["tp1"] if levels else None,
         "tp2": levels["tp2"] if levels else None,
+        "tp3": levels["tp3"] if levels else None,
+        "tp4": levels["tp4"] if levels else None,
         "leverage": leverage,
         "direction": direction,
         "action": action,
@@ -2948,47 +2964,157 @@ def action_emoji(action):
     return "⛔ NO TRADE"
 
 
-def asset_block(r):
-    """Compact decision-focused asset report.
-
-    Signal calculations still use the full MTF dataset; Telegram only shows
-    fields that materially affect a trading decision. This keeps the report
-    readable without weakening the engine.
-    """
+def _signal_short(r):
     action = r.get("action", "NO TRADE")
+    return {
+        "BUY CONFIRMATION": "🟢 BUY",
+        "SELL CONFIRMATION": "🔴 SELL",
+        "BULLISH WATCH": "🟡 WAIT-BUY",
+        "BEARISH WATCH": "🟡 WAIT-SELL",
+    }.get(action, "⚪ WAIT")
+
+
+def _compact_reason(r):
+    reasons = []
+    if r.get("h4_trend") == r.get("d1_trend") and r.get("h4_trend") in ("BULLISH", "BEARISH"):
+        reasons.append("H4/D1 هم‌جهت")
+    if r.get("volume_ratio") is not None and r.get("volume_ratio") >= 1.2:
+        reasons.append("حجم تأییدکننده")
+    trig = (r.get("candle_trigger") or {}).get("state")
+    if trig in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BREAKDOWN_CLOSED", "RESISTANCE_REJECT"):
+        reasons.append("تریگر 4H")
+    if r.get("overbought") or r.get("oversold"):
+        reasons.append("اشباع")
+    return " + ".join(reasons[:2]) or "تأیید کافی نیست"
+
+
+def btc_pair_candidates():
+    """Return BTC-quoted spot pairs ranked by absolute 24H change.
+
+    The scanner uses exchange-native BTC quote volume. It lowers the threshold
+    1000 -> 500 -> 250 -> 100 BTC only when needed to reach 10 assets.
+    """
+    ensure_exchanges()
+    thresholds = (1000.0, 500.0, 250.0, 100.0)
+    candidates = []
+    seen = set()
+    for eid in ("binance", "xt", "lbank"):
+        ex = EX.get(eid)
+        markets = MARKETS.get(eid, {})
+        if ex is None:
+            continue
+        try:
+            tickers = ex.fetch_tickers()
+        except Exception:
+            continue
+        for sym, t in (tickers or {}).items():
+            if not sym.endswith("/BTC") or ":" in sym:
+                continue
+            coin = sym.split("/")[0].upper()
+            if is_stable(coin) or coin == "BTC" or coin in seen:
+                continue
+            qv = f(t.get("quoteVolume"))
+            ch = f(t.get("percentage"))
+            last = f(t.get("last"))
+            if qv is None or ch is None or last is None:
+                continue
+            candidates.append({"coin": coin, "pair": sym, "exchange": eid.upper(), "volume_btc": qv, "change_24h": ch, "price_btc": last})
+            seen.add(coin)
+    if not candidates:
+        return [], None
+    for threshold in thresholds:
+        eligible = [x for x in candidates if x["volume_btc"] >= threshold]
+        if len(eligible) >= 10:
+            eligible.sort(key=lambda x: abs(x["change_24h"]), reverse=True)
+            return eligible[:10], threshold
+    candidates.sort(key=lambda x: abs(x["change_24h"]), reverse=True)
+    return candidates[:10], 100.0
+
+
+def compact_table_1(results, top_n=10):
+    # Keep the original radar priority, but only show the strongest 10
+    # actionable/watch candidates by confidence within that ordered universe.
+    rows = [r for r in results if r.get("price") is not None and r.get("volume") is not None]
+    rows.sort(key=lambda r: (r.get("confidence", 0), abs(r.get("change", 0) or 0)), reverse=True)
+    rows = rows[:top_n]
     lines = [
-        f"🔹 {r['coin']}",
-        f"Price: {fmt(r['price'])} | 24H: {pct(r['change'])}",
-        f"H4/D1/W1: {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')}",
-        f"RSI: {r['rsi']:.1f}" if r.get('rsi') is not None else "RSI: N/A",
-        f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
-        f"Pattern: {r['pattern']}" + (" ✅" if r.get("pattern_valid") else ""),
-        f"Volume: {r['volume']} | {r['volume_ratio']:.2f}x" if r.get('volume_ratio') is not None else f"Volume: {r['volume']} | N/A",
-        f"Liquidity: {r['liquidity']} | ATR: {r['atr_pct']:.2f}%" if r.get('atr_pct') is not None else f"Liquidity: {r['liquidity']} | ATR: N/A",
-        f"4H Trigger: {(r.get('candle_trigger') or {}).get('state','UNKNOWN')}",
-        f"Daily S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))} | {r.get('sr_confidence','LOW')}",
-        f"Scores: Setup {r.get('setup_score', r.get('confidence',0))}/100 | Entry {r.get('entry_quality',0)}/100 | Risk {r.get('risk_quality',0)}/100",
-        f"🎯 ACTION: {action_emoji(action)}",
+        "TABLE 1 — ATLAS SIGNAL SCAN",
+        "نماد | 24H | 7D | RSI | روند | سیگنال | Confidence",
+        "────────────────────────────────────────",
     ]
+    for r in rows:
+        trend = "🟢" if r.get("h4_trend") == "BULLISH" else "🔴" if r.get("h4_trend") == "BEARISH" else "🟡"
+        rsi = f"{r['rsi']:.0f}" if r.get("rsi") is not None else "—"
+        c7 = pct(r.get("change_7d"))
+        c24 = pct(r.get("change"))
+        lines.append(f"{r['coin']} | {c24} | {c7} | {rsi} | {trend} | {_signal_short(r)} | {r.get('confidence',0)}%")
+    return "\n".join(lines), rows
 
-    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-        lines += [
-            f"R/R: 1:{r.get('rr', 0):.2f} | Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))}",
-            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}",
-            f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی است'}",
-        ]
-    elif r.get("decision_reasons"):
-        lines.append("Decision: " + " | ".join(r["decision_reasons"][:3]))
-        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
-    else:
-        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
-        lines.append(f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی نیست'}")
 
-    if r.get("warning"):
-        lines.append(f"⚠️ {r['warning']}")
-    if f(r.get("spread")) is not None and r["spread"] > 3:
-        lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
+def compact_table_2(rows):
+    lines = [
+        "TABLE 2 — TRADE PLAN",
+        "نماد | Entry | SL | TP1 | TP2 | TP3 | TP4 | R/R(2) | دلیل",
+        "────────────────────────────────────────────────────────",
+    ]
+    for r in rows:
+        rr = r.get("rr")
+        rr_txt = f"1:{rr:.2f}" if rr is not None else "—"
+        # R/R deliberately remains based on TP2 because the existing execution
+        # gate and backtest engine validate TP2. TP3/TP4 are scaling targets.
+        lines.append(
+            f"{r['coin']} | {fmt(r.get('entry'))} | {fmt(r.get('sl'))} | "
+            f"{fmt(r.get('tp1'))} | {fmt(r.get('tp2'))} | {fmt(r.get('tp3'))} | {fmt(r.get('tp4'))} | "
+            f"{rr_txt} | {_compact_reason(r)}"
+        )
     return "\n".join(lines)
+
+
+def compact_summary(rows, macro, news, market_info, btc_regime, breadth):
+    executable = [r for r in rows if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and not r.get("repeat_signal")]
+    best = sorted(executable, key=lambda r: ((r.get("rr") or 0), r.get("confidence", 0)), reverse=True)
+    best = best[0] if best else None
+    extreme = [r for r in rows if abs(r.get("change", 0) or 0) > 5 or (r.get("volume_ratio") or 0) >= 2]
+    regime = btc_regime.get("regime", "UNKNOWN") if btc_regime else "UNKNOWN"
+    breadth_state = breadth.get("state", "UNKNOWN") if breadth else "UNKNOWN"
+    if regime == "RISK_ON":
+        market_line = "🟢 بازار: صعودی/ریسک‌پذیر؛ خریدار، اما تعقیب کندل سبز ممنوع."
+    elif regime == "RISK_OFF":
+        market_line = "🔴 بازار: نزولی/ریسک‌گریز؛ فروشنده، ورود خرید فقط پس از تأیید."
+    else:
+        market_line = "🟡 بازار: خنثی/مختلط؛ انتظار برای ستاپ باکیفیت."
+    if extreme:
+        market_line = "🚨 " + market_line + " نوسان/حجم غیرعادی در بازار دیده شد."
+    if best:
+        best_line = f"🎯 بهترین ستاپ: {best['coin']} {_signal_short(best)} | R/R(2) 1:{best.get('rr',0):.2f} | Confidence {best.get('confidence',0)}%"
+    else:
+        best_line = "🎯 بهترین ستاپ: هیچ BUY/SELL اجرایی با کیفیت کافی تأیید نشد."
+    news_line = f"📰 خبر: {news.get('bias','UNKNOWN')} | اثر {news.get('impact','UNKNOWN')}" if news else "📰 خبر: داده در دسترس نیست"
+    risk_line = "⚠️ ریسک: نوسان بالا/داده یا خبر متغیر؛ حجم معامله را محدود و SL را جابه‌جا نکن."
+    return "\n".join([market_line, best_line, news_line, risk_line])
+
+
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
+                 btc_regime=None, breadth=None):
+    dt = now_tehran()
+    t1, rows = compact_table_1(results, 10)
+    t2 = compact_table_2(rows)
+    summary = compact_summary(rows, macro, news, market_info, btc_regime or {}, breadth or {})
+    source_names = sorted(set(src for r in rows for src in (r.get("sources") or [])))
+    source_txt = ", ".join(source_names) if source_names else "داده در دسترس نیست"
+    lines = [
+        "🤖 ATLAS AI v10.2 — COMPACT",
+        t1,
+        t2,
+        "SUMMARY",
+        summary,
+        "",
+        f"📅 زمان دریافت: {dt.strftime('%Y-%m-%d %H:%M:%S')} Asia/Tehran",
+        f"📊 منبع: {source_txt}",
+        "⏱️ وضعیت داده: بر اساس آخرین داده دریافت‌شده در همین اجرا؛ سن داده بازار REST ممکن است لحظه‌ای نباشد.",
+        "🔒 سیگنال‌ها فقط بر پایه کندل‌های بسته‌شده؛ عدد ساختگی ممنوع.",
+    ]
+    return "\n\n".join(lines)
 
 
 # ============================================================
