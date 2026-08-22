@@ -9,21 +9,24 @@ source = BOT.read_text(encoding="utf-8")
 tree = ast.parse(source)
 
 # ============================================================
-# REQUIRED FUNCTIONS - v10.2
+# REQUIRED FUNCTIONS - v10.3
 # ============================================================
 required_functions = {
     "canonical_symbol",
-    "symbol_candidates",      # v10.2: replaces symbol_for for alias handling
+    "symbol_candidates",
     "symbol_for",
+    "symbol_for_btc",           # v10.3: جدید برای جفت‌های BTC
     "ema_series",
     "macd",
     "rsi_series",
     "strong_divergence",
     "market_breadth",
     "analyze_coin",
-    "apply_decision_engine",  # v10.2: decision engine
-    "filter_btc_pairs",       # v10.2: BTC pair filtering for dashboard
-    "generate_dashboard_report",  # v10.2: new dashboard report
+    "apply_decision_engine",
+    "filter_btc_pairs",         # v10.3: بهبود یافته
+    "get_top_market_cap_assets", # v10.3: جدید برای دریافت ۱۰ ارز برتر
+    "get_top_cmc_assets",       # v10.3: جدید برای پشتیبان CoinMarketCap
+    "generate_dashboard_report",
     "build_report",
     "checkpoint_sqlite",
     "main",
@@ -39,17 +42,24 @@ if missing:
 # ============================================================
 checks = {
     # Version
-    "VERSION 10.2": 'VERSION = "ATLAS v10.2"' in source,
+    "VERSION 10.3": 'VERSION = "ATLAS v10.3"' in source,
     
-    # Symbol handling - v10.2 uses SYMBOL_ALIASES and COINGECKO_IDS
+    # Symbol handling
     "MATIC/POL alias": '"MATIC": ("POL", "MATIC")' in source,
     "CoinGecko Polygon canonical ID": '"MATIC": "polygon-ecosystem-token"' in source,
-    
-    # Alias functions - v10.2 uses canonical_symbol and symbol_candidates
     "canonical_symbol function": 'def canonical_symbol(symbol)' in source,
     "symbol_candidates function": 'def symbol_candidates(symbol)' in source,
     
-    # Stablecoin handling - explicit allow-list only
+    # BTC pair handling - v10.3 new
+    "symbol_for_btc function": 'def symbol_for_btc(eid, coin)' in source,
+    "filter_btc_pairs improved": 'def filter_btc_pairs(coin_list, min_volume_btc=1000, top_n=10)' in source,
+    
+    # Top market cap - v10.3 new
+    "get_top_market_cap_assets": 'def get_top_market_cap_assets(limit=10)' in source,
+    "get_top_cmc_assets": 'def get_top_cmc_assets(limit=10)' in source,
+    "coingecko_headers": 'def coingecko_headers()' in source,
+    
+    # Stablecoin handling
     "exact stablecoin allow-list": 'return s in STABLE_SYMBOLS' in source and 's.startswith("USD")' not in source,
     
     # Indicators
@@ -60,11 +70,12 @@ checks = {
     # Gate system
     "all gate reasons": 'hard_blocks = []' in source and 'gate_reason = " | ".join(dict.fromkeys(hard_blocks))' in source,
     
-    # Persistence
-    "persistent SQLite v10.2": 'atlas_v102.sqlite3' in source,
+    # Persistence - v10.3 new SQLite file
+    "persistent SQLite v10.3": 'atlas_v103.sqlite3' in source,
     "SQLite WAL checkpoint": 'def checkpoint_sqlite()' in source and 'wal_checkpoint(TRUNCATE)' in source,
     
-    # Universe building
+    # Universe building - v10.3 improved
+    "build_universe with top 10": 'top10_symbols' in source and 'get_top_market_cap_assets' in source,
     "dynamic Top-30 refresh": 'cg = gecko_top(60)' in source,
     
     # Breadth
@@ -76,11 +87,16 @@ checks = {
     # Closed-candle engine
     "closed-candle engine": 'Only CLOSED candles used for signals' in source,
     
-    # v10.2 Dashboard specific checks
-    "BTC pair filtering": 'def filter_btc_pairs(coin_list, min_volume_btc=1000, top_n=10)' in source,
-    "dashboard report generation": 'def generate_dashboard_report(results, btc_pairs, top10, dynamic30, macro, news, market_info)' in source,
+    # v10.3 Dashboard specific checks
+    "dashboard report with top 10": 'top10_symbols' in source and 'priority10' in source,
     "dashboard two-table format": 'جدول ۱: وضعیت بازار' in source and 'جدول ۲: تحلیل عمیق' in source,
     "dashboard 4-line summary": '📌 **جمع‌بندی نهایی:**' in source,
+    "multi-source data": 'CoinGecko + Binance' in source,
+    
+    # Telegram rate limit handling - v10.3 new
+    "telegram rate limit handling": 'send_with_retry(chat_id, text, max_retries=None, base_delay=None)' in source,
+    "telegram exponential backoff": 'retry_after * (2 ** attempt)' in source,
+    "telegram duplicate prevention": 'telegram_sent_reports' in source,
 }
 
 failed = [name for name, ok in checks.items() if not ok]
@@ -93,7 +109,6 @@ if failed:
 def check_function_signatures():
     issues = []
     
-    # Check for required parameters in key functions
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
             if node.name == "filter_btc_pairs":
@@ -103,12 +118,24 @@ def check_function_signatures():
                 if "min_volume_btc" not in args:
                     issues.append("filter_btc_pairs missing 'min_volume_btc' parameter")
                     
+            elif node.name == "get_top_market_cap_assets":
+                args = [arg.arg for arg in node.args.args]
+                if "limit" not in args:
+                    issues.append("get_top_market_cap_assets missing 'limit' parameter")
+                    
             elif node.name == "generate_dashboard_report":
                 args = [arg.arg for arg in node.args.args]
-                expected = ["results", "btc_pairs", "top10", "dynamic30", "macro", "news", "market_info"]
+                expected = ["results", "btc_pairs", "top10_symbols", "priority10", "dynamic30", "macro", "news", "market_info"]
                 for param in expected:
                     if param not in args:
                         issues.append(f"generate_dashboard_report missing '{param}' parameter")
+            
+            elif node.name == "send_with_retry":
+                args = [arg.arg for arg in node.args.args]
+                expected = ["chat_id", "text"]
+                for param in expected:
+                    if param not in args:
+                        issues.append(f"send_with_retry missing '{param}' parameter")
     
     return issues
 
@@ -124,7 +151,6 @@ if signature_issues:
 def check_file_structure():
     issues = []
     
-    # Check for proper section markers
     required_sections = [
         "CONFIG",
         "ATLAS RADAR",
@@ -158,9 +184,37 @@ if structure_issues:
         print(f"  - {issue}")
 
 # ============================================================
+# OPTIONAL: Check for new v10.3 features
+# ============================================================
+def check_v10_3_features():
+    features = []
+    
+    # Check for multi-source data handling
+    if "get_top_market_cap_assets" in source:
+        features.append("✅ Top 10 market cap from CoinGecko")
+    if "get_top_cmc_assets" in source:
+        features.append("✅ CoinMarketCap fallback support")
+    if "symbol_for_btc" in source:
+        features.append("✅ BTC pair detection")
+    if "send_with_retry" in source and "429" in source:
+        features.append("✅ Telegram rate limit handling")
+    if "telegram_sent_reports" in source:
+        features.append("✅ Telegram duplicate prevention")
+    
+    return features
+
+v10_3_features = check_v10_3_features()
+if v10_3_features:
+    print("\n📌 v10.3 Features detected:")
+    for feature in v10_3_features:
+        print(f"  {feature}")
+
+# ============================================================
 # FINAL RESULT
 # ============================================================
-print("ATLAS v10.2 SMOKE TEST: PASS")
+print("\n" + "="*50)
+print("ATLAS v10.3 SMOKE TEST: PASS")
+print("="*50)
 for name in checks:
     print(f"  OK: {name}")
 
@@ -168,3 +222,5 @@ if signature_issues or structure_issues:
     print("\n⚠️  Smoke test passed with warnings. Review the output above.")
 else:
     print("\n✅ All checks passed successfully.")
+
+print("="*50)
