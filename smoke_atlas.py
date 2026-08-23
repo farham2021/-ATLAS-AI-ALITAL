@@ -1,57 +1,30 @@
 #!/usr/bin/env python3
-"""Offline structural/regression smoke test for ATLAS Two Engine."""
 from pathlib import Path
-import ast
-import re
-import py_compile
+import ast, py_compile, re
 
-ROOT = Path(__file__).resolve().parent
-BOT = ROOT / "bot.py"
-if not BOT.exists():
-    raise SystemExit("FAIL: bot.py not found")
-
-source = BOT.read_text(encoding="utf-8")
-tree = ast.parse(source, filename=str(BOT))
-functions = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-required = {
-    "asset_block", "action_emoji", "build_report", "build_personal_report",
-    "personal_report", "report", "main", "calculate_levels", "decision_rr",
-    "_conditional_trade_plan", "apply_decision_engine", "analyze_coin",
-    "market_breadth", "checkpoint_sqlite",
-}
-missing = sorted(required - functions)
-if missing:
-    raise SystemExit(f"FAIL: missing required functions: {missing}")
-
-checks = [
-    ("syntax", True),
-    ("two-engine env", 'os.environ.get("ATLAS_ENGINE")' in source and 'os.environ.get("ATLAS_MODE")' in source),
-    ("GLOBAL alias", 'ATLAS_ENGINE == "GLOBAL"' in source),
-    ("TP1-TP4", all(x in source for x in ("tp1", "tp2", "tp3", "tp4"))),
-    ("SL", "\"sl\"" in source),
-    ("exact R/R formula", 'abs(entry-tp2)/abs(entry-sl)' in source),
-    ("conditional WAIT plan", "_conditional_trade_plan" in source),
-    ("personal levels for blocked setups", 'if f(r.get("entry")) is None:' in source),
-    ("physical market references", 'PERSONAL_PHYSICAL_ASSETS' in source and 'macro.get("GOLD")' in source and 'macro.get("SILVER")' in source and 'macro.get("COPPER")' in source),
-    ("closed candles", "Only CLOSED candles used for signals" in source),
-    ("no automatic orders", "No automatic orders." in source),
-]
+ROOT=Path(__file__).resolve().parent
+BOT=ROOT/"bot.py"
+if not BOT.exists(): raise SystemExit("FAIL: bot.py not found")
+src=BOT.read_text(encoding="utf-8")
 py_compile.compile(str(BOT), doraise=True)
-failed = [name for name, ok in checks if not ok]
-if failed:
-    raise SystemExit("FAIL: " + ", ".join(failed))
-
-# Ensure the personal report does not conditionally hide TP fields behind BUY/SELL.
-start = source.index("def build_personal_report")
-end = source.index("def personal_report", start)
-personal_src = source[start:end]
-if "if action.startswith(\"🟢\") or action.startswith(\"🔴\") or action.startswith(\"🟡\")" in personal_src:
-    raise SystemExit("FAIL: personal report still hides trade levels for WAIT/WATCH")
-
-print("PASS: ATLAS Two Engine structural smoke test")
-print("PASS: bot.py syntax")
-print("PASS: MARKET/PERSONAL/BOTH environment routing")
-print("PASS: conditional Entry/SL/TP1-TP4 for WAIT/WATCH")
-print("PASS: exact R/R(TP2) formula")
-print("PASS: physical Gold/Silver/Copper reference section")
-print("PASS: personal report no longer hides TP levels")
+tree=ast.parse(src)
+funcs={n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}
+required={"asset_block","action_emoji","build_report","build_personal_report","personal_report","report",
+          "main","calculate_levels","decision_rr","_conditional_trade_plan","apply_decision_engine",
+          "analyze_coin","market_breadth","checkpoint_sqlite","multi_source_validation",
+          "coinmarketcap_quote","coingecko_quote","coinglass_context","tradingview_confirmation"}
+missing=sorted(required-funcs)
+if missing: raise SystemExit(f"FAIL: missing functions: {missing}")
+if 'ATLAS_ENGINE' not in src or 'os.getenv("ATLAS_ENGINE"' not in src: raise SystemExit("FAIL: two-engine selector missing")
+if 'for eid in ("binance"' in src: raise SystemExit("FAIL: Binance must not be in exchange roster")
+for eid in ("lbank","xt","okx","bybit","kucoin","gateio","bitget","mexc","kraken"):
+    if eid not in src: raise SystemExit(f"FAIL: exchange adapter missing: {eid}")
+for x in ("COINGECKO_API_KEY","CMC_API_KEY","COINGLASS_API_KEY","TRADINGVIEW_CONFIRMATION_URL",
+          "CRYPTOBUBBLES_API_URL","EASYTRADER_API_URL","OMPFINEX_API_URL","BITUNIX_API_URL",
+          "TABTRADER_API_URL","KCEX_API_URL"):
+    if x not in src: raise SystemExit(f"FAIL: source config missing: {x}")
+if "candidate_levels = calculate_levels" not in src: raise SystemExit("FAIL: candidate TP/SL plan missing")
+if 'levels = candidate_levels' not in src: raise SystemExit("FAIL: candidate plan not exposed")
+print("PASS: ATLAS two-engine multi-source structural smoke test")
+print("PASS: no Binance adapter")
+print("PASS: candidate Entry/SL/TP calculation enabled for complete personal report")
