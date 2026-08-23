@@ -1,1 +1,69 @@
-
+name: ATLAS AI Two Engine — Multi Source
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: "MARKET = compact market radar, PERSONAL = full portfolio, BOTH = both"
+        required: true
+        default: BOTH
+        type: choice
+        options: [MARKET, PERSONAL, BOTH]
+  schedule:
+    - cron: "0 5 * * *"
+    - cron: "30 8 * * *"
+    - cron: "30 12 * * *"
+    - cron: "30 16 * * *"
+    - cron: "30 19 * * *"
+jobs:
+  atlas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ccxt
+      - name: Select engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ATLAS_ENGINE=${{ inputs.engine }}" >> "$GITHUB_ENV"
+          else
+            # UTC 05:00 and 19:30 = personal; other scheduled runs = market.
+            case "$(date -u +%H:%M)" in
+              05:00|19:30) echo "ATLAS_ENGINE=PERSONAL" >> "$GITHUB_ENV" ;;
+              *) echo "ATLAS_ENGINE=MARKET" >> "$GITHUB_ENV" ;;
+            esac
+          fi
+      - name: Validate
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          test -f bot.py
+          test -f smoke_atlas.py
+          python -m py_compile bot.py
+          python smoke_atlas.py
+      - name: Run ATLAS
+        env:
+          ATLAS_ENGINE: ${{ env.ATLAS_ENGINE }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+          CRYPTOBUBBLES_API_URL: ${{ secrets.CRYPTOBUBBLES_API_URL }}
+          EASYTRADER_API_URL: ${{ secrets.EASYTRADER_API_URL }}
+          OMPFINEX_API_URL: ${{ secrets.OMPFINEX_API_URL }}
+          BITUNIX_API_URL: ${{ secrets.BITUNIX_API_URL }}
+          TABTRADER_API_URL: ${{ secrets.TABTRADER_API_URL }}
+          KCEX_API_URL: ${{ secrets.KCEX_API_URL }}
+        run: python bot.py
