@@ -36,11 +36,13 @@ jobs:
       - name: Validate
         run: |
           set -euo pipefail
-          python -m py_compile ATLAS_bot_two_engine.py
-          python smoke_atlas_two_engine.py
+          test -f bot.py
+          test -f smoke_atlas.py
+          python -m py_compile bot.py
+          python smoke_atlas.py
       - name: Run
         env:
           ATLAS_ENGINE: ${{ env.ATLAS_ENGINE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python ATLAS_bot_two_engine.py
+        run: python bot.py
