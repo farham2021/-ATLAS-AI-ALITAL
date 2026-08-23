@@ -67,6 +67,16 @@ ATLAS_ENGINE = (os.environ.get("ATLAS_ENGINE") or os.environ.get("ATLAS_MODE") o
 if ATLAS_ENGINE == "GLOBAL":
     ATLAS_ENGINE = "MARKET"
 PERSONAL_REPORT_HOURS = os.environ.get("ATLAS_PERSONAL_REPORT_HOURS", "08:30,23:00")
+# Multi-exchange public market data. Binance is deliberately excluded.
+# Order is also the preferred failover order; unavailable exchanges are skipped.
+EXCHANGE_IDS = tuple(
+    x.strip().lower()
+    for x in os.environ.get(
+        "ATLAS_EXCHANGES",
+        "lbank,xt,okx,bybit,kucoin,gate"
+    ).split(",")
+    if x.strip() and x.strip().lower() not in {"binance", "binanceus", "binanceusdm", "binancecoinm"}
+)
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
 EVENT_LOOKBACK_LIMITS = {"30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
 EVENT_DEDUP_ENABLED = os.environ.get("ATLAS_CANDLE_EVENT_DEDUP", "1").strip() != "0"
@@ -540,8 +550,13 @@ def init_exchanges():
     global EX, MARKETS
     EX = {}
     MARKETS = {}
-    for eid in ("binance", "xt", "lbank"):
+    for eid in EXCHANGE_IDS:
+        # Hard safety guard: Binance must never be instantiated by ATLAS.
+        if eid.startswith("binance"):
+            continue
         try:
+            if not hasattr(ccxt, eid):
+                raise RuntimeError(f"{eid}: not supported by installed CCXT")
             ex = make_exchange(eid)
             markets = ex.load_markets()
             if not markets:
@@ -673,12 +688,16 @@ def candle_event(coin, timeframe, rows):
 
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
-    for eid in ("binance", "xt", "lbank"):
-        try:
-            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
-        except Exception:
+    errors = []
+    for eid in EXCHANGE_IDS:
+        if eid not in EX:
             continue
-    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
+        try:
+            rows = exchange_ohlcv(eid, coin, timeframe, limit)
+            return rows, eid.upper()
+        except Exception as e:
+            errors.append(f"{eid}: {e}")
+    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin} | sources tried={','.join(EXCHANGE_IDS)}")
 
 
 # ============================================================
@@ -710,28 +729,54 @@ def gecko_top(limit=40):
             })
     return result
 
-def binance_top(limit=40):
+def exchange_top(limit=40):
+    """Build a non-Binance dynamic universe from multiple public spot venues."""
     ensure_exchanges()
-    try:
-        ex = EX.get("binance")
+    aggregate = {}
+    for eid in EXCHANGE_IDS:
+        ex = EX.get(eid)
         if ex is None:
-            return []
-        rows = ex.fetch_tickers()
-    except Exception:
-        return []
+            continue
+        try:
+            rows = ex.fetch_tickers()
+        except Exception as e:
+            append_changelog("EXCHANGE_TOP", None, None, f"{eid}: {e}")
+            continue
+        for sym, x in rows.items():
+            if not sym.endswith("/USDT") or ":USDT" in sym:
+                continue
+            coin = sym.split("/")[0].upper()
+            if is_stable(coin):
+                continue
+            qv = f(x.get("quoteVolume"))
+            price = f(x.get("last"))
+            if qv is None or price is None:
+                continue
+            slot = aggregate.setdefault(coin, {
+                "symbol": coin, "quote_volume": 0.0,
+                "change_values": [], "price_values": [], "sources": []
+            })
+            slot["quote_volume"] += qv
+            ch = f(x.get("percentage"))
+            if ch is not None:
+                slot["change_values"].append(ch)
+            slot["price_values"].append(price)
+            slot["sources"].append(eid.upper())
     result = []
-    for sym, x in rows.items():
-        if not sym.endswith("/USDT") or ":USDT" in sym:
-            continue
-        coin = sym.split("/")[0].upper()
-        if is_stable(coin):
-            continue
-        qv = f(x.get("quoteVolume"))
-        if qv is None:
-            continue
-        result.append({"symbol": coin, "quote_volume": qv})
+    for coin, z in aggregate.items():
+        result.append({
+            "symbol": coin,
+            "quote_volume": z["quote_volume"],
+            "change": safe_mean(z["change_values"], 0.0),
+            "price": safe_median(z["price_values"]) if z["price_values"] else None,
+            "sources": z["sources"],
+        })
     result.sort(key=lambda x: x["quote_volume"], reverse=True)
     return result[:limit]
+
+# Backward-compatible name: legacy callers now use the multi-exchange universe.
+def binance_top(limit=40):
+    return exchange_top(limit)
 
 def build_universe():
     cg = gecko_top(60)
