@@ -1,6 +1,7 @@
 # ============================================================
-# ATLAS AI v10.2 — COMPLETE FIXED VERSION
+# ATLAS AI v10.2 — TWO ENGINE CORRECTED DECISION BUILD
 # ============================================================
+# TP3/TP4 structural targets are optional and never fabricated.
 # v10.2 architecture:
 # - Fixed portfolio symbols (user-defined, never changes)
 # - Compact dashboard-style report output
@@ -56,7 +57,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.2 TWO-ENGINE MULTI-SOURCE"
+VERSION = "ATLAS v10.2 TWO-ENGINE CORRECTED"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -1607,69 +1608,93 @@ def weekly_pivot(rows):
     return (max(highs) + min(lows) + closes_[-1]) / 3.0
 
 def calculate_levels(rows, direction, daily_levels=None):
+    """
+    Build structural levels from CLOSED candles.
+    Important: TP levels are NOT generated as fixed multiples of risk.
+    They are taken from actual market structure first, with ATR-based
+    fallback only when a structural level is unavailable.
+    """
     price = f(rows[-1][4]) if rows else None
-    sup = daily_levels.get("support") if daily_levels else None
-    res = daily_levels.get("resistance") if daily_levels else None
-
-    # Do not return N/A merely because the higher-level S/R engine failed.
-    # Derive conservative structural levels from CLOSED 4H candles only.
-    if (sup is None or res is None) and rows and len(rows) >= 30 and price:
-        recent = rows[-30:]
-        highs = [f(x[2]) for x in recent if len(x) >= 5 and f(x[2]) is not None]
-        lows = [f(x[3]) for x in recent if len(x) >= 5 and f(x[3]) is not None]
-        if highs and lows:
-            below = [x for x in lows if x < price]
-            above = [x for x in highs if x > price]
-            if sup is None:
-                sup = max(below) if below else min(lows)
-            if res is None:
-                res = min(above) if above else max(highs)
-
-    if price is None or sup is None or res is None:
+    if price is None or price <= 0 or direction not in ("LONG", "SHORT"):
         return None
-    if sup >= price:
-        sup = min(sup, price * 0.995)
-    if res <= price:
-        res = max(res, price * 1.005)
-    pivot = weekly_pivot(rows)
-    a = atr(rows)
-    if not price or not a:
+
+    daily_levels = daily_levels or {}
+    sup = f(daily_levels.get("support"))
+    res = f(daily_levels.get("resistance"))
+
+    recent = rows[-60:] if len(rows) >= 30 else rows
+    highs = sorted({round(f(x[2]), 10) for x in recent if len(x) >= 5 and f(x[2]) is not None and f(x[2]) > 0})
+    lows = sorted({round(f(x[3]), 10) for x in recent if len(x) >= 5 and f(x[3]) is not None and f(x[3]) > 0})
+    atr_v = f(atr(rows))
+    if atr_v is None or atr_v <= 0:
         return None
+
+    below = [x for x in lows if x < price]
+    above = [x for x in highs if x > price]
+    if sup is None:
+        sup = max(below) if below else None
+    if res is None:
+        res = min(above) if above else None
+    if sup is None or res is None:
+        return None
+
     if direction == "LONG":
-        resistance = max(res, price)
+        # Entry is either current price after a confirmed close, or a breakout trigger.
         entry = price if price >= res else res * 1.002
-        sl = min(sup * 0.995, entry - 1.5 * a)
-        risk = max(entry - sl, entry * 0.005)
-        tp1 = max(entry + 1.0 * risk, resistance + 0.25 * a)
-        tp2 = max(entry + 2.0 * risk, tp1 + 0.75 * risk)
-        tp3 = max(entry + 3.0 * risk, tp2 + 0.75 * risk)
-        tp4 = max(entry + 4.0 * risk, tp3 + 0.75 * risk)
+        sl = min(sup * 0.995, entry - 1.5 * atr_v)
+        risk = entry - sl
+        if risk <= 0:
+            return None
+
+        # Real structural targets. Never manufacture four targets.
+        higher = [x for x in above if x > entry * 1.003]
+        tp1 = higher[0] if higher else entry + 1.25 * risk
+        tp2 = higher[1] if len(higher) > 1 else max(entry + 2.0 * risk, tp1 + 0.5 * risk)
+        tp3 = higher[2] if len(higher) > 2 else None
+        tp4 = higher[3] if len(higher) > 3 else None
+
+        if tp1 <= entry:
+            return None
+        if tp2 <= tp1:
+            tp2 = tp1 + max(0.5 * risk, 0.25 * atr_v)
+        if tp3 is not None and tp3 <= tp2:
+            tp3 = None
+        if tp4 is not None and (tp3 is None or tp4 <= tp3):
+            tp4 = None
+
     else:
-        support = min(sup, price)
         entry = price if price <= sup else sup * 0.998
-        sl = max(res * 1.005, entry + 1.5 * a)
-        risk = max(sl - entry, entry * 0.005)
-        tp1 = min(entry - 1.0 * risk, support - 0.25 * a)
-        tp2 = min(entry - 2.0 * risk, tp1 - 0.75 * risk)
-        tp3 = min(entry - 3.0 * risk, tp2 - 0.75 * risk)
-        tp4 = min(entry - 4.0 * risk, tp3 - 0.75 * risk)
-    if direction == "LONG":
-        if not (sl < entry < tp1 <= tp2 <= tp3 <= tp4):
+        sl = max(res * 1.005, entry + 1.5 * atr_v)
+        risk = sl - entry
+        if risk <= 0:
             return None
-    else:
-        if not (sl > entry > tp1 >= tp2 >= tp3 >= tp4):
+
+        lower = [x for x in lows if x < entry * 0.997]
+        tp1 = lower[-1] if lower else entry - 1.25 * risk
+        tp2 = lower[-2] if len(lower) > 1 else min(entry - 2.0 * risk, tp1 - 0.5 * risk)
+        tp3 = lower[-3] if len(lower) > 2 else None
+        tp4 = lower[-4] if len(lower) > 3 else None
+
+        if tp1 >= entry:
             return None
+        if tp2 >= tp1:
+            tp2 = tp1 - max(0.5 * risk, 0.25 * atr_v)
+        if tp3 is not None and tp3 >= tp2:
+            tp3 = None
+        if tp4 is not None and (tp3 is None or tp4 >= tp3):
+            tp4 = None
+
+    # Structural sanity.
+    if direction == "LONG" and not (sl < entry < tp1 <= tp2):
+        return None
+    if direction == "SHORT" and not (sl > entry > tp1 >= tp2):
+        return None
+
     return {
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "tp4": tp4,
-        "atr": a,
-        "support": sup,
-        "resistance": res,
-        "pivot": pivot,
+        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+        "tp3": tp3, "tp4": tp4, "atr": atr_v,
+        "support": sup, "resistance": res,
+        "pivot": weekly_pivot(rows),
     }
 
 def suggested_leverage(atr_percent):
@@ -3027,30 +3052,51 @@ def _rr_from_values(entry, sl, tp):
     return abs(entry - tp) / abs(entry - sl)
 
 
-def _ensure_candidate_plan(r):
-    """Keep a valid conditional Entry/SL/TP plan even when the execution gate blocks a trade."""
-    if not isinstance(r, dict):
-        return r
-    if all(f(r.get(k)) is not None for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4")):
-        r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
-        return r
-    direction = r.get("direction")
-    rows = (r.get("snapshots") or {}).get("4h", {}).get("rows") or []
-    if direction in ("LONG", "SHORT") and rows:
-        try:
-            levels = calculate_levels(rows, direction, {
-                "support": f(r.get("support")),
-                "resistance": f(r.get("resistance")),
-            })
-            if levels:
-                for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4"):
-                    if levels.get(k) is not None:
-                        r[k] = levels[k]
-                r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
-        except Exception:
-            pass
+def _plan_is_allowed(r):
+    """Only expose a plan when it is executable or has a real closed-candle trigger."""
+    action = str(r.get("action") or r.get("decision_state") or "").upper()
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
+        return True
+    trigger = str((r.get("candle_trigger") or {}).get("state") or "").upper()
+    return trigger in {
+        "BREAKOUT_CLOSED", "BREAKDOWN_CLOSED",
+        "SUPPORT_RECLAIM", "RESISTANCE_REJECT",
+    }
+
+def _clear_trade_plan(r):
+    for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4", "rr"):
+        r[k] = None
     return r
 
+def _ensure_candidate_plan(r):
+    """Do not invent trade levels for ordinary WAIT/WATCH rows."""
+    if not isinstance(r, dict):
+        return r
+    if not _plan_is_allowed(r):
+        return _clear_trade_plan(r)
+
+    direction = r.get("direction")
+    rows = (r.get("snapshots") or {}).get("4h", {}).get("rows") or []
+    if direction not in ("LONG", "SHORT") or not rows:
+        return _clear_trade_plan(r)
+
+    try:
+        levels = calculate_levels(rows, direction, {
+            "support": f(r.get("support")),
+            "resistance": f(r.get("resistance")),
+        })
+    except Exception:
+        levels = None
+
+    if not levels:
+        return _clear_trade_plan(r)
+
+    for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4"):
+        r[k] = levels.get(k)
+    r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
+    if r.get("rr") is None:
+        return _clear_trade_plan(r)
+    return r
 
 def _compact_reason(r):
     reason = str(r.get("reason") or r.get("gate_reason") or "تأیید کافی نیست")
@@ -3063,37 +3109,56 @@ def _compact_reason(r):
 
 
 def asset_block(r, metal=False, detail=False):
-    """One compact, decision-focused block; intentionally omits static/no-information fields."""
+    """Compact decision block; trade levels appear only for a valid/conditional setup."""
     r = _ensure_candidate_plan(dict(r or {}))
     symbol = str(r.get("coin") or r.get("symbol") or "UNKNOWN").upper()
     price = f(r.get("price"))
     action = action_emoji(r.get("action") or r.get("decision_state"))
     conf = r.get("confidence")
     tv = tradingview_chart_url(symbol, metal=metal)
+
+    rsi_v = f(r.get("rsi"))
+    atr_v = f(r.get("atr_pct"))
+    rsi_text = f"{rsi_v:.1f}" if rsi_v is not None else "N/A"
+    atr_text = f"{atr_v:.2f}%" if atr_v is not None else "N/A"
+
     lines = [
         f"🔹 {symbol} | {action} | اطمینان: {int(conf) if isinstance(conf,(int,float)) else 0}%",
         f"Price: {fmt(price)} | 24H: {pct(r.get('change'))}" if not metal else f"Price: {fmt(price)}",
         f"Trend: H4 {r.get('h4_trend','UNKNOWN')} / D1 {r.get('d1_trend','UNKNOWN')} / W1 {r.get('w1_trend','UNKNOWN')}",
-        f"RSI: {f(r.get('rsi')):.1f} | MACD: {r.get('macd','N/A')} | ATR: {f(r.get('atr_pct')):.2f}%" if f(r.get('rsi')) is not None and f(r.get('atr_pct')) is not None else f"RSI: {f(r.get('rsi')) if f(r.get('rsi')) is not None else "N/A"} | MACD: {r.get('macd','N/A')} | ATR: {f(r.get('atr_pct')):.2f}%" if f(r.get('atr_pct')) is not None else f"RSI: {f(r.get('rsi')) if f(r.get('rsi')) is not None else "N/A"} | MACD: {r.get('macd','N/A')} | ATR: N/A",
+        f"RSI: {rsi_text} | MACD: {r.get('macd','N/A')} | ATR: {atr_text}",
         f"S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))}",
     ]
-    if f(r.get("entry")) is not None and f(r.get("sl")) is not None:
+
+    if _plan_is_allowed(r) and f(r.get("entry")) is not None and f(r.get("sl")) is not None and f(r.get("tp2")) is not None:
         rr = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
-        rr_text = f" | R/R: {rr:.2f}" if rr is not None else ""
+        direction = "LONG" if r.get("direction") == "LONG" else "SHORT"
+        label = "🎯 BUY PLAN" if direction == "LONG" else "🎯 SELL PLAN"
+        lines.append(label)
         lines.append(
-            f"Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))} | TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}{rr_text}"
+            f"Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))} | "
+            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}"
+            + (f" | R/R: {rr:.2f}" if rr is not None else "")
         )
-        if detail:
-            lines.append(f"TP3: {fmt(r.get('tp3'))} | TP4: {fmt(r.get('tp4'))}")
+        extras = [x for x in (r.get("tp3"), r.get("tp4")) if f(x) is not None]
+        if extras:
+            lines.append(" | ".join(
+                f"TP{i}: {fmt(x)}" for i, x in enumerate((r.get("tp3"), r.get("tp4")), 3) if f(x) is not None
+            ))
     else:
-        lines.append("Entry/SL/TP: داده کافی برای برنامه شرطی وجود ندارد")
+        lines.append("🎯 Setup: هنوز ورود معتبر تأیید نشده است.")
+
     lines.append(f"Reason: {_compact_reason(r)}")
-    if r.get("warning"):
-        lines.append(f"⚠️ {r['warning']}")
+    warning = r.get("warning")
+    if warning and "نوسان بالا" in str(warning):
+        # Only show this warning when ATR actually crosses the configured high-volatility threshold.
+        if atr_v is None or atr_v < float(os.environ.get("ATLAS_HIGH_ATR_PCT", "4.0")):
+            warning = None
+    if warning:
+        lines.append(f"⚠️ {warning}")
     if tv:
         lines.append(f"📊 Chart: {tv}")
     return "\n".join(lines)
-
 
 def _portfolio_rows(results):
     by = {str(r.get("coin")).upper(): r for r in (results or []) if r.get("coin")}
@@ -3120,31 +3185,41 @@ def _opportunity_score(r):
 
 
 def top5_opportunities(results):
-    candidates=[]
+    """Five best EXECUTABLE crypto opportunities only; WATCH is not an opportunity."""
+    candidates = []
     for r in results or []:
-        r=_ensure_candidate_plan(r)
-        if r.get("direction") not in ("LONG","SHORT"):
+        r = _ensure_candidate_plan(dict(r))
+        action = str(r.get("action") or "").upper()
+        if action not in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
             continue
-        if r.get("action") not in ("BUY CONFIRMATION","SELL CONFIRMATION","BULLISH WATCH","BEARISH WATCH"):
+        rr = f(r.get("rr"))
+        conf = float(r.get("confidence") or 0)
+        if rr is None or rr < MIN_EXECUTABLE_RR or conf < MIN_CONFIDENCE:
             continue
-        rr=float(r.get("rr") or 0)
-        conf=float(r.get("confidence") or 0)
-        if rr < MIN_EXECUTABLE_RR and r.get("action") in ("BUY CONFIRMATION","SELL CONFIRMATION"):
-            continue
-        if conf < MIN_WATCH_CONFIDENCE:
-            continue
-        r["opportunity_score"]=_opportunity_score(r)
+        r["opportunity_score"] = _opportunity_score(r)
         candidates.append(r)
-    candidates.sort(key=lambda x:x.get("opportunity_score",0), reverse=True)
+    candidates.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
     return candidates[:5]
 
-
 def dynamic_top8(results, dynamic30):
-    allowed={str(x).upper() for x in (dynamic30 or [])}
-    rows=[r for r in (results or []) if str(r.get("coin")).upper() in allowed]
-    rows.sort(key=lambda r: (_opportunity_score(r), abs(float(r.get("change") or 0))), reverse=True)
+    top10 = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
+    allowed = {
+        str(x).upper() for x in (dynamic30 or [])
+        if str(x).upper() not in top10 and not is_stable(str(x).upper())
+    }
+    rows = []
+    for r in results or []:
+        coin = str(r.get("coin") or "").upper()
+        if coin not in allowed or is_stable(coin):
+            continue
+        # Dynamic section is for meaningful market candidates, not stablecoins/data junk.
+        if not r.get("price") or r.get("action") == "NO DATA":
+            continue
+        r = _ensure_candidate_plan(dict(r))
+        r["opportunity_score"] = _opportunity_score(r)
+        rows.append(r)
+    rows.sort(key=lambda r: (r.get("opportunity_score", 0), abs(float(r.get("change") or 0))), reverse=True)
     return rows[:8]
-
 
 def _metal_analysis(name):
     symbol = METAL_YAHOO[name]
@@ -3188,14 +3263,16 @@ def metals_report():
 
 
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    """MARKET engine: concise Persian report, Top10 + Dynamic8 + Top5 crypto opportunities."""
-    results=[_ensure_candidate_plan(dict(r)) for r in (results or [])]
-    top5=top5_opportunities(results)
-    dyn8=dynamic_top8(results,dynamic30)
-    top10_rows=[r for r in results if str(r.get("coin")).upper() in {str(x).upper() for x in top10}]
-    top10_rows.sort(key=lambda r: [str(x).upper() for x in top10].index(str(r.get("coin")).upper()) if str(r.get("coin")).upper() in [str(x).upper() for x in top10] else 999)
-    dt=now_tehran()
-    lines=[
+    """MARKET engine: exact Top10 + Dynamic8 + Top5 executable opportunities."""
+    top10_order = [str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)]
+    top10_map = {str(r.get("coin") or "").upper(): r for r in (results or []) if r.get("coin")}
+    top10_rows = [top10_map.get(s, {"coin": s, "action": "NO DATA", "confidence": 0, "reason": "داده در این اجرا در دسترس نبود"}) for s in top10_order]
+
+    dyn8 = dynamic_top8(results, dynamic30)
+    top5 = top5_opportunities(results)
+    dt = now_tehran()
+
+    lines = [
         "🤖 ATLAS AI — گزارش بازار 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
@@ -3205,19 +3282,29 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "🎯 TOP 5 OPPORTUNITIES",
     ]
     if top5:
-        for i,r in enumerate(top5,1):
-            lines.append(f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | Confidence {r.get('confidence',0)}% | R/R {r.get('rr'):.2f}" if r.get('rr') is not None else f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | Confidence {r.get('confidence',0)}%")
+        for i, r in enumerate(top5, 1):
+            rr = f"{r['rr']:.2f}" if r.get("rr") is not None else "N/A"
+            lines.append(f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | Confidence {r.get('confidence',0)}% | R/R {rr}")
             lines.append(asset_block(r, detail=True))
     else:
-        lines.append("⚪ هیچ ستاپ BUY/SELL با کیفیت کافی در این اجرا تأیید نشد.")
-    lines += ["", "📡 ATLAS TOP 10"]
-    for r in top10_rows: lines.append(asset_block(r))
-    lines += ["", "📡 DYNAMIC TOP 30 — فقط ۸ فرصت/دارایی برتر خارج از Top 10"]
-    for r in dyn8: lines.append(asset_block(r))
-    lines += ["", "⚠️ Risk: اگر نوسان/خبر غیرعادی باشد، حجم معامله کاهش یابد؛ سفارش خودکار وجود ندارد."]
-    lines += [f"📅 دریافت: {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران", "📊 منابع: CoinGecko/CMC + صرافی‌های CCXT + CoinGlass/TradingView در صورت دسترسی", "🔒 فقط کندل بسته‌شده؛ عدد ساختگی ممنوع."]
-    return "\n\n".join(lines)
+        lines.append("⚪ هیچ BUY/SELL اجرایی با کیفیت کافی در این اجرا تأیید نشد.")
 
+    lines += ["", "📡 ATLAS TOP 10"]
+    for r in top10_rows:
+        lines.append(asset_block(r))
+
+    lines += ["", "📡 DYNAMIC TOP 30 — فقط ۸ دارایی برتر خارج از Top 10"]
+    for r in dyn8:
+        lines.append(asset_block(r))
+
+    lines += [
+        "",
+        "⚠️ Risk: اگر نوسان/خبر غیرعادی باشد، حجم معامله کاهش یابد؛ سفارش خودکار وجود ندارد.",
+        f"📅 دریافت: {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران",
+        "📊 منابع: CoinGecko/CMC + صرافی‌های CCXT + CoinGlass/TradingView در صورت دسترسی",
+        "🔒 فقط کندل بسته‌شده؛ عدد ساختگی ممنوع.",
+    ]
+    return "\n\n".join(lines)
 
 def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
     """PERSONAL engine: all portfolio assets + separate Metals; never truncates the portfolio."""
@@ -3663,8 +3750,10 @@ def report():
     unavailable = 0
     for coin in universe:
         try:
+            if is_stable(coin):
+                continue
             r = analyze_coin(coin, news, weights)
-            if r:
+            if r and not is_stable(str(r.get("coin") or "")):
                 results.append(r)
         except Exception as e:
             unavailable += 1
