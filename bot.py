@@ -279,6 +279,11 @@ def pct(x):
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
+AMBIGUOUS_DYNAMIC_SYMBOLS = {"M", "CC"}
+
+def is_ambiguous_symbol(symbol):
+    return str(symbol or "").upper() in AMBIGUOUS_DYNAMIC_SYMBOLS
+
 def is_stable(symbol):
     s = (symbol or "").upper().replace("-", "")
     return s in STABLE_SYMBOLS
@@ -3053,7 +3058,7 @@ def _rr_from_values(entry, sl, tp):
 
 
 def _plan_is_allowed(r):
-    """Only expose a plan when it is executable or has a real closed-candle trigger."""
+    """Expose levels only for executable or explicitly conditional closed-candle setups."""
     action = str(r.get("action") or r.get("decision_state") or "").upper()
     if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
         return True
@@ -3062,6 +3067,22 @@ def _plan_is_allowed(r):
         "BREAKOUT_CLOSED", "BREAKDOWN_CLOSED",
         "SUPPORT_RECLAIM", "RESISTANCE_REJECT",
     }
+
+def _conditional_trigger_text(r):
+    direction = str(r.get("direction") or "").upper()
+    trigger = str((r.get("candle_trigger") or {}).get("state") or "").upper()
+    support = f(r.get("support")); resistance = f(r.get("resistance"))
+    if direction == "LONG":
+        if resistance is not None and trigger in {"BREAKOUT_CLOSED", "BULLISH_CLOSE"}:
+            return f"H4 close بالای {fmt(resistance)}"
+        if support is not None and trigger == "SUPPORT_RECLAIM":
+            return f"H4 reclaim بالای {fmt(support)}"
+    if direction == "SHORT":
+        if support is not None and trigger in {"BREAKDOWN_CLOSED", "BEARISH_CLOSE"}:
+            return f"H4 close زیر {fmt(support)}"
+        if resistance is not None and trigger == "RESISTANCE_REJECT":
+            return f"H4 rejection زیر {fmt(resistance)}"
+    return "تأیید کندل بسته‌شده 4H لازم است"
 
 def _clear_trade_plan(r):
     for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4", "rr"):
@@ -3133,8 +3154,12 @@ def asset_block(r, metal=False, detail=False):
     if _plan_is_allowed(r) and f(r.get("entry")) is not None and f(r.get("sl")) is not None and f(r.get("tp2")) is not None:
         rr = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
         direction = "LONG" if r.get("direction") == "LONG" else "SHORT"
-        label = "🎯 BUY PLAN" if direction == "LONG" else "🎯 SELL PLAN"
+        action_u = str(r.get("action") or r.get("decision_state") or "").upper()
+        executable = action_u in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL")
+        label = ("🎯 BUY PLAN" if direction == "LONG" else "🎯 SELL PLAN") if executable else ("🟠 CONDITIONAL BUY" if direction == "LONG" else "🟠 CONDITIONAL SELL")
         lines.append(label)
+        if not executable:
+            lines.append(f"Trigger: {_conditional_trigger_text(r)}")
         lines.append(
             f"Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))} | "
             f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}"
@@ -3205,12 +3230,12 @@ def dynamic_top8(results, dynamic30):
     top10 = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
     allowed = {
         str(x).upper() for x in (dynamic30 or [])
-        if str(x).upper() not in top10 and not is_stable(str(x).upper())
+        if str(x).upper() not in top10 and not is_stable(str(x).upper()) and not is_ambiguous_symbol(str(x).upper())
     }
     rows = []
     for r in results or []:
         coin = str(r.get("coin") or "").upper()
-        if coin not in allowed or is_stable(coin):
+        if coin not in allowed or is_stable(coin) or is_ambiguous_symbol(coin):
             continue
         # Dynamic section is for meaningful market candidates, not stablecoins/data junk.
         if not r.get("price") or r.get("action") == "NO DATA":
@@ -3276,6 +3301,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "🤖 ATLAS AI — گزارش بازار 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
+        "ENGINE: MARKET",
         f"BTC REGIME: {(btc_regime or {}).get('regime','UNKNOWN')} | Breadth: {(breadth or {}).get('state','UNKNOWN')} {(breadth or {}).get('score',0):.0f}%",
         f"Sentiment: {news.get('bias','N/A')} | News: {news.get('impact','N/A')}",
         "",
@@ -3310,11 +3336,12 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
     """PERSONAL engine: all portfolio assets + separate Metals; never truncates the portfolio."""
     rows=_portfolio_rows(results)
     dt=now_tehran()
-    top5=top5_opportunities(results)
+    top5=top5_opportunities(rows)
     lines=[
         "🤖 ATLAS AI — گزارش کامل شخصی 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
+        "ENGINE: PERSONAL",
         f"وضعیت BTC: {(btc_regime or {}).get('regime','UNKNOWN')} | احساسات: {(news or {}).get('bias','N/A')}",
         "",
         "🎯 TOP 5 فرصت کریپتو (جدا از ATLAS METALS)",
