@@ -1,12 +1,13 @@
+import os
 # ============================================================
 # ATLAS AI v10.2 — COMPLETE FIXED VERSION
 # ============================================================
 # v10.2 architecture:
 # - Fixed portfolio symbols (user-defined, never changes)
-# - Two engines: whole-market scanner + personal portfolio intelligence
-# - Market engine retains the existing scanner/decision logic
-# - Personal engine produces the full Persian 4H portfolio report
-# - Both engines share the same fresh analysis snapshot; no fabricated numbers
+# - Compact dashboard-style report output
+# - BTC pair filtering with dynamic volume threshold
+# - Two-table format: market overview + trade plan
+# - 4-line summary: market regime, best setup, news, risk
 # - No extra paragraphs or explanations
 # - Real-time data only, no fabricated numbers
 # - Smart Telegram rate limit handling with exponential backoff
@@ -14,7 +15,7 @@
 # - Duplicate report prevention with hash-based deduplication
 #
 # Design principles:
-#   - Legacy radar sections are retained only by the MARKET engine; PERSONAL is separate.
+#   - ATLAS static radar is NEVER removed.
 #   - Stablecoins are excluded from trading analysis.
 #   - Crypto: 1H / 4H / 1D via CCXT exchange data.
 #   - Signals require multi-factor confirmation.
@@ -59,12 +60,6 @@ import ccxt
 VERSION = "ATLAS v10.2 COMPLETE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
-# Two-engine operation:
-# MARKET = existing whole-market scanner; PERSONAL = user portfolio intelligence;
-# BOTH = run both engines in one invocation. The scheduler (GitHub Actions/cron)
-# decides when each invocation happens.
-ATLAS_ENGINE = os.environ.get("ATLAS_ENGINE", "MARKET").strip().upper()
-PERSONAL_REPORT_HOURS = os.environ.get("ATLAS_PERSONAL_REPORT_HOURS", "08:30,23:00")
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
 EVENT_LOOKBACK_LIMITS = {"30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
 EVENT_DEDUP_ENABLED = os.environ.get("ATLAS_CANDLE_EVENT_DEDUP", "1").strip() != "0"
@@ -2986,167 +2981,6 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
 
 
 # ============================================================
-# PERSONAL PORTFOLIO INTELLIGENCE — ENGINE 2
-# ============================================================
-
-def _personal_action(r):
-    """Translate engine decisions into a user-facing portfolio action."""
-    state = (r.get("decision_state") or r.get("action") or "NO DATA").upper()
-    direction = (r.get("direction") or "").upper()
-    if state in ("BUY CONFIRMATION", "BUY"):
-        return "🟢 BUY"
-    if state in ("SELL CONFIRMATION", "SELL"):
-        return "🔴 SELL / REDUCE"
-    if state in ("BULLISH WATCH", "WATCH") or direction == "LONG":
-        return "🟡 WATCH"
-    if state == "BEARISH WATCH" or direction == "SHORT":
-        return "🟠 WATCH-SELL"
-    if state == "NO DATA":
-        return "⚪ NO DATA"
-    return "⚪ HOLD / WAIT"
-
-
-def _personal_forecast(r):
-    h4 = r.get("h4_trend")
-    d1 = r.get("d1_trend")
-    w1 = r.get("w1_trend")
-    if h4 == "BULLISH" and d1 == "BULLISH":
-        return "متمایل به صعود"
-    if h4 == "BEARISH" and d1 == "BEARISH":
-        return "متمایل به نزول"
-    if h4 == "BULLISH" and d1 == "BEARISH":
-        return "صعود کوتاه‌مدت / اصلاح میان‌مدت"
-    if h4 == "BEARISH" and d1 == "BULLISH":
-        return "اصلاح کوتاه‌مدت / ساختار میان‌مدت صعودی"
-    if w1 == "BULLISH":
-        return "خنثی متمایل به صعود"
-    if w1 == "BEARISH":
-        return "خنثی متمایل به نزول"
-    return "خنثی / نامشخص"
-
-
-def _personal_reason(r):
-    reasons = []
-    h4, d1, w1 = r.get("h4_trend"), r.get("d1_trend"), r.get("w1_trend")
-    if h4 and d1 and h4 == d1 and h4 in ("BULLISH", "BEARISH"):
-        reasons.append(f"H4/D1 {h4}")
-    elif h4 or d1:
-        reasons.append(f"H4 {h4 or 'N/A'} / D1 {d1 or 'N/A'}")
-    macd = r.get("macd")
-    if macd and macd != "N/A":
-        reasons.append(f"MACD {macd}")
-    rr = decision_rr(r)
-    if rr is not None:
-        reasons.append(f"R/R {rr:.2f}")
-    vr = f(r.get("volume_ratio"))
-    if vr is not None:
-        reasons.append(f"حجم {vr:.2f}x")
-    if r.get("overbought"):
-        reasons.append("RSI اشباع خرید")
-    elif r.get("oversold"):
-        reasons.append("RSI اشباع فروش")
-    return "؛ ".join(reasons[:4]) or "داده کافی برای توضیح وجود ندارد"
-
-
-def build_personal_report(results, macro, news, market_info=None, btc_regime=None, breadth=None):
-    """Full Persian personal portfolio report; no legacy radar sections."""
-    dt = now_tehran()
-    portfolio = _portfolio_rows(results)
-    by = {r.get("coin"): r for r in portfolio}
-    valid = [r for r in portfolio if f(r.get("price")) is not None]
-
-    lines = [
-        "🤖 ATLAS AI — گزارش کامل 4H",
-        "━━━━━━━━━━━━━━━━━━",
-        f"تاریخ: {shamsi(dt)} | ساعت: {dt.strftime('%H:%M')} تهران",
-        "",
-        "🌎 وضعیت بازار",
-        f"BTC Regime: {(btc_regime or {}).get('regime', 'N/A')}",
-        f"Market Breadth: {(breadth or {}).get('state', 'N/A')} | "
-        f"{(breadth or {}).get('score', 0):.1f}/100",
-        f"احساسات خبری: {news.get('bias', 'N/A')} | اثر: {news.get('impact', 'N/A')}",
-        f"DXY: {fmt(macro.get('DXY'))}",
-        "",
-        "💼 سبد شخصی",
-        "ارز | قیمت | 24H | RSI | H4/D1/W1 | تصمیم",
-        "────────────────────────",
-    ]
-
-    for r in portfolio:
-        coin = r.get("coin", "?")
-        price = fmt(r.get("price")) if f(r.get("price")) is not None else "N/A"
-        ch = pct(r.get("change")) if f(r.get("change")) is not None else "N/A"
-        rv = f(r.get("rsi"))
-        rsi_s = f"{rv:.1f}" if rv is not None else "N/A"
-        trends = f"{r.get('h4_trend','N/A')}/{r.get('d1_trend','N/A')}/{r.get('w1_trend','N/A')}"
-        lines.append(f"{coin} | {price} | {ch} | {rsi_s} | {trends} | {_personal_action(r)}")
-
-    lines += ["", "🎯 برنامه معاملاتی", "ارز | Entry | SL | TP1 | TP2 | TP3 | TP4 | R/R | اطمینان", "────────────────────────"]
-    candidates = []
-    for r in portfolio:
-        action = _personal_action(r)
-        rr = decision_rr(r)
-        if action.startswith(("🟢", "🔴", "🟡", "🟠")):
-            candidates.append((r, rr))
-        if action.startswith("🟢") or action.startswith("🔴") or action.startswith("🟡"):
-            vals = [r.get("entry"), r.get("sl"), r.get("tp1"), r.get("tp2"), r.get("tp3"), r.get("tp4")]
-            fv = [fmt(x) if f(x) is not None else "N/A" for x in vals]
-            rr_s = f"{rr:.2f}" if rr is not None else "N/A"
-            conf = f"{f(r.get('confidence')):.0f}%" if f(r.get('confidence')) is not None else "N/A"
-            marker = " 🎯" if rr is not None and rr >= 3 else ""
-            lines.append(f"{r.get('coin')} | {fv[0]} | {fv[1]} | {fv[2]} | {fv[3]} | {fv[4]} | {fv[5]} | {rr_s}{marker} | {conf}")
-
-    if not candidates:
-        lines.append("هیچ BUY/SELL اجرایی در سبد شخصی تأیید نشد؛ WAIT/HOLD اولویت دارد.")
-
-    lines += ["", "🔎 تحلیل عمیق سبد"]
-    for r in portfolio:
-        if f(r.get("price")) is None:
-            continue
-        rr = decision_rr(r)
-        rr_s = f"{rr:.2f}" if rr is not None else "N/A"
-        conf = f(r.get("confidence"))
-        conf_s = f"{conf:.0f}%" if conf is not None else "N/A"
-        lines.extend([
-            f"🔹 {r.get('coin')}",
-            f"روند: {r.get('h4_trend','N/A')} / {r.get('d1_trend','N/A')} / {r.get('w1_trend','N/A')}",
-            f"RSI: {f(r.get('rsi')):.1f}" if f(r.get('rsi')) is not None else "RSI: N/A",
-            f"MACD: {r.get('macd','N/A')} | حجم: {r.get('volume','N/A')} | ATR: {fmt(r.get('atr_pct'))}%" if f(r.get('atr_pct')) is not None else f"MACD: {r.get('macd','N/A')} | حجم: {r.get('volume','N/A')}",
-            f"حمایت: {fmt(r.get('support'))} | مقاومت: {fmt(r.get('resistance'))}",
-            f"پیش‌بینی 12-24س: {_personal_forecast(r)} | Confidence: {conf_s}",
-            f"دلیل: {_personal_reason(r)}",
-        ])
-
-    # Best actionable setup from the user's portfolio only.
-    actionable = [
-        (r, decision_rr(r)) for r in valid
-        if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION")
-        and decision_rr(r) is not None
-    ]
-    if actionable:
-        best, best_rr = max(actionable, key=lambda x: (x[1], f(x[0].get("confidence")) or 0))
-        lines += ["", f"🏆 بهترین فرصت سبد: {best.get('coin')} — {_personal_action(best)} | R/R {best_rr:.2f}"]
-    else:
-        lines += ["", "🏆 بهترین فرصت سبد: هیچ BUY/SELL اجرایی با کیفیت کافی تأیید نشد."]
-
-    lines += [
-        "",
-        "📰 اخبار مهم: " + f"{news.get('bias','N/A')} | اثر {news.get('impact','N/A')}",
-        "⚠️ مدیریت ریسک: در نبود ستاپ معتبر، سرمایه را مجبور به معامله نکن؛ SL را بعد از ورود جابه‌جا نکن.",
-        "",
-        f"📅 زمان دریافت: {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}",
-        "📊 منبع: CoinGecko/صرافی‌های CCXT طبق داده موجود در اجرای فعلی",
-        "⏱️ وضعیت داده: داده همان اجرا؛ در صورت قدیمی بودن Snapshot، ورود جدید باید با اجرای تازه تأیید شود.",
-        "🔒 فقط کندل‌های بسته‌شده برای سیگنال استفاده می‌شوند؛ عدد ساختگی ممنوع.",
-    ]
-    return "\n".join(lines)
-
-
-def personal_report(results, macro, news, market_info, btc_regime, breadth):
-    return build_personal_report(results, macro, news, market_info, btc_regime, breadth)
-
-
-# ============================================================
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
 # ============================================================
 
@@ -3554,43 +3388,47 @@ def report():
 
 def main():
     try:
+        # Fail early and visibly if Telegram itself is unavailable.
         telegram_preflight()
+
         text, results, macro, news, market_info, unavailable = report()
-        btc_regime = btc_market_regime()
-        breadth = market_breadth(results)
+        parts, sent, errors = send_report(text)
 
-        engine = ATLAS_ENGINE
-        outputs = []
-        if engine in ("MARKET", "BOTH"):
-            outputs.append(("MARKET", text))
-        if engine in ("PERSONAL", "BOTH"):
-            outputs.append(("PERSONAL", personal_report(results, macro, news, market_info, btc_regime, breadth)))
+        save_context(
+            macro,
+            news,
+            market_liquidity_index(results),
+            market_info,
+        )
+        save_run(results, parts, macro, news, unavailable)
 
-        if not outputs:
-            raise RuntimeError(f"Unknown ATLAS_ENGINE={engine!r}; use MARKET, PERSONAL or BOTH")
+        print(text)
+        print("")
+        print(
+            f"{VERSION} sent: {sent} Telegram messages "
+            f"across {parts} report parts; errors={len(errors)}"
+        )
 
-        total_sent = 0
-        all_errors = []
-        for name, payload in outputs:
-            parts, sent, errors = send_report(payload)
-            total_sent += sent
-            all_errors.extend([f"{name}: {e}" for e in errors])
-            print(f"\n===== ATLAS {name} =====\n{payload}\n")
-            print(f"ATLAS {name}: {sent} Telegram messages across {parts} parts; errors={len(errors)}")
-
-        save_context(macro, news, market_liquidity_index(results), market_info)
-        save_run(results, sum([split_telegram(x[1]) for x in outputs], []), macro, news, unavailable)
-
-        if all_errors or total_sent == 0:
-            raise RuntimeError("Telegram delivery failed: " + "; ".join(all_errors or ["0 messages sent"]))
+        if errors or sent == 0:
+            raise RuntimeError(
+                "Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"])
+            )
         return 0
+
     except Exception as e:
         tb = traceback.format_exc()
         append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
+
+        # If Telegram credentials are valid, send a compact diagnostic instead
+        # of silently marking the GitHub Action successful.
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
+                alert = (
+                    f"🚨 {VERSION} FAILED\n"
+                    f"Reason: {str(e)[:900]}\n\n"
+                    "Check the GitHub Actions log and changelog.txt."
+                )
                 for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
                     if destination:
                         try:
@@ -3599,7 +3437,44 @@ def main():
                             print(f"Telegram error alert failed for {destination}: {te}")
         except Exception:
             pass
+        # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
         return 1
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# ============================================================
+# ATLAS AI — TWO ENGINE DISPATCHER v10.2
+# ============================================================
+ATLAS_ENGINE = os.getenv("ATLAS_ENGINE", "MARKET").upper().strip()
+ATLAS_PERSONAL_ASSETS = ["BTC","ETH","BNB","XRP","SOL","TRX","DOGE","ADA","LINK","XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR","ONDO","TAO"]
+
+def atlas_engine_mode():
+    mode=os.getenv("ATLAS_ENGINE","MARKET").upper().strip()
+    return mode if mode in {"MARKET","PERSONAL","BOTH"} else "MARKET"
+
+def _atlas_personal_report(market_report):
+    text=str(market_report or "")
+    lines=text.splitlines()
+    selected=[]
+    for sym in ATLAS_PERSONAL_ASSETS:
+        for line in lines:
+            u=line.upper()
+            if re.search(rf"(?<![A-Z]){re.escape(sym)}(?![A-Z])",u) and line not in selected:
+                selected.append(line)
+    out=["🤖 ATLAS AI — گزارش کامل 4H","━━━━━━━━━━━━━━━━━━","💼 سبد شخصی",
+         "دارایی‌های تحت پایش: "+" · ".join(ATLAS_PERSONAL_ASSETS),"",
+         "📊 وضعیت دارایی‌های شخصی"]
+    out.extend(selected[:60] or ["⚪ داده کافی برای گزارش شخصی در این اجرا موجود نیست."])
+    out += ["","━━━━━━━━━━━━━━━━━━","⚠️ فقط داده‌های واقعی همین اجرا استفاده شده‌اند؛ عدد ساختگی یا تخمینی تولید نمی‌شود."]
+    return "\n".join(out)
+
+def build_personal_report(market_report=None):
+    return _atlas_personal_report(build_report() if market_report is None else market_report)
+
+def build_two_engine_reports():
+    market=build_report()
+    mode=atlas_engine_mode()
+    if mode=="MARKET": return [market]
+    personal=build_personal_report(market)
+    return [personal] if mode=="PERSONAL" else [market,personal]
