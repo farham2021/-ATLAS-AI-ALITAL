@@ -3076,95 +3076,233 @@ def btc_pair_candidates():
     return candidates[:10], 100.0
 
 
+def _btc_report_rows(results, top_n=10):
+    """Return the exact BTC-quoted market universe required by the report.
+
+    The BTC pair scanner supplies price, 24H change and BTC volume. Technical
+    fields are merged from the normal ATLAS analysis for the same coin when
+    available. Missing values stay blank; nothing is fabricated.
+    """
+    candidates, threshold = btc_pair_candidates()
+    analysed = {(str(r.get("coin") or "").upper()): r for r in results}
+    rows = []
+
+    for c in candidates[:top_n]:
+        coin = c["coin"].upper()
+        r = dict(analysed.get(coin) or {})
+        r.update({
+            "coin": coin,
+            "pair": c.get("pair"),
+            "exchange": c.get("exchange"),
+            "price_btc": c.get("price_btc"),
+            "volume_btc": c.get("volume_btc"),
+            "change_24h_btc": c.get("change_24h"),
+            "volume_threshold_btc": threshold,
+        })
+        rows.append(r)
+
+    return rows, threshold
+
+
+def _report_action(r):
+    """Human-readable signal without inventing a signal from missing data."""
+    action = r.get("action")
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+        return action_emoji(action)
+    if action in ("BULLISH WATCH", "BEARISH WATCH"):
+        return action_emoji(action)
+    return "⛔ WAIT"
+
+
+def _report_reason(r):
+    """Short reason; blank technical fields remain blank rather than guessed."""
+    action = r.get("action")
+    trend = r.get("h4_trend")
+    rsi = r.get("rsi")
+    volume_ratio = r.get("volume_ratio")
+
+    direction = "صعودی" if trend == "BULLISH" else "نزولی" if trend == "BEARISH" else "نامشخص"
+    confirmations = []
+    if rsi is not None:
+        confirmations.append(f"RSI {rsi:.0f}")
+    if volume_ratio is not None:
+        confirmations.append("حجم تأییدکننده" if volume_ratio >= 1 else "حجم ضعیف")
+    if action:
+        confirmations.append(action.split()[0])
+
+    base = f"روند 4H {direction}"
+    if confirmations:
+        base += "؛ " + "، ".join(confirmations)
+    return base
+
+
 def compact_table_1(results, top_n=10):
-    # Keep the original radar priority, but only show the strongest 10
-    # actionable/watch candidates by confidence within that ordered universe.
-    rows = [r for r in results if r.get("price") is not None and r.get("volume") is not None]
-    rows.sort(key=lambda r: (r.get("confidence", 0), abs(r.get("change", 0) or 0)), reverse=True)
-    rows = rows[:top_n]
+    """Table 1: exactly the requested BTC-pair market scanner."""
+    rows, threshold = _btc_report_rows(results, top_n)
+
     lines = [
-        "TABLE 1 — ATLAS SIGNAL SCAN",
-        "نماد | 24H | 7D | RSI | روند | سیگنال | Confidence",
-        "────────────────────────────────────────",
+        "| نماد | قیمت (BTC) | تغییر ۲۴س (%) | تغییر ۷روز (%) | حجم (BTC) | RSI | MACD | روند | پیشنهاد | دلیل |",
+        "|---|---:|---:|---:|---:|---:|---|---|---|---|",
     ]
+
     for r in rows:
-        trend = "🟢" if r.get("h4_trend") == "BULLISH" else "🔴" if r.get("h4_trend") == "BEARISH" else "🟡"
-        rsi = f"{r['rsi']:.0f}" if r.get("rsi") is not None else "—"
-        c7 = pct(r.get("change_7d"))
-        c24 = pct(r.get("change"))
-        lines.append(f"{r['coin']} | {c24} | {c7} | {rsi} | {trend} | {_signal_short(r)} | {r.get('confidence',0)}%")
+        rsi = f"{r['rsi']:.1f}" if r.get("rsi") is not None else ""
+        macd = r.get("macd")
+        if isinstance(macd, (int, float)):
+            macd = f"{macd:.6g}"
+        elif macd is None:
+            macd = ""
+        trend = (
+            "🟢 صعودی" if r.get("h4_trend") == "BULLISH"
+            else "🔴 نزولی" if r.get("h4_trend") == "BEARISH"
+            else ""
+        )
+        c7 = r.get("change_7d")
+        c7txt = pct(c7) if c7 is not None else ""
+        c24txt = pct(r.get("change_24h_btc")) if r.get("change_24h_btc") is not None else ""
+        volume = fmt(r.get("volume_btc")) if r.get("volume_btc") is not None else ""
+        reason = _report_reason(r).replace("|", "/")
+
+        lines.append(
+            f"| {r['coin']} | {fmt(r.get('price_btc'))} | {c24txt} | {c7txt} | "
+            f"{volume} | {rsi} | {macd} | {trend} | {_report_action(r)} | {reason} |"
+        )
+
+    if len(rows) < 10:
+        lines.append(f"\nتنها {len(rows)} ارز با جفت BTC در بازار موجود است")
+    elif threshold is not None and threshold < 1000:
+        lines.append(f"\nبرای رسیدن به ۱۰ ارز، آستانه‌ی حجم به {threshold:g} BTC کاهش یافت")
+
     return "\n".join(lines), rows
 
 
+def _exact_rr(entry, sl, target):
+    if entry is None or sl is None or target is None:
+        return None
+    try:
+        entry, sl, target = float(entry), float(sl), float(target)
+        risk = abs(entry - sl)
+        if risk == 0:
+            return None
+        return abs(entry - target) / risk
+    except (TypeError, ValueError):
+        return None
+
+
 def compact_table_2(rows):
+    """Table 2: exact deep-analysis table for the same ten assets."""
     lines = [
-        "TABLE 2 — TRADE PLAN",
-        "نماد | Entry | SL | TP1 | TP2 | TP3 | TP4 | R/R(2) | دلیل",
-        "────────────────────────────────────────────────────────",
+        "| نماد | حمایت کلیدی | مقاومت کلیدی | نقطه ورود | حد ضرر | هدف (TP) | نسبت R/R | پیش‌بینی ۱۲-۲۴س | سطح اطمینان |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
+
     for r in rows:
-        rr = r.get("rr")
-        rr_txt = f"1:{rr:.2f}" if rr is not None else "—"
-        # R/R deliberately remains based on TP2 because the existing execution
-        # gate and backtest engine validate TP2. TP3/TP4 are scaling targets.
+        entry = r.get("entry")
+        sl = r.get("sl")
+        tp = r.get("tp2")
+        rr = _exact_rr(entry, sl, tp)
+
+        rr_txt = f"1:{rr:.2f}" if rr is not None else ""
+        if rr is not None and rr >= 3:
+            rr_txt += " 🎯"
+
+        confidence = r.get("confidence")
+        confidence_txt = f"{confidence:.0f}%" if isinstance(confidence, (int, float)) else ""
+        if isinstance(confidence, (int, float)) and confidence < 60:
+            confidence_txt = "⚠️ " + confidence_txt
+
+        action = r.get("action")
+        if action == "BUY CONFIRMATION":
+            forecast = "صعودی"
+        elif action == "SELL CONFIRMATION":
+            forecast = "نزولی"
+        elif r.get("h4_trend") == "BULLISH":
+            forecast = "متمایل به صعود"
+        elif r.get("h4_trend") == "BEARISH":
+            forecast = "متمایل به نزول"
+        else:
+            forecast = ""
+
         lines.append(
-            f"{r['coin']} | {fmt(r.get('entry'))} | {fmt(r.get('sl'))} | "
-            f"{fmt(r.get('tp1'))} | {fmt(r.get('tp2'))} | {fmt(r.get('tp3'))} | {fmt(r.get('tp4'))} | "
-            f"{rr_txt} | {_compact_reason(r)}"
+            f"| {r['coin']} | {fmt(r.get('support')) if r.get('support') is not None else ''} | "
+            f"{fmt(r.get('resistance')) if r.get('resistance') is not None else ''} | "
+            f"{fmt(entry) if entry is not None else ''} | {fmt(sl) if sl is not None else ''} | "
+            f"{fmt(tp) if tp is not None else ''} | {rr_txt} | {forecast} | {confidence_txt} |"
         )
+
     return "\n".join(lines)
 
 
 def compact_summary(rows, macro, news, market_info, btc_regime, breadth):
-    executable = [r for r in rows if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and not r.get("repeat_signal")]
-    best = sorted(executable, key=lambda r: ((r.get("rr") or 0), r.get("confidence", 0)), reverse=True)
-    best = best[0] if best else None
-    extreme = [r for r in rows if abs(r.get("change", 0) or 0) > 5 or (r.get("volume_ratio") or 0) >= 2]
-    regime = btc_regime.get("regime", "UNKNOWN") if btc_regime else "UNKNOWN"
-    breadth_state = breadth.get("state", "UNKNOWN") if breadth else "UNKNOWN"
+    """Four-line maximum summary, with source/time metadata embedded."""
+    executable = [
+        r for r in rows
+        if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION")
+        and not r.get("repeat_signal")
+    ]
+    best = max(
+        executable,
+        key=lambda r: (_exact_rr(r.get("entry"), r.get("sl"), r.get("tp2")) or 0),
+        default=None,
+    )
+
+    extreme = any(abs(r.get("change_24h_btc") or 0) > 5 for r in rows)
+    volume_extreme = any((r.get("volume_ratio") or 0) >= 2 for r in rows)
+
+    regime = (btc_regime or {}).get("regime")
     if regime == "RISK_ON":
-        market_line = "🟢 بازار: صعودی/ریسک‌پذیر؛ خریدار، اما تعقیب کندل سبز ممنوع."
+        line1 = "روند غالب: صعودی؛ احساسات: ریسک‌پذیر؛ نتیجه: خریدار، اما تعقیب قیمت ممنوع."
     elif regime == "RISK_OFF":
-        market_line = "🔴 بازار: نزولی/ریسک‌گریز؛ فروشنده، ورود خرید فقط پس از تأیید."
+        line1 = "روند غالب: نزولی؛ احساسات: ریسک‌گریز؛ نتیجه: فروشنده، خرید فقط پس از تأیید."
     else:
-        market_line = "🟡 بازار: خنثی/مختلط؛ انتظار برای ستاپ باکیفیت."
-    if extreme:
-        market_line = "🚨 " + market_line + " نوسان/حجم غیرعادی در بازار دیده شد."
+        line1 = "روند غالب: خنثی؛ احساسات: نامطمئن؛ نتیجه: انتظار تا شکل‌گیری ستاپ معتبر."
+
+    if extreme or volume_extreme:
+        line1 = "🚨 هشدار ویژه — " + line1 + " نوسان/حجم غیرعادی مشاهده شد."
+
     if best:
-        best_line = f"🎯 بهترین ستاپ: {best['coin']} {_signal_short(best)} | R/R(2) 1:{best.get('rr',0):.2f} | Confidence {best.get('confidence',0)}%"
+        rr = _exact_rr(best.get("entry"), best.get("sl"), best.get("tp2"))
+        line2 = f"بهترین فرصت: {best['coin']} {_report_action(best)}؛ هم‌جهتی سیگنال و ساختار؛ R/R 1:{rr:.2f}"
     else:
-        best_line = "🎯 بهترین ستاپ: هیچ BUY/SELL اجرایی با کیفیت کافی تأیید نشد."
-    news_line = f"📰 خبر: {news.get('bias','UNKNOWN')} | اثر {news.get('impact','UNKNOWN')}" if news else "📰 خبر: داده در دسترس نیست"
-    risk_line = "⚠️ ریسک: نوسان بالا/داده یا خبر متغیر؛ حجم معامله را محدود و SL را جابه‌جا نکن."
-    return "\n".join([market_line, best_line, news_line, risk_line])
+        line2 = "بهترین فرصت: هیچ BUY/SELL اجرایی با داده و تأیید کافی وجود ندارد."
+
+    if news:
+        bias = news.get("bias") or "داده در دسترس نیست"
+        impact = news.get("impact") or "داده در دسترس نیست"
+        line3 = f"اخبار مهم: {bias}؛ سطح تأثیر: {impact}."
+    else:
+        line3 = "اخبار مهم: داده در دسترس نیست."
+
+    dt = now_tehran()
+    line4 = (
+        f"⚠️ مدیریت ریسک: کاهش حجم در نوسان بالا و عدم جابه‌جایی SL؛ "
+        f"📅 {dt.strftime('%Y-%m-%d %H:%M:%S')} Asia/Tehran؛ "
+        f"📊 منبع: CoinGecko/داده جفت BTC صرافی؛ ⏱️ داده همین اجرا."
+    )
+
+    return "\n".join([line1, line2, line3, line4])
 
 
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
                  btc_regime=None, breadth=None):
-    dt = now_tehran()
+    """AUTHORITATIVE compact report renderer.
+
+    This is deliberately the single build_report implementation. The old
+    SNIPER/RADAR renderer must not override this function.
+    """
     t1, rows = compact_table_1(results, 10)
     t2 = compact_table_2(rows)
-    summary = compact_summary(rows, macro, news, market_info, btc_regime or {}, breadth or {})
-    source_names = sorted(set(src for r in rows for src in (r.get("sources") or [])))
-    source_txt = ", ".join(source_names) if source_names else "داده در دسترس نیست"
-    lines = [
-        "🤖 ATLAS AI v10.2 — COMPACT",
+    summary = compact_summary(rows, macro or {}, news or {}, market_info or {},
+                              btc_regime or {}, breadth or {})
+
+    # Output contract: table 1 + table 2 + four-line summary only.
+    return "\n\n".join([
         t1,
         t2,
-        "SUMMARY",
+        "جمع‌بندی نهایی",
         summary,
-        "",
-        f"📅 زمان دریافت: {dt.strftime('%Y-%m-%d %H:%M:%S')} Asia/Tehran",
-        f"📊 منبع: {source_txt}",
-        "⏱️ وضعیت داده: بر اساس آخرین داده دریافت‌شده در همین اجرا؛ سن داده بازار REST ممکن است لحظه‌ای نباشد.",
-        "🔒 سیگنال‌ها فقط بر پایه کندل‌های بسته‌شده؛ عدد ساختگی ممنوع.",
-    ]
-    return "\n\n".join(lines)
+    ])
 
-
-# ============================================================
-# MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
-# ============================================================
 
 def coingecko_headers():
     if COINGECKO_API_KEY:
@@ -3491,137 +3629,6 @@ def atlas_conclusion(results):
     lines.append(f"Threshold: {threshold:.0f}% | Watch threshold: {MIN_WATCH_CONFIDENCE:.0f}% | Closed-candle events observed: {new_events}")
     lines.append("🛡️ تصمیم ATLAS: BUY/SELL فقط پس از Gate + R/R + regime + ساختار؛ WATCH یعنی جهت جالب است اما ورود هنوز تأیید نشده.")
     return "\n".join(lines)
-
-
-def _ordered_report_results(results, top10, dynamic30):
-    """Return results in the contractual Telegram radar order."""
-    by_coin = {}
-    for r in results:
-        coin = (r.get("coin") or "").upper()
-        if coin and coin not in by_coin:
-            by_coin[coin] = r
-
-    ordered = []
-    seen = set()
-
-    for group in (top10, dynamic30, ATLAS_STATIC):
-        for coin in group:
-            coin = coin.upper()
-            if coin in by_coin and coin not in seen:
-                ordered.append(by_coin[coin])
-                seen.add(coin)
-
-    # Defensive tail: anything introduced by a future data source but not
-    # assigned to one of the three groups still appears at the end.
-    for r in results:
-        coin = (r.get("coin") or "").upper()
-        if coin and coin not in seen:
-            ordered.append(r)
-            seen.add(coin)
-
-    return ordered
-
-
-def _report_section_header(title, count, subtitle=None):
-    lines = ["━━━━━━━━━━━━━━━━━━", title, f"Assets in section: {count}"]
-    if subtitle:
-        lines.append(subtitle)
-    return "\n".join(lines)
-
-
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
-                 btc_regime=None, breadth=None):
-    # CRITICAL: report order is a product requirement, not a performance rank.
-    # Never sort the full result set by confidence here.
-    results = _ordered_report_results(results, top10, dynamic30)
-
-    liq = market_liquidity_index(results)
-    dt = now_tehran()
-
-    priority_success = [r for r in results if r.get("coin") in set(top10)]
-    dynamic_success = [r for r in results if r.get("coin") in set(dynamic30)]
-    static_success = [
-        r for r in results
-        if r.get("coin") not in set(top10) and r.get("coin") not in set(dynamic30)
-    ]
-
-    header = [
-        f"🤖 {VERSION} — SNIPER",
-        "━━━━━━━━━━━━━━━━━━",
-        f"{shamsi(dt)}  {dt.strftime('%H:%M')} 🇮🇷",
-        "Timeframe: 30M / 1H / 4H / 1D / 1W / 1M",
-        "",
-        f"💧 MARKET LIQUIDITY INDEX: {liq:.1f}/100",
-        f"🧭 DXY: {fmt(macro.get('DXY'))} | USD liquidity proxy",
-        f"📰 NEWS: {news['bias']} | {news['impact']}",
-        "",
-        "📡 RADAR ORDER",
-        "1️⃣ ATLAS TOP 10 PRIORITY → 2️⃣ DYNAMIC TOP 30 → 3️⃣ ATLAS STATIC RADAR",
-        f"Priority Top 10: {len(top10)} | Available: {len(priority_success)}",
-        f"Dynamic Top 30: {len(dynamic30)} | Available: {len(dynamic_success)} | refreshed now",
-        f"ATLAS Static Radar: {len(ATLAS_STATIC)} | Available: {len(static_success)}",
-        f"Total scanned: {len(results)}",
-        f"Unavailable/failed: {unavailable}",
-        "",
-    ]
-
-    blocks = []
-
-    # These explicit section headers guarantee that Telegram chunking can
-    # never silently mix Dynamic-30 before the Priority-10 assets.
-    blocks.append(_report_section_header(
-        "1️⃣ ATLAS TOP 10 PRIORITY",
-        len(top10),
-        "BTC → ETH → BNB → XRP → SOL → TRX → HYPE → DOGE → ADA → MATIC",
-    ))
-    blocks.extend(asset_block(x) for x in priority_success)
-
-    blocks.append(_report_section_header(
-        "2️⃣ DYNAMIC TOP 30",
-        len(dynamic30),
-        "Current CoinGecko market-cap ranking, refreshed every run; membership may change daily.",
-    ))
-    blocks.extend(asset_block(x) for x in dynamic_success)
-
-    blocks.append(_report_section_header(
-        "3️⃣ ATLAS STATIC RADAR",
-        len(static_success),
-        "Persistent surveillance assets not already present in sections 1 or 2.",
-    ))
-    blocks.extend(asset_block(x) for x in static_success)
-
-    footer = [
-        "━━━━━━━━━━━━━━━━━━",
-        "🛡️ ATLAS DATA ENGINE",
-        f"Assets attempted: {len(results) + unavailable}",
-        f"Successful: {len(results)} | Unavailable: {unavailable}",
-        f"Success rate: {(len(results) / max(len(results) + unavailable, 1) * 100):.1f}%",
-        "Only CLOSED candles used for signals; incomplete candles excluded",
-        "Stablecoins excluded",
-        "Data conflict >3% = NO TRADE",
-        f"Risk/trade: {RISK_PER_TRADE:.2f}%",
-        f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
-        "No automatic orders.",
-        "",
-        "🎯 ATLAS v10 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
-        "",
-        "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
-        "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
-    ]
-
-    return "\n\n".join([
-        "\n".join(header),
-        "\n\n".join(blocks),
-        market_intelligence_block(market_info),
-        market_summary(results, macro, news),
-        atlas_conclusion(results),
-        atlas_decision_board(
-            results,
-            btc_regime or {"regime": "UNKNOWN", "reason": ""},
-            breadth or {"state": "UNKNOWN", "score": 50.0, "samples": 0},
-        ),
-        "\n".join(footer),
-    ])
 
 
 # ============================================================
