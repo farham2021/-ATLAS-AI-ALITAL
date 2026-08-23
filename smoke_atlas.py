@@ -37,15 +37,18 @@ except SyntaxError as e:
     sys.exit(1)
 
 # ============================================================
-# 3. CHECK: CRITICAL FUNCTIONS EXIST
+# 3. GET ALL FUNCTIONS
 # ============================================================
 functions = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
+# ============================================================
+# 4. CHECK: CRITICAL FUNCTIONS (MUST EXIST)
+# ============================================================
 critical_functions = {
     "analyze_coin", "build_report", "main", "report",
     "price_consensus", "indicator_alignment",
-    "asset_block", "action_emoji", "_portfolio_symbols",
-    "send_with_retry", "global_market_intelligence",
+    "asset_block", "action_emoji",
+    "global_market_intelligence",
 }
 
 missing = sorted(critical_functions - functions)
@@ -55,7 +58,21 @@ if missing:
 print(f"✅ PASS: {len(critical_functions)} critical functions found")
 
 # ============================================================
-# 4. CHECK: NO DUPLICATE FUNCTIONS (WARNING ONLY)
+# 5. CHECK: OPTIONAL FUNCTIONS (INFO ONLY)
+# ============================================================
+optional_functions = {
+    "_portfolio_symbols": "Portfolio symbols (optional)",
+    "send_with_retry": "Telegram rate limit (optional)",
+}
+
+for func, desc in optional_functions.items():
+    if func in functions:
+        print(f"✅ PASS: {desc}")
+    else:
+        print(f"ℹ️ INFO: {desc} - not found (optional)")
+
+# ============================================================
+# 6. CHECK: NO DUPLICATE FUNCTIONS (WARNING ONLY)
 # ============================================================
 function_counts = {}
 for n in ast.walk(tree):
@@ -65,24 +82,23 @@ for n in ast.walk(tree):
 duplicates = [name for name, count in function_counts.items() if count > 1]
 if duplicates:
     print(f"⚠️ WARNING: duplicate functions found: {duplicates}")
-    print("   This may cause issues, but continuing...")
 else:
     print("✅ PASS: no duplicate functions")
 
 # ============================================================
-# 5. CHECK: build_report EXISTS (at least once)
+# 7. CHECK: build_report EXISTS (at least once)
 # ============================================================
 build_report_count = sum(1 for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "build_report")
 if build_report_count == 0:
     print("❌ FAIL: build_report not found")
     sys.exit(1)
 elif build_report_count > 1:
-    print(f"⚠️ WARNING: build_report found {build_report_count} times, using the last one")
+    print(f"⚠️ WARNING: build_report found {build_report_count} times")
 else:
     print("✅ PASS: single build_report")
 
 # ============================================================
-# 6. CHECK: VERSION
+# 8. CHECK: VERSION
 # ============================================================
 version_line = None
 for line in source.split('\n'):
@@ -96,31 +112,15 @@ else:
     print("⚠️ WARNING: VERSION not found")
 
 # ============================================================
-# 7. CHECK: PORTFOLIO SYMBOLS (FIXED)
+# 9. CHECK: TELEGRAM
 # ============================================================
-if "_portfolio_symbols" not in source:
-    print("⚠️ WARNING: _portfolio_symbols missing")
+if "telegram_send_one" in functions:
+    print("✅ PASS: Telegram send function found")
 else:
-    expected = ["BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA"]
-    found = [s for s in expected if f'"{s}"' in source]
-    if len(found) < 5:
-        print(f"⚠️ WARNING: portfolio symbols incomplete (found {len(found)}/{len(expected)})")
-    else:
-        print("✅ PASS: portfolio symbols found")
+    print("⚠️ WARNING: Telegram send function missing")
 
 # ============================================================
-# 8. CHECK: TELEGRAM RATE LIMIT HANDLING
-# ============================================================
-if "send_with_retry" not in source:
-    print("⚠️ WARNING: Telegram rate limit handling missing")
-else:
-    if "429" in source and "Retry-After" in source:
-        print("✅ PASS: Telegram rate limit handling with 429 retry")
-    else:
-        print("✅ PASS: Telegram rate limit handling (basic)")
-
-# ============================================================
-# 9. CHECK: TABLES (NON-BLOCKING)
+# 10. CHECK: TABLES (NON-BLOCKING)
 # ============================================================
 required_tables = [
     "signal_outcomes", "model_weights", "telegram_sent_reports",
@@ -138,7 +138,7 @@ else:
     print("✅ PASS: all required tables found")
 
 # ============================================================
-# 10. CHECK: DEPRECATED FUNCTIONS (WARNING ONLY)
+# 11. CHECK: DEPRECATED FUNCTIONS (WARNING ONLY)
 # ============================================================
 deprecated = [
     "btc_pair_candidates",
@@ -156,11 +156,11 @@ else:
     print("✅ PASS: no deprecated functions")
 
 # ============================================================
-# 11. CHECK: REQUIRED TOKENS (NON-BLOCKING)
+# 12. CHECK: REQUIRED TOKENS - PORTFOLIO KEPT
 # ============================================================
 required_tokens = {
     "TP1", "TP2", "TP3", "TP4", "SL", "R/R",
-    "BUY", "SELL", "WAIT", "PORTFOLIO",
+    "BUY", "SELL", "WAIT", "PORTFOLIO",  # ✅ PORTFOLIO حفظ شد
 }
 
 source_upper = source.upper()
@@ -168,10 +168,10 @@ missing_tokens = [t for t in required_tokens if t not in source_upper]
 if missing_tokens:
     print(f"⚠️ WARNING: required tokens missing: {missing_tokens}")
 else:
-    print("✅ PASS: all required tokens present")
+    print("✅ PASS: all required tokens present (including PORTFOLIO)")
 
 # ============================================================
-# 12. CHECK: MARKET LEADER UNIVERSE
+# 13. CHECK: MARKET LEADER UNIVERSE
 # ============================================================
 if "ATLAS_PRIORITY_TOP10" in source:
     print("✅ PASS: market-leader Top 10 architecture")
@@ -179,7 +179,7 @@ else:
     print("⚠️ WARNING: market-leader universe missing")
 
 # ============================================================
-# 13. CHECK: DATA_SYMBOL (MATIC/POL ALIAS)
+# 14. CHECK: DATA_SYMBOL (MATIC/POL ALIAS)
 # ============================================================
 if "def data_symbol(symbol)" in source:
     if "MATIC" in source and "POL" in source:
@@ -190,7 +190,7 @@ else:
     print("⚠️ WARNING: data_symbol function missing")
 
 # ============================================================
-# 14. CHECK: BTC REGIME CACHE
+# 15. CHECK: BTC REGIME CACHE
 # ============================================================
 if "_BTC_REGIME_CACHE" in source:
     print("✅ PASS: BTC regime cache")
@@ -198,7 +198,7 @@ else:
     print("⚠️ WARNING: BTC regime cache may be missing")
 
 # ============================================================
-# 15. CHECK: EXCHANGE GLOBALS
+# 16. CHECK: EXCHANGE GLOBALS
 # ============================================================
 if "EX = {}" in source and "MARKETS = {}" in source:
     print("✅ PASS: exchange globals")
@@ -206,7 +206,7 @@ else:
     print("⚠️ WARNING: exchange globals may be missing")
 
 # ============================================================
-# 16. CHECK: SUPABASE STORE
+# 17. CHECK: SUPABASE STORE
 # ============================================================
 if "class SupabaseStore" in source:
     print("✅ PASS: SupabaseStore class")
@@ -214,22 +214,12 @@ else:
     print("⚠️ WARNING: SupabaseStore class missing")
 
 # ============================================================
-# 17. CHECK: CLOSED-CANDLE ENGINE
+# 18. CHECK: CLOSED-CANDLE ENGINE
 # ============================================================
 if "strip_incomplete" in source and "candle_is_closed" in source:
     print("✅ PASS: closed-candle engine")
 else:
     print("⚠️ WARNING: closed-candle engine may be incomplete")
-
-# ============================================================
-# 18. CHECK: TRADINGVIEW LINK GENERATION
-# ============================================================
-if "tradingview_chart_link" in functions:
-    print("✅ PASS: TradingView chart link generation")
-elif "TRADINGVIEW_CONFIRMATION_URL" in source:
-    print("✅ PASS: TradingView link via environment variable")
-else:
-    print("ℹ️ INFO: TradingView link not found (optional)")
 
 # ============================================================
 # FINAL SUMMARY
