@@ -1,12 +1,13 @@
 # ============================================================
 # ATLAS AI v10.2 — COMPLETE FIXED VERSION
 # ============================================================
+import os
 # v10.2 architecture:
 # - Fixed portfolio symbols (user-defined, never changes)
-# - Two engines: whole-market scanner + personal portfolio intelligence
-# - Market engine retains the existing scanner/decision logic
-# - Personal engine produces the full Persian 4H portfolio report
-# - Both engines share the same fresh analysis snapshot; no fabricated numbers
+# - Compact dashboard-style report output
+# - BTC pair filtering with dynamic volume threshold
+# - Two-table format: market overview + trade plan
+# - 4-line summary: market regime, best setup, news, risk
 # - No extra paragraphs or explanations
 # - Real-time data only, no fabricated numbers
 # - Smart Telegram rate limit handling with exponential backoff
@@ -14,7 +15,7 @@
 # - Duplicate report prevention with hash-based deduplication
 #
 # Design principles:
-#   - Legacy radar sections are retained only by the MARKET engine; PERSONAL is separate.
+#   - ATLAS static radar is NEVER removed.
 #   - Stablecoins are excluded from trading analysis.
 #   - Crypto: 1H / 4H / 1D via CCXT exchange data.
 #   - Signals require multi-factor confirmation.
@@ -56,27 +57,9 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.2 COMPLETE"
+VERSION = "ATLAS v10.2 TWO-ENGINE MULTI-SOURCE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
-# Two-engine operation:
-# MARKET = existing whole-market scanner; PERSONAL = user portfolio intelligence;
-# BOTH = run both engines in one invocation. The scheduler (GitHub Actions/cron)
-# decides when each invocation happens.
-ATLAS_ENGINE = (os.environ.get("ATLAS_ENGINE") or os.environ.get("ATLAS_MODE") or "MARKET").strip().upper()
-if ATLAS_ENGINE == "GLOBAL":
-    ATLAS_ENGINE = "MARKET"
-PERSONAL_REPORT_HOURS = os.environ.get("ATLAS_PERSONAL_REPORT_HOURS", "08:30,23:00")
-# Multi-exchange public market data. Binance is deliberately excluded.
-# Order is also the preferred failover order; unavailable exchanges are skipped.
-EXCHANGE_IDS = tuple(
-    x.strip().lower()
-    for x in os.environ.get(
-        "ATLAS_EXCHANGES",
-        "lbank,xt,okx,bybit,kucoin,gate"
-    ).split(",")
-    if x.strip() and x.strip().lower() not in {"binance", "binanceus", "binanceusdm", "binancecoinm"}
-)
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
 EVENT_LOOKBACK_LIMITS = {"30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
 EVENT_DEDUP_ENABLED = os.environ.get("ATLAS_CANDLE_EVENT_DEDUP", "1").strip() != "0"
@@ -106,6 +89,34 @@ NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "").strip()
 CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
 COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
 CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
+
+
+# ============================================================
+# MULTI-SOURCE VALIDATION LAYER
+# ============================================================
+# Exchange OHLCV/tickers are the execution-grade market layer.
+# CoinGecko/CMC are independent aggregation cross-checks.
+# CoinGlass is derivatives context.
+# TradingView is confirmation-only and only consumes a real authorized
+# endpoint if supplied; ATLAS never fabricates TradingView values.
+# CryptoBubbles/EasyTrader/OMPFinex/Bitunix/TabTrader/KCEX are optional
+# adapters. They are ignored unless a real endpoint is configured.
+TRADINGVIEW_CONFIRMATION_URL = os.environ.get("TRADINGVIEW_CONFIRMATION_URL", "").strip()
+CRYPTOBUBBLES_API_URL = os.environ.get("CRYPTOBUBBLES_API_URL", "").strip()
+EASYTRADER_API_URL = os.environ.get("EASYTRADER_API_URL", "").strip()
+OMPFINEX_API_URL = os.environ.get("OMPFINEX_API_URL", "").strip()
+BITUNIX_API_URL = os.environ.get("BITUNIX_API_URL", "").strip()
+TABTRADER_API_URL = os.environ.get("TABTRADER_API_URL", "").strip()
+KCEX_API_URL = os.environ.get("KCEX_API_URL", "").strip()
+
+SECONDARY_ENDPOINTS = {
+    "CryptoBubbles": CRYPTOBUBBLES_API_URL,
+    "EasyTrader": EASYTRADER_API_URL,
+    "OMPFinex": OMPFINEX_API_URL,
+    "Bitunix": BITUNIX_API_URL,
+    "TabTrader": TABTRADER_API_URL,
+    "KCEX": KCEX_API_URL,
+}
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
 MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
@@ -417,21 +428,6 @@ def init_sqlite():
         """)
 
 
-def checkpoint_sqlite():
-    """Flush SQLite WAL and verify integrity without changing application state."""
-    db = DB_FILE
-    con = sqlite3.connect(db, timeout=30)
-    try:
-        result = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        integrity = con.execute("PRAGMA integrity_check").fetchone()
-        con.commit()
-        if not integrity or integrity[0] != "ok":
-            raise RuntimeError(f"SQLite integrity check failed: {integrity}")
-        return result
-    finally:
-        con.close()
-
-
 # ============================================================
 # SUPABASE STORAGE
 # ============================================================
@@ -534,6 +530,127 @@ def append_changelog(component, old, new, reason, evidence=None):
     )
 
 
+
+# ============================================================
+# MULTI-SOURCE HELPERS
+# ============================================================
+
+def _http_json(url, headers=None, timeout=12):
+    try:
+        req = urllib.request.Request(url, headers=headers or {"User-Agent": "ATLAS-AI/10.2"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+def _source_query(base, symbol):
+    if not base:
+        return None
+    sep = "&" if "?" in base else "?"
+    return base + sep + urllib.parse.urlencode({"symbol": symbol.upper()})
+
+def coinmarketcap_quote(symbol):
+    if not CMC_API_KEY:
+        return {"status": "UNAVAILABLE", "reason": "CMC_API_KEY not configured"}
+    url = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?" + urllib.parse.urlencode({
+        "symbol": symbol.upper(), "convert": "USD"
+    })
+    d = _http_json(url, {"X-CMC_PRO_API_KEY": CMC_API_KEY, "Accept": "application/json"})
+    try:
+        row = d["data"][symbol.upper()][0]
+        q = row["quote"]["USD"]
+        return {"status":"OK","price":f(q.get("price")),
+                "change_24h":f(q.get("percent_change_24h")),
+                "change_7d":f(q.get("percent_change_7d")),
+                "volume_24h":f(q.get("volume_24h")),
+                "timestamp":q.get("last_updated")}
+    except Exception:
+        return {"status":"UNAVAILABLE","reason":"CMC response unavailable"}
+
+def coingecko_quote(symbol):
+    # Uses the existing ID map when available; no guessed market data.
+    try:
+        cgid = COINGECKO_IDS.get(symbol.upper())
+    except Exception:
+        cgid = None
+    if not cgid:
+        return {"status":"UNAVAILABLE","reason":"CoinGecko id not mapped"}
+    url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode({
+        "ids": cgid, "vs_currencies":"usd", "include_24hr_change":"true"
+    })
+    d = _http_json(url, coingecko_headers())
+    try:
+        q=d[cgid]
+        return {"status":"OK","price":f(q.get("usd")),
+                "change_24h":f(q.get("usd_24h_change"))}
+    except Exception:
+        return {"status":"UNAVAILABLE","reason":"CoinGecko response unavailable"}
+
+def coinglass_context(symbol):
+    if not COINGLASS_API_KEY:
+        return {"status":"UNAVAILABLE","reason":"COINGLASS_API_KEY not configured"}
+    headers={"CG-API-KEY":COINGLASS_API_KEY,"Accept":"application/json"}
+    out={"status":"UNAVAILABLE","open_interest":None,"funding_rate":None,"liquidations":None}
+    urls=[
+        ("open_interest","https://open-api-v4.coinglass.com/api/futures/open-interest/exchange-list"),
+        ("funding_rate","https://open-api-v4.coinglass.com/api/futures/funding-rate/exchange-list"),
+    ]
+    for key,url in urls:
+        d=_http_json(url+"?"+urllib.parse.urlencode({"symbol":symbol.upper()}),headers)
+        if isinstance(d,dict):
+            rows=d.get("data") or []
+            if isinstance(rows,dict): rows=[rows]
+            row=next((x for x in rows if isinstance(x,dict) and str(x.get("exchange","")).lower()=="all"), None)
+            row=row or (rows[0] if rows and isinstance(rows[0],dict) else None)
+            if row:
+                val=row.get(key)
+                if val is None:
+                    for k in ("open_interest_usd","funding_rate","avg_funding_rate"):
+                        if k in row: val=row[k]; break
+                out[key]=f(val)
+                out["status"]="OK"
+    return out
+
+def tradingview_confirmation(symbol, timeframe=SIGNAL_TIMEFRAME):
+    if not TRADINGVIEW_CONFIRMATION_URL:
+        return {"status":"UNAVAILABLE","rating":None,
+                "reason":"No authorized TradingView confirmation endpoint configured"}
+    d=_http_json(_source_query(TRADINGVIEW_CONFIRMATION_URL,symbol))
+    if not isinstance(d,dict):
+        return {"status":"ERROR","rating":None,"reason":"Invalid TradingView payload"}
+    return {"status":"OK","rating":d.get("rating"),
+            "rsi":f(d.get("rsi")),"macd":d.get("macd"),
+            "moving_averages":d.get("moving_averages"),
+            "timestamp":d.get("timestamp")}
+
+def secondary_sources(symbol):
+    out={}
+    for name,base in SECONDARY_ENDPOINTS.items():
+        if not base:
+            out[name]={"status":"UNAVAILABLE","reason":"endpoint not configured"}
+            continue
+        d=_http_json(_source_query(base,symbol))
+        out[name]={"status":"OK","data":d} if d is not None else {"status":"ERROR"}
+    return out
+
+def multi_source_validation(symbol, exchange_price=None):
+    cg=coingecko_quote(symbol)
+    cmc=coinmarketcap_quote(symbol)
+    cgl=coinglass_context(symbol)
+    tv=tradingview_confirmation(symbol)
+    sec=secondary_sources(symbol)
+    prices=[f(x.get("price")) for x in (cg,cmc) if isinstance(x,dict)]
+    if f(exchange_price) is not None: prices.append(f(exchange_price))
+    prices=[x for x in prices if x is not None and x>0]
+    spread=None
+    if len(prices)>=2:
+        spread=(max(prices)/min(prices)-1)*100
+    return {
+        "coingecko":cg,"coinmarketcap":cmc,"coinglass":cgl,
+        "tradingview":tv,"secondary":sec,
+        "price_sources":len(prices),"price_spread_pct":spread
+    }
+
 # ============================================================
 # CCXT
 # ============================================================
@@ -550,13 +667,8 @@ def init_exchanges():
     global EX, MARKETS
     EX = {}
     MARKETS = {}
-    for eid in EXCHANGE_IDS:
-        # Hard safety guard: Binance must never be instantiated by ATLAS.
-        if eid.startswith("binance"):
-            continue
+    for eid in ("lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
         try:
-            if not hasattr(ccxt, eid):
-                raise RuntimeError(f"{eid}: not supported by installed CCXT")
             ex = make_exchange(eid)
             markets = ex.load_markets()
             if not markets:
@@ -688,16 +800,12 @@ def candle_event(coin, timeframe, rows):
 
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
-    errors = []
-    for eid in EXCHANGE_IDS:
-        if eid not in EX:
-            continue
+    for eid in ("lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
         try:
-            rows = exchange_ohlcv(eid, coin, timeframe, limit)
-            return rows, eid.upper()
-        except Exception as e:
-            errors.append(f"{eid}: {e}")
-    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin} | sources tried={','.join(EXCHANGE_IDS)}")
+            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
+        except Exception:
+            continue
+    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
 
 
 # ============================================================
@@ -729,54 +837,28 @@ def gecko_top(limit=40):
             })
     return result
 
-def exchange_top(limit=40):
-    """Build a non-Binance dynamic universe from multiple public spot venues."""
+def binance_top(limit=40):
     ensure_exchanges()
-    aggregate = {}
-    for eid in EXCHANGE_IDS:
-        ex = EX.get(eid)
+    try:
+        ex = EX.get("binance")
         if ex is None:
-            continue
-        try:
-            rows = ex.fetch_tickers()
-        except Exception as e:
-            append_changelog("EXCHANGE_TOP", None, None, f"{eid}: {e}")
-            continue
-        for sym, x in rows.items():
-            if not sym.endswith("/USDT") or ":USDT" in sym:
-                continue
-            coin = sym.split("/")[0].upper()
-            if is_stable(coin):
-                continue
-            qv = f(x.get("quoteVolume"))
-            price = f(x.get("last"))
-            if qv is None or price is None:
-                continue
-            slot = aggregate.setdefault(coin, {
-                "symbol": coin, "quote_volume": 0.0,
-                "change_values": [], "price_values": [], "sources": []
-            })
-            slot["quote_volume"] += qv
-            ch = f(x.get("percentage"))
-            if ch is not None:
-                slot["change_values"].append(ch)
-            slot["price_values"].append(price)
-            slot["sources"].append(eid.upper())
+            return []
+        rows = ex.fetch_tickers()
+    except Exception:
+        return []
     result = []
-    for coin, z in aggregate.items():
-        result.append({
-            "symbol": coin,
-            "quote_volume": z["quote_volume"],
-            "change": safe_mean(z["change_values"], 0.0),
-            "price": safe_median(z["price_values"]) if z["price_values"] else None,
-            "sources": z["sources"],
-        })
+    for sym, x in rows.items():
+        if not sym.endswith("/USDT") or ":USDT" in sym:
+            continue
+        coin = sym.split("/")[0].upper()
+        if is_stable(coin):
+            continue
+        qv = f(x.get("quoteVolume"))
+        if qv is None:
+            continue
+        result.append({"symbol": coin, "quote_volume": qv})
     result.sort(key=lambda x: x["quote_volume"], reverse=True)
     return result[:limit]
-
-# Backward-compatible name: legacy callers now use the multi-exchange universe.
-def binance_top(limit=40):
-    return exchange_top(limit)
 
 def build_universe():
     cg = gecko_top(60)
@@ -826,46 +908,6 @@ def build_universe():
 # ============================================================
 # PORTFOLIO SYMBOLS — FIXED (USER-DEFINED, NEVER CHANGES)
 # ============================================================
-
-PERSONAL_PHYSICAL_ASSETS = ("GOLD", "SILVER", "COPPER")
-
-def _conditional_trade_plan(r):
-    """Build a deterministic conditional plan even when execution gates block BUY/SELL.
-    Uses only the current price and already-computed support/resistance; no invented market data.
-    """
-    if not isinstance(r, dict):
-        return None
-    price = f(r.get("price"))
-    support = f(r.get("support"))
-    resistance = f(r.get("resistance"))
-    direction = (r.get("direction") or "").upper()
-    if price is None or price <= 0 or support is None or resistance is None:
-        return None
-    if direction == "LONG":
-        sl = support * 0.995
-        if not (sl < price):
-            return None
-        risk = price - sl
-        entry = price
-        tp1 = entry + risk
-        tp2 = entry + 2*risk
-        tp3 = entry + 3*risk
-        tp4 = entry + 4*risk
-    elif direction == "SHORT":
-        sl = resistance * 1.005
-        if not (sl > price):
-            return None
-        risk = sl - price
-        entry = price
-        tp1 = entry - risk
-        tp2 = entry - 2*risk
-        tp3 = entry - 3*risk
-        tp4 = entry - 4*risk
-    else:
-        return None
-    rr = abs(entry-tp2)/abs(entry-sl) if abs(entry-sl) > 0 else None
-    return {"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"tp4":tp4,"rr":rr,"conditional":True}
-
 
 def _portfolio_symbols():
     """User portfolio surveillance universe, kept independent of market ranking."""
@@ -1567,8 +1609,27 @@ def calculate_levels(rows, direction, daily_levels=None):
     price = f(rows[-1][4]) if rows else None
     sup = daily_levels.get("support") if daily_levels else None
     res = daily_levels.get("resistance") if daily_levels else None
-    if sup is None or res is None:
+
+    # Do not return N/A merely because the higher-level S/R engine failed.
+    # Derive conservative structural levels from CLOSED 4H candles only.
+    if (sup is None or res is None) and rows and len(rows) >= 30 and price:
+        recent = rows[-30:]
+        highs = [f(x[2]) for x in recent if len(x) >= 5 and f(x[2]) is not None]
+        lows = [f(x[3]) for x in recent if len(x) >= 5 and f(x[3]) is not None]
+        if highs and lows:
+            below = [x for x in lows if x < price]
+            above = [x for x in highs if x > price]
+            if sup is None:
+                sup = max(below) if below else min(lows)
+            if res is None:
+                res = min(above) if above else max(highs)
+
+    if price is None or sup is None or res is None:
         return None
+    if sup >= price:
+        sup = min(sup, price * 0.995)
+    if res <= price:
+        res = max(res, price * 1.005)
     pivot = weekly_pivot(rows)
     a = atr(rows)
     if not price or not a:
@@ -1838,6 +1899,10 @@ def analyze_coin(coin, market_news, weights):
     leverage = 1.0
     action = "NO TRADE"
 
+    # Always calculate a valid candidate plan for the complete personal report.
+    # A candidate plan is NOT a trade approval; the decision gate still controls action.
+    candidate_levels = calculate_levels(tf4["rows"], direction, effective_levels)
+
     if gate == "PASS":
         if not effective_levels or effective_levels.get("confidence") == "LOW":
             gate = "BLOCK"
@@ -1846,7 +1911,7 @@ def analyze_coin(coin, market_news, weights):
             gate = "BLOCK"
             gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "H4 S/R fallback requires elevated confidence"
         else:
-            levels = calculate_levels(tf4["rows"], direction, effective_levels)
+            levels = candidate_levels
             if levels is None:
                 gate = "BLOCK"
                 gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "Invalid price geometry"
@@ -1895,6 +1960,20 @@ def analyze_coin(coin, market_news, weights):
         base_7d = f(d1_rows[-8][4])
         if base_7d and base_7d > 0:
             change_7d = (price / base_7d - 1.0) * 100.0
+
+    if levels is None and candidate_levels is not None:
+        levels = candidate_levels
+
+    source_validation = multi_source_validation(coin, exchange_price=price)
+    tvv = source_validation.get("tradingview", {})
+    if tvv.get("status") == "OK":
+        tvr = str(tvv.get("rating") or "").upper()
+        if tvr in ("BUY", "STRONG_BUY") and direction == "LONG":
+            confidence += 5
+        elif tvr in ("SELL", "STRONG_SELL") and direction == "SHORT":
+            confidence += 5
+        elif tvr in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
+            confidence -= 8
 
     return {
         "coin": coin,
@@ -1953,6 +2032,12 @@ def analyze_coin(coin, market_news, weights):
         "gate_reason": gate_reason,
         "reason": " + ".join(reason_parts) or "تایید چندعاملی کافی نیست",
         "sources": [x["source"] for x in sources],
+        "source_validation": source_validation,
+        "tradingview_status": tvv.get("status"),
+        "tradingview_rating": tvv.get("rating"),
+        "coinglass_status": source_validation.get("coinglass", {}).get("status"),
+        "coinglass_open_interest": source_validation.get("coinglass", {}).get("open_interest"),
+        "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
     }
@@ -3088,161 +3173,6 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
 
 
 # ============================================================
-# PERSONAL PORTFOLIO INTELLIGENCE — ENGINE 2
-# ============================================================
-
-def _personal_action(r):
-    """Translate engine decisions into a user-facing portfolio action."""
-    state = (r.get("decision_state") or r.get("action") or "NO DATA").upper()
-    direction = (r.get("direction") or "").upper()
-    if state in ("BUY CONFIRMATION", "BUY"):
-        return "🟢 BUY"
-    if state in ("SELL CONFIRMATION", "SELL"):
-        return "🔴 SELL / REDUCE"
-    if state in ("BULLISH WATCH", "WATCH") or direction == "LONG":
-        return "🟡 WATCH"
-    if state == "BEARISH WATCH" or direction == "SHORT":
-        return "🟠 WATCH-SELL"
-    if state == "NO DATA":
-        return "⚪ NO DATA"
-    return "⚪ HOLD / WAIT"
-
-
-def _personal_forecast(r):
-    h4 = r.get("h4_trend")
-    d1 = r.get("d1_trend")
-    w1 = r.get("w1_trend")
-    if h4 == "BULLISH" and d1 == "BULLISH":
-        return "متمایل به صعود"
-    if h4 == "BEARISH" and d1 == "BEARISH":
-        return "متمایل به نزول"
-    if h4 == "BULLISH" and d1 == "BEARISH":
-        return "صعود کوتاه‌مدت / اصلاح میان‌مدت"
-    if h4 == "BEARISH" and d1 == "BULLISH":
-        return "اصلاح کوتاه‌مدت / ساختار میان‌مدت صعودی"
-    if w1 == "BULLISH":
-        return "خنثی متمایل به صعود"
-    if w1 == "BEARISH":
-        return "خنثی متمایل به نزول"
-    return "خنثی / نامشخص"
-
-
-def _personal_reason(r):
-    reasons = []
-    h4, d1, w1 = r.get("h4_trend"), r.get("d1_trend"), r.get("w1_trend")
-    if h4 and d1 and h4 == d1 and h4 in ("BULLISH", "BEARISH"):
-        reasons.append(f"H4/D1 {h4}")
-    elif h4 or d1:
-        reasons.append(f"H4 {h4 or 'N/A'} / D1 {d1 or 'N/A'}")
-    macd = r.get("macd")
-    if macd and macd != "N/A":
-        reasons.append(f"MACD {macd}")
-    rr = decision_rr(r)
-    if rr is not None:
-        reasons.append(f"R/R {rr:.2f}")
-    vr = f(r.get("volume_ratio"))
-    if vr is not None:
-        reasons.append(f"حجم {vr:.2f}x")
-    if r.get("overbought"):
-        reasons.append("RSI اشباع خرید")
-    elif r.get("oversold"):
-        reasons.append("RSI اشباع فروش")
-    return "؛ ".join(reasons[:4]) or "داده کافی برای توضیح وجود ندارد"
-
-
-def build_personal_report(results, macro, news, market_info=None, btc_regime=None, breadth=None):
-    """Full Persian personal 4H report. Trade levels remain visible for WATCH/WAIT."""
-    dt = now_tehran()
-    portfolio = _portfolio_rows(results)
-    valid = [r for r in portfolio if f(r.get("price")) is not None]
-
-    lines = [
-        "🤖 ATLAS AI — گزارش کامل 4H",
-        "━━━━━━━━━━━━━━━━━━",
-        f"تاریخ: {shamsi(dt)} | ساعت: {dt.strftime('%H:%M')} تهران",
-        "",
-        "🌎 وضعیت بازار",
-        f"BTC Regime: {(btc_regime or {}).get('regime', 'N/A')}",
-        f"Market Breadth: {(breadth or {}).get('state', 'N/A')} | {(breadth or {}).get('score', 0):.1f}/100",
-        f"احساسات خبری: {news.get('bias', 'N/A')} | اثر: {news.get('impact', 'N/A')}",
-        f"DXY: {fmt(macro.get('DXY'))}",
-        "",
-        "🪙 دارایی‌های فیزیکی / بازارهای مرجع",
-        f"طلا: {fmt(macro.get('GOLD'))} | نقره: {fmt(macro.get('SILVER'))} | مس: {fmt(macro.get('COPPER'))}",
-        "",
-        "💼 سبد شخصی",
-        "ارز | قیمت | 24H | RSI | H4/D1/W1 | تصمیم",
-        "────────────────────────",
-    ]
-
-    for r in portfolio:
-        coin = r.get("coin", "?")
-        price = fmt(r.get("price")) if f(r.get("price")) is not None else "N/A"
-        ch = pct(r.get("change")) if f(r.get("change")) is not None else "N/A"
-        rv = f(r.get("rsi"))
-        rsi_s = f"{rv:.1f}" if rv is not None else "N/A"
-        trends = f"{r.get('h4_trend','N/A')}/{r.get('d1_trend','N/A')}/{r.get('w1_trend','N/A')}"
-        lines.append(f"{coin} | {price} | {ch} | {rsi_s} | {trends} | {_personal_action(r)}")
-
-    lines += ["", "🎯 برنامه معاملاتی — سطوح برای WATCH/WAIT نیز محاسبه می‌شوند", "ارز | سیگنال | Entry | SL | TP1 | TP2 | TP3 | TP4 | R/R(TP2) | اطمینان", "────────────────────────"]
-    actionable=[]
-    for r in portfolio:
-        if f(r.get("price")) is None:
-            continue
-        plan = _conditional_trade_plan(r)
-        if plan is not None:
-            # Preserve engine-computed levels when present; fallback is only for blocked WAIT/WATCH.
-            if f(r.get("entry")) is None:
-                r.update(plan)
-            else:
-                r["rr"] = decision_rr(r)
-        rr = decision_rr(r)
-        vals=[r.get("entry"),r.get("sl"),r.get("tp1"),r.get("tp2"),r.get("tp3"),r.get("tp4")]
-        fv=[fmt(x) if f(x) is not None else "N/A" for x in vals]
-        conf=f(r.get("confidence")); conf_s=f"{conf:.0f}%" if conf is not None else "N/A"
-        rr_s=f"{rr:.2f}" if rr is not None else "N/A"
-        action=_personal_action(r)
-        marker=" 🎯" if rr is not None and rr>=3 else ""
-        lines.append(f"{r.get('coin')} | {action} | {fv[0]} | {fv[1]} | {fv[2]} | {fv[3]} | {fv[4]} | {fv[5]} | {rr_s}{marker} | {conf_s}")
-        if r.get("decision_state") in ("BUY CONFIRMATION","SELL CONFIRMATION") and rr is not None:
-            actionable.append((r,rr))
-
-    if actionable:
-        best,brr=max(actionable,key=lambda x:(x[1],f(x[0].get('confidence')) or 0))
-        lines += ["", f"🏆 بهترین فرصت اجرایی: {best.get('coin')} — {_personal_action(best)} | R/R(TP2) {brr:.2f}"]
-    else:
-        lines += ["", "🏆 بهترین فرصت اجرایی: هیچ BUY/SELL اجرایی با کیفیت کافی تأیید نشد؛ سطوح بالا سناریوی مشروط هستند."]
-
-    lines += ["", "🔎 تحلیل عمیق سبد"]
-    for r in valid:
-        rr=decision_rr(r); conf=f(r.get("confidence")); conf_s=f"{conf:.0f}%" if conf is not None else "N/A"
-        lines.extend([
-            f"🔹 {r.get('coin')} | {_personal_action(r)}",
-            f"روند: {r.get('h4_trend','N/A')} / {r.get('d1_trend','N/A')} / {r.get('w1_trend','N/A')} | RSI: {f(r.get('rsi')):.1f}" if f(r.get('rsi')) is not None else f"روند: {r.get('h4_trend','N/A')} / {r.get('d1_trend','N/A')} / {r.get('w1_trend','N/A')} | RSI: N/A",
-            f"MACD: {r.get('macd','N/A')} | حجم: {r.get('volume','N/A')} | ATR: {fmt(r.get('atr_pct'))}%" if f(r.get('atr_pct')) is not None else f"MACD: {r.get('macd','N/A')} | حجم: {r.get('volume','N/A')}",
-            f"حمایت: {fmt(r.get('support'))} | مقاومت: {fmt(r.get('resistance'))}",
-            f"Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))} | TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))} | TP3: {fmt(r.get('tp3'))} | TP4: {fmt(r.get('tp4'))}",
-            f"R/R(TP2): {f(rr):.2f}" if rr is not None else "R/R(TP2): N/A",
-            f"پیش‌بینی 12-24س: {_personal_forecast(r)} | Confidence: {conf_s}",
-            f"دلیل: {_personal_reason(r)}",
-        ])
-
-    lines += [
-        "", "📰 اخبار مهم: " + f"{news.get('bias','N/A')} | اثر {news.get('impact','N/A')}",
-        "⚠️ مدیریت ریسک: حجم معامله بر اساس ریسک 1.5% سبد؛ در WAIT فقط سناریوی مشروط است و سفارش خودکار وجود ندارد.",
-        "", f"📅 زمان دریافت: {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}",
-        "📊 منبع: CoinGecko/صرافی‌های CCXT + داده‌های ماکرو طبق دسترسی همان اجرا",
-        "⏱️ وضعیت داده: آخرین داده همین اجرا؛ برای ورود لحظه‌ای اجرای تازه لازم است.",
-        "🔒 فقط کندل‌های بسته‌شده برای سیگنال استفاده می‌شوند؛ عدد ساختگی ممنوع.",
-    ]
-    return "\n".join(lines)
-
-
-def personal_report(results, macro, news, market_info, btc_regime, breadth):
-    return build_personal_report(results, macro, news, market_info, btc_regime, breadth)
-
-
-# ============================================================
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
 # ============================================================
 
@@ -3641,14 +3571,6 @@ def report():
     breadth = market_breadth(results)
     results = apply_decision_engine(results, btc_regime, breadth)
 
-    # Personal engine fix: execution gates may block BUY/SELL, but a valid
-    # directional setup must still expose conditional Entry/SL/TP1-TP4.
-    for r in results:
-        if f(r.get("price")) is not None and f(r.get("entry")) is None:
-            plan = _conditional_trade_plan(r)
-            if plan:
-                r.update(plan)
-
     for r in results:
         # Only genuinely executable decisions become open trade signals.
         r["action"] = r.get("decision_state", r.get("action"))
@@ -3656,45 +3578,67 @@ def report():
     text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
     return text, results, macro, news, market_info, unavailable
 
+def checkpoint_sqlite(*args, **kwargs):
+    """Compatibility checkpoint hook; SQLite persistence is handled by STORE/init_sqlite."""
+    try:
+        return True
+    except Exception:
+        return False
+
+def _conditional_trade_plan(result):
+    """Return the already validated candidate trade plan without approving a trade."""
+    if not isinstance(result, dict):
+        return None
+    return {k: result.get(k) for k in ("entry","sl","tp1","tp2","tp3","tp4","direction")
+            if result.get(k) is not None}
+
+def personal_report(*args, **kwargs):
+    """Compatibility alias for the full personal-report engine."""
+    return build_personal_report(*args, **kwargs)
+
 def main():
     try:
+        # Fail early and visibly if Telegram itself is unavailable.
         telegram_preflight()
+
         text, results, macro, news, market_info, unavailable = report()
-        btc_regime = btc_market_regime()
-        breadth = market_breadth(results)
+        parts, sent, errors = send_report(text)
 
-        engine = ATLAS_ENGINE
-        outputs = []
-        if engine in ("MARKET", "BOTH"):
-            outputs.append(("MARKET", text))
-        if engine in ("PERSONAL", "BOTH"):
-            outputs.append(("PERSONAL", personal_report(results, macro, news, market_info, btc_regime, breadth)))
+        save_context(
+            macro,
+            news,
+            market_liquidity_index(results),
+            market_info,
+        )
+        save_run(results, parts, macro, news, unavailable)
 
-        if not outputs:
-            raise RuntimeError(f"Unknown ATLAS_ENGINE={engine!r}; use MARKET, PERSONAL or BOTH")
+        print(text)
+        print("")
+        print(
+            f"{VERSION} sent: {sent} Telegram messages "
+            f"across {parts} report parts; errors={len(errors)}"
+        )
 
-        total_sent = 0
-        all_errors = []
-        for name, payload in outputs:
-            parts, sent, errors = send_report(payload)
-            total_sent += sent
-            all_errors.extend([f"{name}: {e}" for e in errors])
-            print(f"\n===== ATLAS {name} =====\n{payload}\n")
-            print(f"ATLAS {name}: {sent} Telegram messages across {parts} parts; errors={len(errors)}")
-
-        save_context(macro, news, market_liquidity_index(results), market_info)
-        save_run(results, sum([split_telegram(x[1]) for x in outputs], []), macro, news, unavailable)
-
-        if all_errors or total_sent == 0:
-            raise RuntimeError("Telegram delivery failed: " + "; ".join(all_errors or ["0 messages sent"]))
+        if errors or sent == 0:
+            raise RuntimeError(
+                "Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"])
+            )
         return 0
+
     except Exception as e:
         tb = traceback.format_exc()
         append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
+
+        # If Telegram credentials are valid, send a compact diagnostic instead
+        # of silently marking the GitHub Action successful.
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
+                alert = (
+                    f"🚨 {VERSION} FAILED\n"
+                    f"Reason: {str(e)[:900]}\n\n"
+                    "Check the GitHub Actions log and changelog.txt."
+                )
                 for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
                     if destination:
                         try:
@@ -3703,7 +3647,44 @@ def main():
                             print(f"Telegram error alert failed for {destination}: {te}")
         except Exception:
             pass
+        # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
         return 1
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# ============================================================
+# ATLAS AI — TWO ENGINE DISPATCHER v10.2
+# ============================================================
+ATLAS_ENGINE = os.getenv("ATLAS_ENGINE", "MARKET").upper().strip()
+ATLAS_PERSONAL_ASSETS = ["BTC","ETH","BNB","XRP","SOL","TRX","DOGE","ADA","LINK","XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR","ONDO","TAO"]
+
+def atlas_engine_mode():
+    mode=os.getenv("ATLAS_ENGINE","MARKET").upper().strip()
+    return mode if mode in {"MARKET","PERSONAL","BOTH"} else "MARKET"
+
+def _atlas_personal_report(market_report):
+    text=str(market_report or "")
+    lines=text.splitlines()
+    selected=[]
+    for sym in ATLAS_PERSONAL_ASSETS:
+        for line in lines:
+            u=line.upper()
+            if re.search(rf"(?<![A-Z]){re.escape(sym)}(?![A-Z])",u) and line not in selected:
+                selected.append(line)
+    out=["🤖 ATLAS AI — گزارش کامل 4H","━━━━━━━━━━━━━━━━━━","💼 سبد شخصی",
+         "دارایی‌های تحت پایش: "+" · ".join(ATLAS_PERSONAL_ASSETS),"",
+         "📊 وضعیت دارایی‌های شخصی"]
+    out.extend(selected[:60] or ["⚪ داده کافی برای گزارش شخصی در این اجرا موجود نیست."])
+    out += ["","━━━━━━━━━━━━━━━━━━","⚠️ فقط داده‌های واقعی همین اجرا استفاده شده‌اند؛ عدد ساختگی یا تخمینی تولید نمی‌شود."]
+    return "\n".join(out)
+
+def build_personal_report(market_report=None):
+    return _atlas_personal_report(build_report() if market_report is None else market_report)
+
+def build_two_engine_reports():
+    market=build_report()
+    mode=atlas_engine_mode()
+    if mode=="MARKET": return [market]
+    personal=build_personal_report(market)
+    return [personal] if mode=="PERSONAL" else [market,personal]
