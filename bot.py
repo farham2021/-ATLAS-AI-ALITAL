@@ -2962,6 +2962,51 @@ def action_emoji(action):
     if action == "BEARISH WATCH":
         return "🔴 BEARISH WATCH"
     return "⛔ NO TRADE"
+def asset_block(r):
+    """Compact decision-focused asset report.
+
+    Signal calculations still use the full MTF dataset; Telegram only shows
+    fields that materially affect a trading decision. This keeps the report
+    readable without weakening the engine.
+    """
+    action = r.get("action", "NO TRADE")
+    lines = [
+        f"🔹 {r['coin']}",
+        f"Price: {fmt(r['price'])} | 24H: {pct(r['change'])}",
+        f"H4/D1/W1: {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')}",
+        f"RSI: {r['rsi']:.1f}" if r.get('rsi') is not None else "RSI: N/A",
+        f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
+        f"Pattern: {r['pattern']}" + (" ✅" if r.get("pattern_valid") else ""),
+        f"Volume: {r['volume']} | {r['volume_ratio']:.2f}x" if r.get('volume_ratio') is not None else f"Volume: {r['volume']} | N/A",
+        f"Liquidity: {r['liquidity']} | ATR: {r['atr_pct']:.2f}%" if r.get('atr_pct') is not None else f"Liquidity: {r['liquidity']} | ATR: N/A",
+        f"4H Trigger: {(r.get('candle_trigger') or {}).get('state','UNKNOWN')}",
+        f"Daily S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))} | {r.get('sr_confidence','LOW')}",
+        f"Scores: Setup {r.get('setup_score', r.get('confidence',0))}/100 | Entry {r.get('entry_quality',0)}/100 | Risk {r.get('risk_quality',0)}/100",
+        f"🎯 ACTION: {action_emoji(action)}",
+    ]
+
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+        lines += [
+            f"R/R: 1:{r.get('rr', 0):.2f} | Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))}",
+            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}",
+            f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی است'}",
+        ]
+    elif r.get("decision_reasons"):
+        lines.append("Decision: " + " | ".join(r["decision_reasons"][:3]))
+        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
+    else:
+        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
+        lines.append(f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی نیست'}")
+
+    if r.get("price_source_errors"):
+        ok_sources = [x.get("source") for x in r.get("price_sources", []) if x.get("price") is not None]
+        lines.append("PRICE SOURCES: " + " | ".join(ok_sources[:5]) + f" | Errors: {len(r['price_source_errors'])}")
+    if r.get("warning"):
+        lines.append(f"⚠️ {r['warning']}")
+    if f(r.get("spread")) is not None and r["spread"] > 3:
+        lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
+    return "\n".join(lines)
+
 
 
 def _signal_short(r):
