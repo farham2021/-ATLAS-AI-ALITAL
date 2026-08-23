@@ -1,7 +1,7 @@
-import os
 # ============================================================
 # ATLAS AI v10.2 — COMPLETE FIXED VERSION
 # ============================================================
+import os
 # v10.2 architecture:
 # - Fixed portfolio symbols (user-defined, never changes)
 # - Compact dashboard-style report output
