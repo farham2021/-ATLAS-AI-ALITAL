@@ -29,11 +29,19 @@ if funcs.count("build_report") != 1:
     fail("build_report must exist exactly once")
 if funcs.count("build_personal_report") != 1:
     fail("build_personal_report must exist exactly once")
+if funcs.count("calculate_levels") != 1:
+    fail("calculate_levels must exist exactly once")
+if funcs.count("_ensure_candidate_plan") != 1:
+    fail("_ensure_candidate_plan must exist exactly once")
+if "R/R" not in s or "opportunity_score" not in s:
+    fail("real R/R/opportunity scoring missing")
+if "is_stable" not in s:
+    fail("stablecoin guard missing")
 
 for token in (
     "ATLAS_PERSONAL_ASSETS", "ATLAS_METALS", "TOP 5 OPPORTUNITIES",
     "DYNAMIC TOP 30", "TradingView", "Chart:", "TP1", "TP2", "TP3", "TP4",
-    "MARKET", "PERSONAL", "BOTH", "shamsi",
+    "MARKET", "PERSONAL", "BOTH", "shamsi", "conditional", "stablecoin",
 ):
     if token not in s:
         fail(f"missing token {token}")
