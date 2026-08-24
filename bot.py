@@ -3296,90 +3296,156 @@ def metals_report():
 
 
 def _compact_scenario_row(r, metal=False):
-    """Ultra-compact Telegram row based on the user's uploaded table format.
+    """Compact dashboard row matching the user's uploaded CSV format.
 
-    Technical calculations remain fully active in the engine; only the presentation
-    is reduced to status/key level/bullish scenario/bearish scenario + TradingView.
+    Engine calculations remain internal. Telegram exposes only:
+    asset, overall status, key level, bullish scenario, bearish/correction scenario.
     """
     r = dict(r or {})
     symbol = str(r.get("coin") or r.get("symbol") or "UNKNOWN").upper()
     price = f(r.get("price"))
     change = f(r.get("change"))
     action = str(r.get("action") or r.get("decision_state") or "WAIT").upper()
-    trend = str(r.get("h4_trend") or "UNKNOWN").upper()
+    h4 = str(r.get("h4_trend") or "UNKNOWN").upper()
+    d1 = str(r.get("d1_trend") or "UNKNOWN").upper()
     support = f(r.get("support"))
     resistance = f(r.get("resistance"))
-    entry = f(r.get("entry")); sl = f(r.get("sl")); tp1 = f(r.get("tp1")); tp2 = f(r.get("tp2"))
+    entry = f(r.get("entry"))
+    sl = f(r.get("sl"))
+    tp1 = f(r.get("tp1"))
+    tp2 = f(r.get("tp2"))
 
     if action in ("BUY", "BUY CONFIRMATION"):
-        status = "🟢 BUY"
+        status = "BUY"
     elif action in ("SELL", "SELL CONFIRMATION", "SELL / REDUCE"):
-        status = "🔴 SELL"
+        status = "SELL"
     elif action in ("BULLISH WATCH", "WATCH"):
-        status = "🟡 WATCH"
-    elif action in ("BEARISH WATCH",):
-        status = "🟠 WATCH-SELL"
+        status = "WATCH"
     elif action == "NO DATA":
-        status = "⚪ NO DATA"
+        status = "NO DATA"
     else:
-        status = "⚪ WAIT"
+        status = "WAIT"
 
-    if price is not None:
-        price_text = _snapshot_price_text(price)
+    # Keep the uploaded table's wording style: short, decision-oriented,
+    # and without RSI/MACD/ATR/confidence/news details.
+    if h4 == "BULLISH" and d1 == "BULLISH":
+        if symbol == "BTC":
+            overall = "صعودی اما در حال تثبیت"
+        else:
+            overall = "صعودی"
+    elif h4 == "BEARISH" and d1 == "BEARISH":
+        overall = "نزولی"
+    elif h4 == "BULLISH":
+        overall = "صعودی اما در حال تثبیت"
+    elif h4 == "BEARISH":
+        overall = "نزولی اما در حال نوسان"
     else:
-        price_text = "N/A"
-    if change is not None and not metal:
-        price_text += f" ({'+' if change > 0 else ''}{change:.2f}%)"
+        overall = "خنثی / نامشخص"
 
-    key = []
-    if support is not None:
-        key.append(f"S {fmt(support)}")
+    if price is None:
+        overall = "داده کافی نیست"
+
+    if support is not None and resistance is not None:
+        if abs(resistance - support) / max(abs(price or resistance), 1e-12) < 0.02:
+            key = f"{fmt(support)} - {fmt(resistance)}"
+        else:
+            key = f"حمایت {fmt(support)} | مقاومت {fmt(resistance)}"
+    elif support is not None:
+        key = f"حمایت {fmt(support)}"
+    elif resistance is not None:
+        key = f"مقاومت {fmt(resistance)}"
+    else:
+        key = "سطح کلیدی در دسترس نیست"
+
     if resistance is not None:
-        key.append(f"R {fmt(resistance)}")
-    key_text = " ↔ ".join(key) if key else "N/A"
-
-    if trend == "BULLISH":
-        bullish = f"حفظ بالای {fmt(resistance) if resistance is not None else price_text}" if resistance is not None else "حفظ روند صعودی"
-        bearish = f"شکست زیر {fmt(support)}" if support is not None else "شکست حمایت"
-    elif trend == "BEARISH":
-        bullish = f"بازپس‌گیری {fmt(support) if support is not None else price_text}" if support is not None else "بازگشت بالای مقاومت"
-        bearish = f"شکست زیر {fmt(support)}" if support is not None else "ادامه روند نزولی"
+        bull = f"حفظ و تثبیت بالای {fmt(resistance)}"
+    elif entry is not None:
+        bull = f"تثبیت بالای {fmt(entry)}"
     else:
-        bullish = f"شکست و تثبیت بالای {fmt(resistance)}" if resistance is not None else "تأیید روند صعودی"
-        bearish = f"شکست زیر {fmt(support)}" if support is not None else "تأیید روند نزولی"
+        bull = "تأیید ادامه روند صعودی"
 
     if tp1 is not None:
-        bullish += f" → TP1 {fmt(tp1)}"
+        bull += f"، هدف اول {fmt(tp1)}"
     if tp2 is not None:
-        bullish += f" / TP2 {fmt(tp2)}"
-    if sl is not None:
-        bearish += f" → SL {fmt(sl)}"
+        bull += f" و هدف دوم {fmt(tp2)}"
 
-    tv = tradingview_chart_url(symbol, metal=metal)
-    return (
-        f"🔹 {symbol} | {status} | {price_text} | Trend {trend}\n"
-        f"   کلیدی: {key_text}\n"
-        f"   🟢 صعودی: {bullish}\n"
-        f"   🔴 نزولی: {bearish}\n"
-        f"   📊 Chart: {tv}" if tv else
-        f"🔹 {symbol} | {status} | {price_text} | Trend {trend}\n"
-        f"   کلیدی: {key_text}\n"
-        f"   🟢 صعودی: {bullish}\n"
-        f"   🔴 نزولی: {bearish}"
-    )
+    if support is not None:
+        bear = f"شکست زیر {fmt(support)}"
+    elif sl is not None:
+        bear = f"شکست سطح دفاعی {fmt(sl)}"
+    else:
+        bear = "از دست رفتن حمایت کلیدی"
+
+    if sl is not None:
+        bear += f"، حد ریسک {fmt(sl)}"
+
+    # For metals the same table structure is used; no separate verbose block.
+    return {
+        "ارز": symbol,
+        "وضعیت کلی": overall,
+        "نقطه‌ی کلیدی": key,
+        "سناریوی صعودی": bull,
+        "سناریوی نزولی (اصلاح)": bear,
+        "status": status,
+        "price": price,
+        "change": change,
+    }
 
 
 def _compact_section(title, rows, metal=False):
     lines = [title, "───────────────────"]
     if not rows:
         lines.append("⚪ داده‌ای برای نمایش وجود ندارد.")
-    else:
-        lines.extend(_compact_scenario_row(r, metal=metal) for r in rows)
+        return "\n".join(lines)
+
+    for r in rows:
+        x = _compact_scenario_row(r, metal=metal)
+        lines.append(
+            f"🔹 {x['ارز']} | {x['وضعیت کلی']}\n"
+            f"   نقطه‌ی کلیدی: {x['نقطه‌ی کلیدی']}\n"
+            f"   🟢 صعودی: {x['سناریوی صعودی']}\n"
+            f"   🔴 نزولی (اصلاح): {x['سناریوی نزولی (اصلاح)']}"
+        )
     return "\n".join(lines)
 
 
+def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
+    """Short final recommendation, derived from current engine state."""
+    rows = [r for r in (results or []) if isinstance(r, dict)]
+    rsi_vals = [f(r.get("rsi")) for r in rows if f(r.get("rsi")) is not None]
+    overbought = sum(1 for x in rsi_vals if x >= 70)
+    bullish = sum(1 for r in rows if str(r.get("h4_trend") or "").upper() == "BULLISH")
+    bearish = sum(1 for r in rows if str(r.get("h4_trend") or "").upper() == "BEARISH")
+    regime = str(btc_regime or "").upper()
+    if not rows:
+        return "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید جهت بازار و شکل‌گیری سطوح حمایتی معتبر بمانید."
+
+    if overbought >= max(3, len(rsi_vals) // 4) and bearish >= bullish * 0.35:
+        return (
+            "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر یک اصلاح قیمت "
+            "(pullback) به سطوح حمایتی کلیدی باشید. با توجه به اینکه بخشی از شاخص‌ها "
+            "نشان از اشباع خرید و کاهش قدرت دارند، هرگونه ورود جدید در قیمت‌های فعلی "
+            "ریسک بالایی دارد. منتظر شفاف‌تر شدن جهت بازار باشید."
+        )
+    if regime == "BEARISH" or bearish > bullish:
+        return (
+            "توصیه نهایی: فعلاً HOLD باشید و از ورود عجولانه خودداری کنید. "
+            "ابتدا تثبیت قیمت روی حمایت‌های کلیدی و تغییر تأییدشده ساختار روند را انتظار بکشید."
+        )
+    if bullish > bearish * 1.5 and overbought < max(3, len(rsi_vals) // 3):
+        return (
+            "توصیه نهایی: روند فعلاً متمایل به صعود است؛ ورود فقط روی شکست و تثبیت "
+            "مقاومت‌های کلیدی یا pullback کنترل‌شده به حمایت‌ها منطقی است. از تعقیب قیمت "
+            "پس از جهش‌های تند خودداری کنید."
+        )
+    return (
+        "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید شفاف‌تر جهت بازار "
+        "یا یک pullback به سطوح حمایتی کلیدی بمانید. ورود در شرایط نامطمئن ریسک بهینه‌ای ندارد."
+    )
+
+
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    """MARKET engine: compact table-like output only; analysis stays internal."""
+    """MARKET engine: only the compact table-style dashboard is exposed."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
     market_results = [
         r for r in (results or [])
@@ -3389,26 +3455,33 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)
         if str(x).upper() not in personal_symbols
     ]
-    top10_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
-    top10_rows = [top10_map[s] for s in top10_order if s in top10_map]
-    dynamic_set = {str(x).upper() for x in (dynamic30 or []) if str(x).upper() not in personal_symbols and str(x).upper() not in set(top10_order)}
     result_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
-    dyn30_rows = [result_map[s] for s in (str(x).upper() for x in (dynamic30 or [])) if s in dynamic_set and s in result_map]
-    dt = now_tehran()
+    top10_rows = [result_map[s] for s in top10_order if s in result_map]
+    top10_names = set(top10_order)
+    dyn30_rows = [
+        result_map[str(x).upper()]
+        for x in (dynamic30 or [])
+        if str(x).upper() in result_map
+        and str(x).upper() not in top10_names
+        and str(x).upper() not in personal_symbols
+    ]
 
+    metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
+    dt = now_tehran()
     lines = [
         "🤖 ATLAS AI — MARKET 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
         _compact_section("📡 ATLAS TOP 10", top10_rows),
-        _compact_section("📡 DYNAMIC TOP 30 — همه دارایی‌های خارج از Top 10 و Personal", dyn30_rows),
-        _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", [_metal_analysis(x) for x in ATLAS_METALS], metal=True),
+        _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
+        _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
+        _final_market_recommendation(results, top10_rows, dyn30_rows, macro, btc_regime),
     ]
     return "\n\n".join(lines)
 
 
 def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
-    """PERSONAL engine: all configured portfolio assets, compact output only."""
+    """PERSONAL engine: all portfolio assets, same compact table format."""
     rows = _portfolio_rows(results)
     dt = now_tehran()
     return "\n\n".join([
@@ -3416,6 +3489,7 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
+        _final_market_recommendation(rows, [], [], macro, btc_regime),
     ])
 
 
