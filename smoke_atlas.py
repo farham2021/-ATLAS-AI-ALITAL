@@ -22,7 +22,7 @@ funcs = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncF
 required = [
     "build_report", "build_personal_report", "build_two_engine_reports",
     "atlas_engine_mode", "analyze_coin", "main",
-    "tradingview_chart_url", "build_price_snapshot",
+    "tradingview_chart_url", "build_price_snapshot", "_compact_scenario_row", "_compact_section",
     "send_price_snapshot", "fetch_usdt_toman_public",
     "fetch_snapshot_results", "_automatic_run_plan",
 ]
@@ -39,7 +39,7 @@ checks = {
     "single personal_report alias": funcs.count("personal_report") == 1,
     "two-engine": all(x in s for x in ("MARKET", "PERSONAL", "BOTH")),
     "personal portfolio": "ATLAS_PERSONAL_ASSETS" in s,
-    "market excludes personal": "market_results" in s and "exclude_symbols=personal_symbols" in s,
+    "market excludes personal": "market_results" in s and "not in personal_symbols" in s,
     "metals": "ATLAS_METALS" in s and all(x in s for x in ("GOLD", "SILVER", "COPPER")),
     "TradingView links": "tradingview.com/chart/?symbol=" in s,
     "separate 3h snapshot": "send_price_snapshot" in s and "این پیام هر ۳ ساعت" in s,
@@ -48,6 +48,12 @@ checks = {
     "public Iranian USDT sources": all(x in s.lower() for x in ("wallex.ir", "excoino.com", "nobitex.ir")),
     "KCEX CCXT source": '"kcex"' in s,
     "closed-candle logic": "strip_incomplete" in s and "candle_is_closed" in s,
+    "compact table output": all(x in s for x in ("_compact_scenario_row", "کلیدی:", "🟢 صعودی:", "🔴 نزولی:")),
+    "no verbose market headings": "TOP 5 OPPORTUNITIES" not in s[s.index("def build_report"):s.index("def build_personal_report")],
+    "no verbose personal headings": "🧠 ATLAS MEMORY / CALIBRATION" not in s[s.index("def build_personal_report"):s.index("def personal_report")],
+    "all dynamic30 output": "dyn30_rows" in s and "همه دارایی‌های خارج از Top 10 و Personal" in s,
+    "metals in compact market output": "ATLAS METALS — GOLD / SILVER / COPPER" in s,
+
 }
 for name, ok in checks.items():
     if not ok:
