@@ -135,6 +135,8 @@ REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.5
 
 MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
+TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
 BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
@@ -373,6 +375,11 @@ def init_sqlite():
             destination text not null,
             sent_at text not null,
             primary key(report_hash, destination)
+        );
+        create table if not exists snapshot_prices(
+            symbol text primary key,
+            price real not null,
+            captured_at text not null
         );
         create table if not exists backtest_gate_cache(
             id integer primary key check(id=1),
@@ -1613,6 +1620,29 @@ def weekly_pivot(rows):
         return None
     return (max(highs) + min(lows) + closes_[-1]) / 3.0
 
+
+def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
+    """Deterministic safety gate: reject impossible/contradictory trade geometry."""
+    direction = str(direction or "").upper()
+    entry, sl, tp1, tp2 = map(f, (entry, sl, tp1, tp2))
+    if direction not in ("LONG", "SHORT") or None in (entry, sl, tp1, tp2):
+        return False, "missing trade levels"
+    if min(x <= 0 for x in (entry, sl, tp1, tp2)):
+        return False, "non-positive trade level"
+    if direction == "LONG":
+        if not (sl < entry < tp1 < tp2):
+            return False, "invalid LONG geometry"
+    else:
+        if not (sl > entry > tp1 > tp2):
+            return False, "invalid SHORT geometry"
+    rr = _rr_from_values(entry, sl, tp2)
+    if rr is None or rr <= 0:
+        return False, "invalid R/R"
+    required_rr = MIN_EXECUTABLE_RR if min_rr is None else float(min_rr)
+    if rr < required_rr:
+        return False, f"R/R below {required_rr:.2f}"
+    return True, None
+
 def calculate_levels(rows, direction, daily_levels=None):
     """
     Build structural levels from CLOSED candles.
@@ -1690,10 +1720,9 @@ def calculate_levels(rows, direction, daily_levels=None):
         if tp4 is not None and (tp3 is None or tp4 >= tp3):
             tp4 = None
 
-    # Structural sanity.
-    if direction == "LONG" and not (sl < entry < tp1 <= tp2):
-        return None
-    if direction == "SHORT" and not (sl > entry > tp1 >= tp2):
+    # Structural sanity + deterministic trade geometry gate.
+    valid, _reason = _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None)
+    if not valid:
         return None
 
     return {
@@ -3116,7 +3145,9 @@ def _ensure_candidate_plan(r):
     for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4"):
         r[k] = levels.get(k)
     r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
-    if r.get("rr") is None:
+    valid, reason = _validate_trade_geometry(r.get("direction"), r.get("entry"), r.get("sl"), r.get("tp1"), r.get("tp2"), min_rr=None)
+    if not valid:
+        r["gate_reason"] = f"Trade geometry blocked: {reason}"
         return _clear_trade_plan(r)
     return r
 
@@ -3186,15 +3217,6 @@ def asset_block(r, metal=False, detail=False):
         lines.append(f"📊 Chart: {tv}")
     return "\n".join(lines)
 
-def _portfolio_rows(results):
-    by = {str(r.get("coin")).upper(): r for r in (results or []) if r.get("coin")}
-    rows=[]
-    for sym in ATLAS_PERSONAL_ASSETS:
-        if sym in by:
-            rows.append(_ensure_candidate_plan(by[sym]))
-        else:
-            rows.append({"coin":sym,"action":"NO DATA","confidence":0,"h4_trend":"N/A","d1_trend":"N/A","w1_trend":"N/A","reason":"داده در دسترس نیست"})
-    return rows
 
 
 def _opportunity_score(r):
@@ -3409,6 +3431,57 @@ def _compact_section(title, rows, metal=False):
     return "\n".join(lines)
 
 
+
+def _table_status(r):
+    h4 = str(r.get("h4_trend") or "").upper()
+    d1 = str(r.get("d1_trend") or "").upper()
+    if h4 == "BULLISH" and d1 == "BULLISH":
+        return "BULL"
+    if h4 == "BEARISH" and d1 == "BEARISH":
+        return "BEAR"
+    if h4 == "BULLISH":
+        return "BULL?"
+    if h4 == "BEARISH":
+        return "BEAR?"
+    return "WAIT"
+
+def _compact_dashboard_table(title, rows):
+    """Telegram-safe monospace table; no HTML/Markdown dependency."""
+    cols = ("ASSET", "STATUS", "PRICE", "SUPPORT", "RESIST")
+    data=[]
+    for r in rows or []:
+        sym=str(r.get("coin") or r.get("symbol") or "?").upper()
+        data.append((sym, _table_status(r), fmt(r.get("price")), fmt(r.get("support")), fmt(r.get("resistance"))))
+    if not data:
+        return f"{title}\n───────────────────\nداده‌ای برای جدول موجود نیست."
+    widths=[len(x) for x in cols]
+    for row in data:
+        widths=[max(w,len(str(v))) for w,v in zip(widths,row)]
+    header="  ".join(str(v).ljust(widths[i]) for i,v in enumerate(cols))
+    sep="  ".join("-"*w for w in widths)
+    lines=[title,"───────────────────",header,sep]
+    for row in data:
+        lines.append("  ".join(str(v).ljust(widths[i]) for i,v in enumerate(row)))
+    return "\n".join(lines)
+
+def build_dashboard_table(results, top10, dynamic30):
+    """Separate table message covering all requested universes + metals."""
+    personal_symbols={str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    by={str(r.get("coin") or "").upper():r for r in (results or []) if r.get("coin")}
+    top10_rows=[by[s] for s in (top10 or ATLAS_PRIORITY_TOP10) if str(s).upper() not in personal_symbols and str(s).upper() in by]
+    dynamic_rows=[by[str(s).upper()] for s in (dynamic30 or []) if str(s).upper() in by and str(s).upper() not in personal_symbols and str(s).upper() not in {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}]
+    personal_rows=_portfolio_rows(results)
+    metals=[_metal_analysis(x) for x in ATLAS_METALS]
+    blocks=[
+        "📊 ATLAS AI — DASHBOARD TABLE",
+        "━━━━━━━━━━━━━━━━━━",
+        _compact_dashboard_table("📡 MARKET TOP 10 (EX-PERSONAL)", top10_rows),
+        _compact_dashboard_table("📡 DYNAMIC TOP 30 (ALL CANDIDATES)", dynamic_rows),
+        _compact_dashboard_table("💼 PERSONAL PORTFOLIO", personal_rows),
+        _compact_dashboard_table("🪙 ATLAS METALS", metals),
+    ]
+    return "\n\n".join(blocks)
+
 def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
     """Short final recommendation, derived from current engine state."""
     rows = [r for r in (results or []) if isinstance(r, dict)]
@@ -3458,13 +3531,14 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     result_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
     top10_rows = [result_map[s] for s in top10_order if s in result_map]
     top10_names = set(top10_order)
-    dyn30_rows = [
+    dyn30_all_rows = [
         result_map[str(x).upper()]
         for x in (dynamic30 or [])
         if str(x).upper() in result_map
         and str(x).upper() not in top10_names
         and str(x).upper() not in personal_symbols
     ]
+    dyn30_rows = dynamic_top8(market_results, [r.get("coin") for r in dyn30_all_rows], exclude_symbols=personal_symbols)
 
     metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
     dt = now_tehran()
@@ -4060,9 +4134,51 @@ def fetch_snapshot_results():
     return rows
 
 
-def build_price_snapshot(results, updated_at=None):
+
+def _snapshot_previous_prices():
+    try:
+        con=sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            rows=con.execute("select symbol, price from snapshot_prices").fetchall()
+            return {str(sym).upper(): float(price) for sym,price in rows if price is not None}
+        finally:
+            con.close()
+    except Exception:
+        return {}
+
+def _snapshot_direction(current, previous):
+    current=f(current); previous=f(previous)
+    if current is None or previous is None or previous <= 0:
+        return "➡️"
+    delta_pct=(current-previous)/previous*100.0
+    if abs(delta_pct) < SNAPSHOT_FLAT_THRESHOLD_PCT:
+        return "➡️"
+    return "⬆️" if delta_pct > 0 else "⬇️"
+
+def _save_snapshot_prices(results, captured_at):
+    try:
+        con=sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            con.execute("create table if not exists snapshot_prices(symbol text primary key, price real not null, captured_at text not null)")
+            for r in results or []:
+                sym=str(r.get("coin") or "").upper()
+                price=f(r.get("price"))
+                if sym and price is not None and price > 0:
+                    con.execute(
+                        "insert into snapshot_prices(symbol,price,captured_at) values(?,?,?) "
+                        "on conflict(symbol) do update set price=excluded.price,captured_at=excluded.captured_at",
+                        (sym, price, captured_at),
+                    )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        append_changelog("SNAPSHOT_STATE", None, None, f"save failed: {e}")
+
+def build_price_snapshot(results, updated_at=None, previous_prices=None):
     by_coin={str(r.get("coin") or "").upper():r for r in (results or [])}
     dt=updated_at or now_tehran()
+    previous_prices = previous_prices if previous_prices is not None else _snapshot_previous_prices()
     weekdays=("دوشنبه","سه‌شنبه","چهارشنبه","پنجشنبه","جمعه","شنبه","یکشنبه")
     lines=[
         f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
@@ -4081,8 +4197,7 @@ def build_price_snapshot(results, updated_at=None):
         if price is None:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
-        ch=f(r.get("change24"))
-        arrow="⬆️" if ch is not None and ch>0 else "⬇️" if ch is not None and ch<0 else "➡️"
+        arrow=_snapshot_direction(price, previous_prices.get(sym))
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
     lines.append("───────────────────")
     usdt=fetch_usdt_toman_public()
@@ -4095,9 +4210,13 @@ def build_price_snapshot(results, updated_at=None):
 
 
 def send_price_snapshot(results):
-    """Send the snapshot as a separate Telegram message, never merged into reports."""
-    payload=build_price_snapshot(results)
+    """Send snapshot separately; persist comparison state only after successful delivery."""
+    captured_at=now_tehran().isoformat()
+    previous=_snapshot_previous_prices()
+    payload=build_price_snapshot(results, previous_prices=previous)
     parts,sent,errors=send_report(payload)
+    if sent == parts and sent > 0:
+        _save_snapshot_prices(results, captured_at)
     return sent,errors
 
 def _automatic_run_plan(now=None):
@@ -4136,6 +4255,7 @@ def main():
                 results, top10, dynamic30, macro, news, market_info,
                 unavailable, btc_regime, breadth
             )
+            outputs.append(build_dashboard_table(results, top10, dynamic30))
             for payload in outputs:
                 parts,sent,errors=send_report(payload)
                 total_sent += sent
