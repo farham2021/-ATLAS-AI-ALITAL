@@ -1,5 +1,5 @@
-# ============================================================
-# ATLAS AI v11.0 — UNIFIED TWO-ENGINE DECISION ENGINE
+#============================================================
+# ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
 # v11.0 architecture:
@@ -58,7 +58,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.0 UNIFIED TWO-ENGINE"
+VERSION = "ATLAS v11.1 UNIFIED TWO-ENGINE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -3041,6 +3041,166 @@ def send_report(text):
     return len(parts), sent, errors
 
 
+
+# ============================================================
+# DATA EXPORT — DYNAMIC CSV FROM THE SAME RESULTS OBJECT
+# ============================================================
+
+CSV_COLUMNS = (
+    "Group", "Symbol", "Status", "DecisionState", "Price", "Change24H",
+    "Support", "Resistance", "Entry", "SL", "TP1", "TP2", "TP3", "TP4",
+    "R/R", "Confidence", "H4Trend", "D1Trend", "W1Trend", "RSI", "MACD",
+    "Volume", "VolumeRatio", "ATR_pct", "Liquidity", "Gate", "GateReason",
+    "Direction", "RepeatSignal", "Reason", "ModelVersion",
+)
+
+def _csv_group(symbol, top10, dynamic30, personal_symbols):
+    s = str(symbol or "").upper()
+    if s in personal_symbols:
+        return "PERSONAL_PORTFOLIO"
+    if s in {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}:
+        return "MARKET_TOP10"
+    if s in {str(x).upper() for x in (dynamic30 or [])}:
+        return "DYNAMIC_TOP30"
+    return "ATLAS_RADAR"
+
+def _csv_status(r):
+    state = str(r.get("decision_state") or r.get("action") or "WAIT").upper()
+    if state in ("BUY", "BUY CONFIRMATION"):
+        return "BUY"
+    if state in ("SELL", "SELL CONFIRMATION", "SELL / REDUCE"):
+        return "SELL"
+    if state in ("BULLISH WATCH", "BEARISH WATCH", "WATCH"):
+        return "WATCH"
+    if state == "NO DATA":
+        return "NO DATA"
+    return "HOLD"
+
+def _csv_number(value, digits=8):
+    v = f(value)
+    if v is None:
+        return ""
+    return round(v, digits)
+
+def _csv_safe_plan(r):
+    """Return only geometrically valid executable/conditional levels."""
+    direction = r.get("direction")
+    entry, sl, tp1, tp2 = (f(r.get(k)) for k in ("entry", "sl", "tp1", "tp2"))
+    if None in (entry, sl, tp1, tp2):
+        return None
+    valid, _ = _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None)
+    if not valid:
+        return None
+    return entry, sl, tp1, tp2
+
+def generate_csv_report(results, top10, dynamic30):
+    """Generate a complete, dynamic export from current engine results.
+
+    No values are hard-coded. The CSV contains every current Dynamic Top-30
+    candidate, every personal asset, every priority Top-10 asset and all three
+    metals, with invalid trade geometry suppressed rather than exported.
+    """
+    import csv, io
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    top10_set = {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}
+    dynamic_set = {str(x).upper() for x in (dynamic30 or [])}
+    result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
+
+    ordered = []
+    for sym in list(top10 or ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS):
+        s = str(sym).upper()
+        if s and s not in ordered:
+            ordered.append(s)
+    for metal in ATLAS_METALS:
+        if metal not in ordered:
+            ordered.append(metal)
+
+    rows = []
+    for sym in ordered:
+        r = result_map.get(sym)
+        if r is None and sym in ATLAS_METALS:
+            r = _metal_analysis(sym)
+        if not r:
+            continue
+        plan = _csv_safe_plan(r)
+        entry = sl = tp1 = tp2 = tp3 = tp4 = rr = ""
+        if plan:
+            entry, sl, tp1, tp2 = plan
+            tp3, tp4 = f(r.get("tp3")), f(r.get("tp4"))
+            rr = _rr_from_values(entry, sl, tp2)
+        rows.append([
+            _csv_group(sym, top10, dynamic30, personal_symbols),
+            sym,
+            _csv_status(r),
+            str(r.get("decision_state") or r.get("action") or "WAIT"),
+            _csv_number(r.get("price")), _csv_number(r.get("change"), 4),
+            _csv_number(r.get("support")), _csv_number(r.get("resistance")),
+            _csv_number(entry), _csv_number(sl), _csv_number(tp1), _csv_number(tp2),
+            _csv_number(tp3), _csv_number(tp4),
+            _csv_number(rr, 3), _csv_number(r.get("confidence"), 2),
+            r.get("h4_trend", "UNKNOWN"), r.get("d1_trend", "UNKNOWN"),
+            r.get("w1_trend", "UNKNOWN"), _csv_number(r.get("rsi"), 2),
+            r.get("macd", ""), r.get("volume", ""), _csv_number(r.get("volume_ratio"), 3),
+            _csv_number(r.get("atr_pct"), 3), r.get("liquidity", ""),
+            r.get("gate", ""), r.get("gate_reason", ""), r.get("direction", ""),
+            bool(r.get("repeat_signal")), r.get("reason", ""), VERSION,
+        ])
+
+    out = io.StringIO(newline="")
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(CSV_COLUMNS)
+    writer.writerows(rows)
+    return out.getvalue()
+
+def _telegram_send_document(chat_id, content, filename, caption=None):
+    """Send a UTF-8 CSV as a real Telegram document using stdlib only."""
+    import uuid
+    if not TELEGRAM_TOKEN or not chat_id:
+        raise RuntimeError("Telegram secrets missing")
+    boundary = "----ATLAS" + uuid.uuid4().hex
+    body = bytearray()
+    def field(name, value):
+        body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode())
+    field("chat_id", str(chat_id))
+    if caption:
+        field("caption", caption)
+    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\nContent-Type: text/csv; charset=utf-8\r\n\r\n").encode())
+    body.extend(content.encode("utf-8-sig"))
+    body.extend(f"\r\n--{boundary}--\r\n".encode())
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data=json.loads(resp.read().decode("utf-8", errors="replace"))
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram sendDocument failed: {data}")
+    return data
+
+def send_csv_report(results, top10, dynamic30):
+    """Send one dynamically generated CSV to every configured destination."""
+    content = generate_csv_report(results, top10, dynamic30)
+    if not content.strip():
+        return 0, ["CSV is empty"]
+    dt = now_tehran()
+    filename = f"atlas_report_{shamsi(dt).replace('/','')}_{dt.strftime('%H%M%S')}.csv"
+    caption = f"📎 ATLAS AI — CSV کامل | {VERSION} | {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران"
+    destinations=[]
+    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if chat_id and chat_id not in destinations:
+            destinations.append(chat_id)
+    sent=0; errors=[]
+    for chat_id in destinations:
+        try:
+            _telegram_send_document(chat_id, content, filename, caption)
+            sent += 1
+        except Exception as e:
+            errors.append(f"CSV {chat_id}: {e}")
+            append_changelog("CSV_EXPORT", None, None, str(e), {"traceback": traceback.format_exc()})
+    return sent, errors
+
 # ============================================================
 # REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
 # ============================================================
@@ -3517,6 +3677,37 @@ def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regi
     )
 
 
+
+def _best_setup_block(results, universe_filter=None, title="🔥 BEST SETUP"):
+    """Choose only a real, geometrically valid setup; overbought is a risk modifier, not a buy signal."""
+    allowed={str(x).upper() for x in universe_filter} if universe_filter is not None else None
+    candidates=[]
+    for raw in results or []:
+        r=_ensure_candidate_plan(dict(raw or {}))
+        sym=str(r.get("coin") or "").upper()
+        if allowed is not None and sym not in allowed: continue
+        state=str(r.get("decision_state") or r.get("action") or "").upper()
+        if state not in ("BUY CONFIRMATION","SELL CONFIRMATION","BUY","SELL"): continue
+        if r.get("repeat_signal"): continue
+        plan=_csv_safe_plan(r)
+        if not plan: continue
+        rr=_rr_from_values(*plan[:2], plan[3])
+        if rr is None or rr < MIN_EXECUTABLE_RR: continue
+        conf=float(r.get("confidence") or 0)
+        rsi_v=f(r.get("rsi"))
+        penalty=12 if rsi_v is not None and rsi_v>=80 else 7 if rsi_v is not None and rsi_v>=75 else 0
+        score=conf + min(rr,5)*5 + float(r.get("liquidity_score") or 0)*0.05 - penalty
+        candidates.append((score,r,rr,rsi_v))
+    if not candidates:
+        return title + ": هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد."
+    _,r,rr,rsi_v=max(candidates,key=lambda x:x[0])
+    direction="BUY" if str(r.get("direction"))=="LONG" else "SELL"
+    entry,sl,tp1,tp2=_csv_safe_plan(r)
+    risk_note=" | RSI اشباع خرید" if rsi_v is not None and rsi_v>=75 else ""
+    return (f"{title}: {r.get('coin')} — {direction} — R/R 1:{rr:.2f}\n"
+            f"   Entry: {fmt(entry)} | SL: {fmt(sl)} | TP1: {fmt(tp1)} | TP2: {fmt(tp2)}\n"
+            f"   Confidence: {float(r.get('confidence') or 0):.0f}% | H4/D1: {r.get('h4_trend','UNKNOWN')}/{r.get('d1_trend','UNKNOWN')}{risk_note}")
+
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     """MARKET engine: only the compact table-style dashboard is exposed."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
@@ -3546,6 +3737,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "🤖 ATLAS AI — MARKET 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        _best_setup_block(market_results),
         _compact_section("📡 ATLAS TOP 10", top10_rows),
         _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
         _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
@@ -3562,6 +3754,7 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP"),
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
         _final_market_recommendation(rows, [], [], macro, btc_regime),
     ])
@@ -4262,6 +4455,10 @@ def main():
                 all_errors.extend(errors)
                 print(payload)
             analysis_results = results
+            csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
+            total_sent += csv_sent
+            all_errors.extend(csv_errors)
+            print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
             save_context(macro,news,market_liquidity_index(results),market_info)
             save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
 
