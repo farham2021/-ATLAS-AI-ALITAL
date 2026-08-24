@@ -1,8 +1,8 @@
-# ============================================================
-# ATLAS AI v10.2 — TWO ENGINE CORRECTED DECISION BUILD
+============================================================
+# ATLAS AI v11.0 — UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
-# v10.2 architecture:
+# v11.0 architecture:
 # - Fixed portfolio symbols (user-defined, never changes)
 # - Compact dashboard-style report output
 # - BTC pair filtering with dynamic volume threshold
@@ -57,7 +57,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.2 TWO-ENGINE CORRECTED"
+VERSION = "ATLAS v11.0 UNIFIED TWO-ENGINE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -138,7 +138,7 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v102.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -296,7 +296,7 @@ def safe_json(value):
 
 def http_get(url, timeout=15, headers=None):
     h = {
-        "User-Agent": "ATLAS-AI/10.2",
+        "User-Agent": "ATLAS-AI/11.0",
         "Accept": "application/json,application/xml,text/xml,*/*",
     }
     if headers:
@@ -544,7 +544,7 @@ def append_changelog(component, old, new, reason, evidence=None):
 
 def _http_json(url, headers=None, timeout=12):
     try:
-        req = urllib.request.Request(url, headers=headers or {"User-Agent": "ATLAS-AI/10.2"})
+        req = urllib.request.Request(url, headers=headers or {"User-Agent": "ATLAS-AI/11.0"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception:
@@ -2332,7 +2332,7 @@ def atlas_decision_board(results, btc_regime, breadth):
     best = buys[0] if buys else (sells[0] if sells else None)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        "🎯 ATLAS v10 DECISION BOARD",
+        "🎯 ATLAS v11 DECISION BOARD",
         f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
         f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
     ]
@@ -2900,7 +2900,7 @@ def telegram_api_get_me():
         raise RuntimeError("TELEGRAM_TOKEN missing")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
-        headers={"User-Agent": "ATLAS-AI/10.2"},
+        headers={"User-Agent": "ATLAS-AI/11.0"},
     )
     with urllib.request.urlopen(req, timeout=20) as r:
         raw = r.read().decode("utf-8", errors="replace")
@@ -3375,7 +3375,7 @@ def personal_report(*args, **kwargs):
 
 
 def atlas_engine_mode():
-    mode=(os.environ.get("ATLAS_ENGINE") or "MARKET").strip().upper()
+    mode=(os.environ.get("ATLAS_ENGINE") or "BOTH").strip().upper()
     return mode if mode in {"MARKET","PERSONAL","BOTH"} else "MARKET"
 
 
@@ -3741,7 +3741,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v10.2 complete: fixed portfolio + market + self-healing",
+            "notes": "v11.0 complete: unified market + personal + metals + snapshot + self-healing",
         },
     )
 
@@ -3819,6 +3819,150 @@ def personal_report(*args, **kwargs):
     """Compatibility alias for the full personal-report engine."""
     return build_personal_report(*args, **kwargs)
 
+
+# ============================================================
+# ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT
+# ============================================================
+SNAPSHOT_SYMBOLS = ("BTC","ETH","XRP","SOL","BNB","DOGE","ADA","TRX","LINK","XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR")
+PUBLIC_USDT_PAGES = (
+    "https://wallex.ir/price/usdt",
+    "https://www.excoino.com/coins",
+    "https://nobitex.ir/usdt/",
+)
+
+
+def _snapshot_price_text(value):
+    v = f(value)
+    if v is None:
+        return None
+    if v >= 1:
+        return f"${v:,.2f}" if v < 10000 else f"${v:,.0f}"
+    if v >= 0.1:
+        return f"${v:.2f}"
+    if v >= 0.01:
+        return f"${v:.4f}"
+    if v >= 0.0001:
+        return f"${v:.6f}"
+    return f"${v:.8f}"
+
+
+def _public_page_text(url):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 ATLAS-AI/11.0", "Accept": "text/html,application/xhtml+xml"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read().decode("utf-8", errors="ignore")
+
+
+def _parse_usdt_toman_page(url, html):
+    """Parse public exchange HTML only; no exchange API/key is used."""
+    compact = re.sub(r"\\s+", " ", html or "")
+    values = []
+
+    # Wallex publishes the current USDT/Toman quote directly in تومان.
+    wallex_patterns = (
+        r"قیمت تتر به تومان برابر است با:\s*</?[^>]*>\s*([0-9۰-۹][0-9۰-۹,٬]*)",
+        r"آخرین قیمت تتر.*?([0-9۰-۹][0-9۰-۹,٬]{4,})\s*تومان",
+        r"USDT.*?([0-9۰-۹][0-9۰-۹,٬]{4,})\s*تومان",
+    )
+    for pat in wallex_patterns:
+        for m in re.finditer(pat, compact, re.I):
+            raw = m.group(1).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")).replace(",", "").replace("٬", "")
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            if 50000 <= v <= 1000000:
+                values.append(v)
+        if values:
+            return median(values)
+
+    # Excoino exposes its local quote in ریال; convert to تومان exactly once.
+    for m in re.finditer(r"USDT.{0,900}?([0-9][0-9,]{5,})\s*ریال.{0,120}?([0-9][0-9,]{5,})\s*ریال", compact, re.I):
+        try:
+            a = float(m.group(1).replace(",", "")) / 10.0
+            b = float(m.group(2).replace(",", "")) / 10.0
+        except ValueError:
+            continue
+        vals = [x for x in (a, b) if 50000 <= x <= 1000000]
+        if vals:
+            return median(vals)
+
+    # Generic تومان/IRT/IRR patterns for public exchange pages.
+    generic = (
+        r"(?:USDT|Tether|تتر).{0,250}?([0-9][0-9,]{4,})\s*(?:تومان|IRT)",
+        r"(?:USDT|Tether|تتر).{0,250}?([0-9][0-9,]{5,})\s*IRR",
+    )
+    for pat in generic:
+        for m in re.finditer(pat, compact, re.I):
+            try:
+                v = float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if 50000 <= v <= 1000000:
+                values.append(v)
+        if values:
+            return median(values)
+    return None
+
+
+def fetch_usdt_toman_public():
+    """Read USDT/Toman from reputable Iranian exchange web pages, without API keys."""
+    candidates = []
+    for url in PUBLIC_USDT_PAGES:
+        try:
+            html = _public_page_text(url)
+            value = _parse_usdt_toman_page(url, html)
+            if value is not None:
+                candidates.append((float(value), url))
+        except Exception as e:
+            append_changelog("USDT_PUBLIC_SOURCE", None, None, f"{url}: {e}")
+    if not candidates:
+        return None
+    # Median protects the snapshot from one stale/abnormal public page.
+    return round(median([x[0] for x in candidates]), 0)
+
+def build_price_snapshot(results, updated_at=None):
+    by_coin={str(r.get("coin") or "").upper():r for r in (results or [])}
+    dt=updated_at or now_tehran()
+    weekdays=("دوشنبه","سه‌شنبه","چهارشنبه","پنجشنبه","جمعه","شنبه","یکشنبه")
+    lines=[
+        f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
+        "",
+        f"⏰ آخرین بروزرسانی : {dt.strftime('%H:%M:%S')}",
+        "",
+        "📊 وضعیت بازار ارزهای دیجیتال:",
+        "───────────────────",
+    ]
+    for sym in SNAPSHOT_SYMBOLS:
+        r=by_coin.get(sym)
+        if not r:
+            lines.append(f"🔹 ➖{sym:<6}:   N/A")
+            continue
+        price=f(r.get("price"))
+        if price is None:
+            lines.append(f"🔹 ➖{sym:<6}:   N/A")
+            continue
+        ch=f(r.get("change24"))
+        arrow="⬆️" if ch is not None and ch>0 else "⬇️" if ch is not None and ch<0 else "➡️"
+        lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
+    lines.append("───────────────────")
+    usdt=fetch_usdt_toman_public()
+    if usdt is None:
+        lines.append("💵 🟡 نرخ تتر  :   در دسترس نیست")
+    else:
+        lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
+    lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
+    return "\n".join(lines)
+
+
+def send_price_snapshot(results):
+    """Send the snapshot as a separate Telegram message, never merged into reports."""
+    payload=build_price_snapshot(results)
+    parts,sent,errors=send_report(payload)
+    return sent,errors
+
 def main():
     try:
         telegram_preflight()
@@ -3835,6 +3979,9 @@ def main():
             total_sent += sent
             all_errors.extend(errors)
             print(payload)
+        snapshot_sent, snapshot_errors = send_price_snapshot(results)
+        total_sent += snapshot_sent
+        all_errors.extend(snapshot_errors)
         save_context(macro,news,market_liquidity_index(results),market_info)
         save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
         if all_errors or total_sent==0:
