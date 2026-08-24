@@ -54,6 +54,13 @@ checks = {
     "no verbose personal headings": "🧠 ATLAS MEMORY / CALIBRATION" not in s[s.index("def build_personal_report"):s.index("def personal_report")],
     "all dynamic30 output": "dyn30_rows" in s and "DYNAMIC TOP 30" in s and "خارج از Top 10 و Personal" in s,
     "metals in compact market output": "ATLAS METALS — GOLD / SILVER / COPPER" in s,
+    "trade geometry gate": "_validate_trade_geometry" in s and "invalid LONG geometry" in s and "invalid SHORT geometry" in s,
+    "negative/contradictory TP blocked": "non-positive trade level" in s and "Trade geometry blocked" in s,
+    "snapshot compares previous price": "_snapshot_previous_prices" in s and "_snapshot_direction" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
+    "snapshot persists after successful send": "if sent == parts and sent > 0" in s and "_save_snapshot_prices" in s,
+    "dashboard table": "build_dashboard_table" in s and "ATLAS AI — DASHBOARD TABLE" in s and "PERSONAL PORTFOLIO" in s,
+    "dynamic30 compact output capped": "dyn30_all_rows" in s and "dynamic_top8(" in s,
+    "no duplicate portfolio function": s.count("def _portfolio_rows(") == 1,
 
 }
 for name, ok in checks.items():
