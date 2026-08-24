@@ -25,14 +25,14 @@ required = [
     "tradingview_chart_url", "build_price_snapshot",
     "_compact_scenario_row", "_compact_section", "_final_market_recommendation",
     "send_price_snapshot", "fetch_usdt_toman_public",
-    "fetch_snapshot_results", "_automatic_run_plan",
+    "fetch_snapshot_results", "_automatic_run_plan", "generate_csv_report", "send_csv_report", "_best_setup_block",
 ]
 missing = [x for x in required if x not in funcs]
 if missing:
     fail("missing required functions: " + ", ".join(missing))
 
 checks = {
-    "version v11.0": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.0', s, re.M)),
+    "version v11.1": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.1', s, re.M)),
     "no stale v10 markers": not bool(re.search(r'ATLAS v10|v10\.[0-9]|10\.2', s)),
     "single build_report": funcs.count("build_report") == 1,
     "single build_personal_report": funcs.count("build_personal_report") == 1,
@@ -61,6 +61,11 @@ checks = {
     "dashboard table": "build_dashboard_table" in s and "ATLAS AI — DASHBOARD TABLE" in s and "PERSONAL PORTFOLIO" in s,
     "dynamic30 compact output capped": "dyn30_all_rows" in s and "dynamic_top8(" in s,
     "no duplicate portfolio function": s.count("def _portfolio_rows(") == 1,
+    "dynamic CSV export": "CSV_COLUMNS" in s and "def generate_csv_report(" in s and "def send_csv_report(" in s,
+    "CSV includes all universes": all(x in s for x in ("MARKET_TOP10", "DYNAMIC_TOP30", "PERSONAL_PORTFOLIO")),
+    "best setup validation": "def _best_setup_block(" in s and "MIN_EXECUTABLE_RR" in s and "repeat_signal" in s,
+    "CSV invalid geometry suppressed": "_csv_safe_plan" in s and "_validate_trade_geometry" in s,
+    "snapshot arrows": "⬆️" in s and "⬇️" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
 
 }
 for name, ok in checks.items():
@@ -68,6 +73,6 @@ for name, ok in checks.items():
         fail(name)
 
 compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.0 unified two-engine + metals + snapshot smoke test")
+print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot smoke test")
 for name in checks:
     print("  OK:", name)
