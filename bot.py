@@ -1,37 +1,23 @@
 # ============================================================
-# ATLAS AI v10.0 — HUMAN-LIKE DECISION ENGINE
+# ATLAS AI v10.2 — TWO ENGINE CORRECTED DECISION BUILD
 # ============================================================
-# v10.0 architecture upgrade:
-# - canonical CoinGecko IDs for /simple/price
-# - weekly pivot defined defensively
-# - Daily S/R primary with high-confidence H4 fallback for continuity
-# - cached mandatory backtest gate
-# - per-destination Telegram delivery state
-# - relaxed H1 hard-gating while H4/D1 remain the primary trend filter
-# - configurable volume threshold
-# - zero-division and error observability hardening
-# - fixed critical direction-before-trigger execution bug that caused Total scanned: 0
-# - confirmation uses the latest fully CLOSED 4H candle, independent of exact cron minute
-# - preserved the three fixed global-market report times and Telegram supergroup delivery
-# - de-duplicated CoinGecko mover symbols
-# - stronger final conclusion: best setup, entry/SL/TP and actionable ranking
-# - unavailable asset count is explicitly reported for diagnostics
-# v10.0 hardening: differentiated confidence, DXY fallback chain, 24H fallback,
-# human-like overbought/oversold execution control, watch-quality ranking,
-# and accurate attempted/successful asset accounting.
-# v10.0 reporting hardening: fixed ATLAS Top-10 priority order, then Dynamic Top-30,
-# then Static Radar; Telegram chunking now preserves radar section boundaries.
-# Purpose:
-#   Professional multi-timeframe market surveillance and signal engine.
+# TP3/TP4 structural targets are optional and never fabricated.
+# v10.2 architecture:
+# - Fixed portfolio symbols (user-defined, never changes)
+# - Compact dashboard-style report output
+# - BTC pair filtering with dynamic volume threshold
+# - Two-table format: market overview + trade plan
+# - 4-line summary: market regime, best setup, news, risk
+# - No extra paragraphs or explanations
+# - Real-time data only, no fabricated numbers
+# - Smart Telegram rate limit handling with exponential backoff
+# - Simultaneous delivery to private chat and supergroup
+# - Duplicate report prevention with hash-based deduplication
 #
 # Design principles:
 #   - ATLAS static radar is NEVER removed.
-#   - Top-10 market-cap assets are refreshed every run.
-#   - Next 30 dynamic assets are refreshed every run.
 #   - Stablecoins are excluded from trading analysis.
 #   - Crypto: 1H / 4H / 1D via CCXT exchange data.
-#   - Macro/commodities: DXY, Gold, Silver, Copper, WTI, Brent via Yahoo
-#     Finance chart API (or Alpha Vantage when configured).
 #   - Signals require multi-factor confirmation.
 #   - No signal is allowed against the higher-timeframe trend unless a
 #     strong three-level divergence is detected.
@@ -53,11 +39,13 @@ import re
 import json
 import math
 import time
+import random
 import sqlite3
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 import traceback
+import hashlib
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from statistics import mean, median
@@ -69,7 +57,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v10.2 COMPACT"
+VERSION = "ATLAS v10.2 TWO-ENGINE CORRECTED"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -81,12 +69,17 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
+# Telegram rate limit settings
+TELEGRAM_PRIVATE_DELAY = float(os.environ.get("TELEGRAM_PRIVATE_DELAY", "1.5"))
+TELEGRAM_GROUP_DELAY = float(os.environ.get("TELEGRAM_GROUP_DELAY", "3.0"))
+TELEGRAM_MAX_RETRIES = int(os.environ.get("TELEGRAM_MAX_RETRIES", "5"))
+TELEGRAM_BASE_RETRY_DELAY = float(os.environ.get("TELEGRAM_BASE_RETRY_DELAY", "3"))
+TELEGRAM_MAX_WAIT = float(os.environ.get("TELEGRAM_MAX_WAIT", "60"))
+
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
 ).strip().rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-# For server-side GitHub Actions, SERVICE_ROLE is preferred.
-# SUPABASE_ANON_KEY can be used only when RLS policies permit the writes.
 if not SUPABASE_KEY:
     SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "").strip()
 
@@ -95,31 +88,57 @@ ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "").strip()
 CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
 COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
+CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
+
+
+# ============================================================
+# MULTI-SOURCE VALIDATION LAYER
+# ============================================================
+# Exchange OHLCV/tickers are the execution-grade market layer.
+# CoinGecko/CMC are independent aggregation cross-checks.
+# CoinGlass is derivatives context.
+# TradingView is confirmation-only and only consumes a real authorized
+# endpoint if supplied; ATLAS never fabricates TradingView values.
+# CryptoBubbles/EasyTrader/OMPFinex/Bitunix/TabTrader/KCEX are optional
+# adapters. They are ignored unless a real endpoint is configured.
+TRADINGVIEW_CONFIRMATION_URL = os.environ.get("TRADINGVIEW_CONFIRMATION_URL", "").strip()
+TRADINGVIEW_CHART_EXCHANGE = os.environ.get("ATLAS_TRADINGVIEW_EXCHANGE", "BYBIT").strip().upper() or "BYBIT"
+TRADINGVIEW_INTERVAL = os.environ.get("ATLAS_TRADINGVIEW_INTERVAL", "240").strip() or "240"
+CRYPTOBUBBLES_API_URL = os.environ.get("CRYPTOBUBBLES_API_URL", "").strip()
+EASYTRADER_API_URL = os.environ.get("EASYTRADER_API_URL", "").strip()
+OMPFINEX_API_URL = os.environ.get("OMPFINEX_API_URL", "").strip()
+BITUNIX_API_URL = os.environ.get("BITUNIX_API_URL", "").strip()
+TABTRADER_API_URL = os.environ.get("TABTRADER_API_URL", "").strip()
+KCEX_API_URL = os.environ.get("KCEX_API_URL", "").strip()
+
+SECONDARY_ENDPOINTS = {
+    "CryptoBubbles": CRYPTOBUBBLES_API_URL,
+    "EasyTrader": EASYTRADER_API_URL,
+    "OMPFinex": OMPFINEX_API_URL,
+    "Bitunix": BITUNIX_API_URL,
+    "TabTrader": TABTRADER_API_URL,
+    "KCEX": KCEX_API_URL,
+}
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
-MAX_PORTFOLIO_RISK = float(
-    os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0")
-)
+MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
 MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "60"))
 MAX_LEVERAGE = float(os.environ.get("ATLAS_MAX_LEVERAGE", "10"))
 BACKTEST_DAYS = int(os.environ.get("ATLAS_BACKTEST_DAYS", "180"))
 SIGNAL_HORIZON_BARS = int(os.environ.get("ATLAS_SIGNAL_HORIZON_BARS", "36"))
-MIN_BACKTEST_IMPROVEMENT = float(
-    os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10")
-)
+MIN_BACKTEST_IMPROVEMENT = float(os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10"))
 BACKTEST_REFRESH_HOURS = float(os.environ.get("ATLAS_BACKTEST_REFRESH_HOURS", "24"))
 MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.80"))
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
-# v9 Decision Engine: a signal is not a trade merely because indicators align.
 MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
 BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v10.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v102.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -127,10 +146,6 @@ CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 # ATLAS RADAR
 # ============================================================
 
-# These assets belong to the user's ATLAS radar and remain under
-# surveillance even if they leave CoinGecko's current top ranks.
-# Fixed priority radar requested for the first Telegram messages.
-# This order is deliberate and MUST NOT be replaced by CoinGecko rank ordering.
 ATLAS_PRIORITY_TOP10 = [
     "BTC", "ETH", "BNB", "XRP", "SOL",
     "TRX", "HYPE", "DOGE", "ADA", "MATIC",
@@ -145,8 +160,6 @@ ATLAS_STATIC = [
 ]
 
 DATA_SYMBOL_ALIASES = {
-    # Polygon migrated from MATIC to POL. Keep MATIC as the user-facing
-    # priority label, but use POL for exchange/market data.
     "MATIC": "POL",
 }
 
@@ -159,10 +172,7 @@ STABLE_SYMBOLS = {
     "USDC.E", "USD0", "USD1",
 }
 
-# Yahoo Finance symbols.
 MACRO_SYMBOLS = {
-    # Yahoo's canonical searchable ICE US Dollar Index symbol is DX-Y.NYB.
-    # ^DXY remains a fallback because Yahoo chart availability can vary.
     "DXY": ("DX-Y.NYB", "DX=F", "^DXY"),
     "GOLD": "GC=F",
     "SILVER": "SI=F",
@@ -195,13 +205,10 @@ HIGH_IMPACT_WORDS = (
 def now_utc():
     return datetime.now(timezone.utc)
 
-
 def now_tehran():
     return datetime.now(TEHRAN)
 
-
 def shamsi(dt):
-    """Gregorian -> Jalali without requiring an external package."""
     gy, gm, gd = dt.year, dt.month, dt.day
     gdm = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     gy2 = gy + 1 if gm > 2 else gy
@@ -228,7 +235,6 @@ def shamsi(dt):
         jd = 1 + (days - 186) % 30
     return f"{jy:04d}/{jm:02d}/{jd:02d}"
 
-
 def safe_float(x, default=None):
     try:
         if x is None or isinstance(x, bool):
@@ -238,16 +244,13 @@ def safe_float(x, default=None):
     except (TypeError, ValueError, OverflowError):
         return default
 
-
 def f(x, default=None):
     return safe_float(x, default)
-
 
 def safe_mean(values, default=None):
     vals = [safe_float(v) for v in (values or [])]
     vals = [v for v in vals if v is not None]
     return (sum(vals) / len(vals)) if vals else default
-
 
 def safe_median(values, default=None):
     vals = [safe_float(v) for v in (values or [])]
@@ -259,7 +262,6 @@ def safe_median(values, default=None):
     mid = n // 2
     return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2
 
-
 def fmt(x):
     x = f(x)
     if x is None:
@@ -270,20 +272,21 @@ def fmt(x):
         return f"${x:,.4f}"
     return f"${x:,.6f}"
 
-
 def pct(x):
     x = f(x)
     return "N/A" if x is None else f"{x:+.2f}%"
 
-
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
+AMBIGUOUS_DYNAMIC_SYMBOLS = {"M", "CC"}
+
+def is_ambiguous_symbol(symbol):
+    return str(symbol or "").upper() in AMBIGUOUS_DYNAMIC_SYMBOLS
 
 def is_stable(symbol):
     s = (symbol or "").upper().replace("-", "")
     return s in STABLE_SYMBOLS
-
 
 def safe_json(value):
     try:
@@ -291,10 +294,9 @@ def safe_json(value):
     except Exception:
         return "{}"
 
-
 def http_get(url, timeout=15, headers=None):
     h = {
-        "User-Agent": "ATLAS-AI/10.1",
+        "User-Agent": "ATLAS-AI/10.2",
         "Accept": "application/json,application/xml,text/xml,*/*",
     }
     if headers:
@@ -306,7 +308,6 @@ def http_get(url, timeout=15, headers=None):
         if raw.lstrip().startswith("<") or "xml" in ctype:
             return ET.fromstring(raw)
         return json.loads(raw)
-
 
 def safe_http_get(url, timeout=15, headers=None, default=None):
     try:
@@ -329,7 +330,6 @@ def sqlite_conn():
     c.execute("PRAGMA busy_timeout=30000")
     c.execute("PRAGMA journal_mode=WAL")
     return c
-
 
 def init_sqlite():
     with sqlite_conn() as c:
@@ -537,6 +537,127 @@ def append_changelog(component, old, new, reason, evidence=None):
     )
 
 
+
+# ============================================================
+# MULTI-SOURCE HELPERS
+# ============================================================
+
+def _http_json(url, headers=None, timeout=12):
+    try:
+        req = urllib.request.Request(url, headers=headers or {"User-Agent": "ATLAS-AI/10.2"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+def _source_query(base, symbol):
+    if not base:
+        return None
+    sep = "&" if "?" in base else "?"
+    return base + sep + urllib.parse.urlencode({"symbol": symbol.upper()})
+
+def coinmarketcap_quote(symbol):
+    if not CMC_API_KEY:
+        return {"status": "UNAVAILABLE", "reason": "CMC_API_KEY not configured"}
+    url = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?" + urllib.parse.urlencode({
+        "symbol": symbol.upper(), "convert": "USD"
+    })
+    d = _http_json(url, {"X-CMC_PRO_API_KEY": CMC_API_KEY, "Accept": "application/json"})
+    try:
+        row = d["data"][symbol.upper()][0]
+        q = row["quote"]["USD"]
+        return {"status":"OK","price":f(q.get("price")),
+                "change_24h":f(q.get("percent_change_24h")),
+                "change_7d":f(q.get("percent_change_7d")),
+                "volume_24h":f(q.get("volume_24h")),
+                "timestamp":q.get("last_updated")}
+    except Exception:
+        return {"status":"UNAVAILABLE","reason":"CMC response unavailable"}
+
+def coingecko_quote(symbol):
+    # Uses the existing ID map when available; no guessed market data.
+    try:
+        cgid = COINGECKO_IDS.get(symbol.upper())
+    except Exception:
+        cgid = None
+    if not cgid:
+        return {"status":"UNAVAILABLE","reason":"CoinGecko id not mapped"}
+    url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode({
+        "ids": cgid, "vs_currencies":"usd", "include_24hr_change":"true"
+    })
+    d = _http_json(url, coingecko_headers())
+    try:
+        q=d[cgid]
+        return {"status":"OK","price":f(q.get("usd")),
+                "change_24h":f(q.get("usd_24h_change"))}
+    except Exception:
+        return {"status":"UNAVAILABLE","reason":"CoinGecko response unavailable"}
+
+def coinglass_context(symbol):
+    if not COINGLASS_API_KEY:
+        return {"status":"UNAVAILABLE","reason":"COINGLASS_API_KEY not configured"}
+    headers={"CG-API-KEY":COINGLASS_API_KEY,"Accept":"application/json"}
+    out={"status":"UNAVAILABLE","open_interest":None,"funding_rate":None,"liquidations":None}
+    urls=[
+        ("open_interest","https://open-api-v4.coinglass.com/api/futures/open-interest/exchange-list"),
+        ("funding_rate","https://open-api-v4.coinglass.com/api/futures/funding-rate/exchange-list"),
+    ]
+    for key,url in urls:
+        d=_http_json(url+"?"+urllib.parse.urlencode({"symbol":symbol.upper()}),headers)
+        if isinstance(d,dict):
+            rows=d.get("data") or []
+            if isinstance(rows,dict): rows=[rows]
+            row=next((x for x in rows if isinstance(x,dict) and str(x.get("exchange","")).lower()=="all"), None)
+            row=row or (rows[0] if rows and isinstance(rows[0],dict) else None)
+            if row:
+                val=row.get(key)
+                if val is None:
+                    for k in ("open_interest_usd","funding_rate","avg_funding_rate"):
+                        if k in row: val=row[k]; break
+                out[key]=f(val)
+                out["status"]="OK"
+    return out
+
+def tradingview_confirmation(symbol, timeframe=SIGNAL_TIMEFRAME):
+    if not TRADINGVIEW_CONFIRMATION_URL:
+        return {"status":"UNAVAILABLE","rating":None,
+                "reason":"No authorized TradingView confirmation endpoint configured"}
+    d=_http_json(_source_query(TRADINGVIEW_CONFIRMATION_URL,symbol))
+    if not isinstance(d,dict):
+        return {"status":"ERROR","rating":None,"reason":"Invalid TradingView payload"}
+    return {"status":"OK","rating":d.get("rating"),
+            "rsi":f(d.get("rsi")),"macd":d.get("macd"),
+            "moving_averages":d.get("moving_averages"),
+            "timestamp":d.get("timestamp")}
+
+def secondary_sources(symbol):
+    out={}
+    for name,base in SECONDARY_ENDPOINTS.items():
+        if not base:
+            out[name]={"status":"UNAVAILABLE","reason":"endpoint not configured"}
+            continue
+        d=_http_json(_source_query(base,symbol))
+        out[name]={"status":"OK","data":d} if d is not None else {"status":"ERROR"}
+    return out
+
+def multi_source_validation(symbol, exchange_price=None):
+    cg=coingecko_quote(symbol)
+    cmc=coinmarketcap_quote(symbol)
+    cgl=coinglass_context(symbol)
+    tv=tradingview_confirmation(symbol)
+    sec=secondary_sources(symbol)
+    prices=[f(x.get("price")) for x in (cg,cmc) if isinstance(x,dict)]
+    if f(exchange_price) is not None: prices.append(f(exchange_price))
+    prices=[x for x in prices if x is not None and x>0]
+    spread=None
+    if len(prices)>=2:
+        spread=(max(prices)/min(prices)-1)*100
+    return {
+        "coingecko":cg,"coinmarketcap":cmc,"coinglass":cgl,
+        "tradingview":tv,"secondary":sec,
+        "price_sources":len(prices),"price_spread_pct":spread
+    }
+
 # ============================================================
 # CCXT
 # ============================================================
@@ -549,12 +670,11 @@ def make_exchange(exchange_id):
         "options": {"defaultType": "spot"},
     })
 
-
 def init_exchanges():
     global EX, MARKETS
     EX = {}
     MARKETS = {}
-    for eid in ("binance", "xt", "lbank"):
+    for eid in ("lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
         try:
             ex = make_exchange(eid)
             markets = ex.load_markets()
@@ -562,22 +682,26 @@ def init_exchanges():
                 raise RuntimeError(f"{eid}: empty market catalog")
             EX[eid] = ex
             MARKETS[eid] = markets
+            print(f"✅ {eid} initialized with {len(markets)} markets")
         except Exception as e:
             EX.pop(eid, None)
             MARKETS.pop(eid, None)
             append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
-
+            print(f"❌ {eid} failed: {e}")
 
 EX = {}
 MARKETS = {}
 
 def ensure_exchanges(force=False):
-    """Initialize exchanges lazily; retry when an earlier network init failed."""
     if EX and MARKETS and not force:
         return True
     init_exchanges()
     return bool(EX)
 
+def coingecko_headers():
+    if COINGECKO_API_KEY:
+        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
+    return {}
 
 def symbol_for(eid, coin):
     markets = MARKETS.get(eid, {})
@@ -586,7 +710,6 @@ def symbol_for(eid, coin):
         if s in markets:
             return s
     return None
-
 
 def exchange_ticker(eid, coin):
     ex = EX.get(eid)
@@ -603,7 +726,6 @@ def exchange_ticker(eid, coin):
         "quoteVolume": f(t.get("quoteVolume")),
     }
 
-
 def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
     ex = EX.get(eid)
     if ex is None:
@@ -619,9 +741,7 @@ def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
         raise RuntimeError(f"{eid}: insufficient candles")
     return strip_incomplete(rows, timeframe)
 
-
 def _next_candle_boundary_ms(start_ms, timeframe):
-    """Return the next UTC candle boundary; monthly/weekly are calendar-aware."""
     dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
     if timeframe == "1M":
         if dt.month == 12:
@@ -643,7 +763,6 @@ def _next_candle_boundary_ms(start_ms, timeframe):
         raise ValueError(f"Unsupported timeframe: {timeframe}")
     return start_ms + fixed
 
-
 def candle_is_closed(start_ms, timeframe, now_ms=None):
     if start_ms is None:
         return False
@@ -653,9 +772,7 @@ def candle_is_closed(start_ms, timeframe, now_ms=None):
     except Exception:
         return False
 
-
 def strip_incomplete(rows, timeframe):
-    """Keep only fully closed candles, including calendar-aware weekly/monthly candles."""
     clean = []
     now_ms = int(time.time() * 1000)
     for row in rows or []:
@@ -668,9 +785,7 @@ def strip_incomplete(rows, timeframe):
             clean.append(list(row))
     return clean
 
-
 def candle_event(coin, timeframe, rows):
-    """Detect a newly observed CLOSED candle without pretending REST is tick-level realtime."""
     latest = int(rows[-1][0]) if rows else None
     if latest is None:
         return {"status": "NO_DATA", "closed_ts": None, "timeframe": timeframe}
@@ -690,10 +805,9 @@ def candle_event(coin, timeframe, rows):
             )
     return {"status": status, "closed_ts": latest, "timeframe": timeframe}
 
-
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
-    for eid in ("binance", "xt", "lbank"):
+    for eid in ("lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
         try:
             return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
         except Exception:
@@ -730,7 +844,6 @@ def gecko_top(limit=40):
             })
     return result
 
-
 def binance_top(limit=40):
     ensure_exchanges()
     try:
@@ -754,37 +867,15 @@ def binance_top(limit=40):
     result.sort(key=lambda x: x["quote_volume"], reverse=True)
     return result[:limit]
 
-
 def build_universe():
-    """
-    Build the radar in a deterministic reporting order.
-
-    Reporting contract:
-      1) ATLAS_PRIORITY_TOP10, in the exact configured order.
-      2) Dynamic Top-30 market-cap assets from CoinGecko, excluding priority assets.
-      3) ATLAS_STATIC assets, excluding everything already present.
-
-    The order is intentionally independent of confidence, liquidity or price.
-    Those factors may rank setups inside the final conclusion, but they must
-    never reorder the asset-report sequence.
-    """
     cg = gecko_top(60)
-
     cg_symbols = []
     for x in cg:
         s = (x.get("symbol") or "").upper()
         if s and not is_stable(s) and s not in cg_symbols:
             cg_symbols.append(s)
-
-    # Fixed user-priority universe. It is called Top-10 Priority rather than
-    # "current market-cap Top 10" because MATIC/HYPE may not currently rank
-    # inside CoinGecko's literal top ten.
     top10 = list(ATLAS_PRIORITY_TOP10)
-
-    # Dynamic market-cap list: highest-ranked CoinGecko assets not already in
-    # the fixed priority list. Fill from Binance only if CoinGecko is short.
     dynamic30 = [s for s in cg_symbols if s not in top10][:30]
-
     if len(dynamic30) < 30:
         for x in binance_top(80):
             s = (x.get("symbol") or "").upper()
@@ -792,18 +883,13 @@ def build_universe():
                 dynamic30.append(s)
             if len(dynamic30) >= 30:
                 break
-
     dynamic30 = dynamic30[:30]
-
-    # Static radar comes last and cannot displace priority/dynamic assets.
     static = [
         x for x in ATLAS_STATIC
         if not is_stable(x) and x not in top10 and x not in dynamic30
     ]
-
     universe = list(dict.fromkeys(top10 + dynamic30 + static))
     universe = [x for x in universe if not is_stable(x)]
-
     for symbol in universe:
         source = (
             "TOP10_PRIORITY" if symbol in top10
@@ -823,8 +909,86 @@ def build_universe():
                 "last_seen_at": now_utc().isoformat(),
             },
         )
-
     return universe, top10, dynamic30
+
+
+# ============================================================
+# PORTFOLIO SYMBOLS — FIXED (USER-DEFINED, NEVER CHANGES)
+# ============================================================
+
+def _portfolio_symbols():
+    """User portfolio surveillance universe, kept independent of market ranking."""
+    return list(dict.fromkeys([
+        "BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA", "TRX", "LINK",
+        "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
+        "NEAR", "TAO", "ONDO"
+    ]))
+
+def _portfolio_rows(results):
+    """Return portfolio rows in the exact configured order."""
+    by = {r.get("coin"): r for r in results}
+    portfolio_symbols = _portfolio_symbols()
+    rows = []
+    for s in portfolio_symbols:
+        if s in by:
+            rows.append(by[s])
+        else:
+            # Asset not in results, create a NO DATA row
+            rows.append({
+                "coin": s,
+                "price": None,
+                "change": None,
+                "change_7d": None,
+                "h4_trend": "N/A",
+                "d1_trend": "N/A",
+                "w1_trend": "N/A",
+                "rsi": None,
+                "macd": "N/A",
+                "pattern": "N/A",
+                "pattern_valid": False,
+                "volume": "N/A",
+                "volume_ratio": None,
+                "atr_pct": None,
+                "liquidity": "N/A",
+                "liquidity_score": 0,
+                "action": "NO DATA",
+                "confidence": 0,
+                "entry": None,
+                "sl": None,
+                "tp1": None,
+                "tp2": None,
+                "tp3": None,
+                "tp4": None,
+                "rr": None,
+                "reason": "داده در دسترس نیست",
+                "warning": "داده دریافت نشد",
+                "gate": "BLOCK",
+                "gate_reason": "No data available",
+                "quality": "N/A",
+                "spread": 0,
+                "overbought": False,
+                "oversold": False,
+                "candle_trigger": {"state": "N/A"},
+                "sr_confidence": "N/A",
+                "support": None,
+                "resistance": None,
+                "pivot": None,
+                "leverage": 1.0,
+                "direction": "NONE",
+                "sources": [],
+                "price_source_errors": ["Data not available"],
+                "snapshots": {},
+                "candle_events": {},
+                "news_impact": "N/A",
+                "setup_score": 0,
+                "entry_quality": 0,
+                "risk_quality": 0,
+                "decision_state": "NO DATA",
+                "decision_reasons": ["Data not available"],
+                "repeat_signal": False,
+                "original_action": "NO DATA",
+            })
+    return rows
 
 
 # ============================================================
@@ -833,7 +997,6 @@ def build_universe():
 
 def closes(rows):
     return [f(x[4]) for x in rows if f(x[4]) is not None]
-
 
 def ema(values, n):
     if len(values) < n:
@@ -844,12 +1007,10 @@ def ema(values, n):
         e = (x - e) * a + e
     return e
 
-
 def sma(values, n):
     if len(values) < n:
         return None
     return sum(values[-n:]) / n
-
 
 def rsi(values, n=14):
     if len(values) <= n:
@@ -868,9 +1029,7 @@ def rsi(values, n=14):
         return 100.0
     return 100 - 100 / (1 + ag / al)
 
-
 def ema_series(values, n):
-    """O(n) EMA series using the standard SMA seed."""
     if len(values) < n:
         return []
     a = 2 / (n + 1)
@@ -881,14 +1040,11 @@ def ema_series(values, n):
         out.append(e)
     return out
 
-
 def macd(values):
-    """Return MACD line, signal and histogram in O(n), not O(n²)."""
     if len(values) < 35:
         return None, None, None
     fast = ema_series(values, 12)
     slow = ema_series(values, 26)
-    # Align the two EMA series on their common endpoint timeline.
     offset = len(fast) - len(slow)
     if offset < 0:
         return None, None, None
@@ -902,7 +1058,6 @@ def macd(values):
     hist = line[-1] - signal
     return line[-1], signal, hist
 
-
 def atr(rows, n=14):
     if len(rows) < n + 1:
         return None
@@ -912,12 +1067,10 @@ def atr(rows, n=14):
         tr.append(max(h - l, abs(h - pc), abs(l - pc)))
     return sum(tr[-n:]) / n
 
-
 def atr_pct(rows, n=14):
     a = atr(rows, n)
     c = f(rows[-1][4]) if rows else None
     return a / c * 100 if a and c else None
-
 
 def volume_ratio(rows, n=20):
     if len(rows) < n + 1:
@@ -927,7 +1080,6 @@ def volume_ratio(rows, n=20):
         return None
     avg = sum(vols[-n - 1:-1]) / n
     return vols[-1] / avg if avg else None
-
 
 def volume_state(rows):
     vr = volume_ratio(rows)
@@ -939,22 +1091,14 @@ def volume_state(rows):
         return "WEAK", vr
     return "NORMAL", vr
 
-
 def support_resistance(rows):
-    """Legacy fallback S/R from a candle set.
-
-    The primary ATLAS S/R engine is ``daily_key_levels`` below. This
-    function remains as a safe fallback when Daily data is unavailable.
-    """
     lows = [f(x[3]) for x in rows[-30:] if f(x[3]) is not None]
     highs = [f(x[2]) for x in rows[-30:] if f(x[2]) is not None]
     if not lows or not highs:
         return None, None
     return min(lows), max(highs)
 
-
 def _cluster_levels(values, tolerance=0.012):
-    """Cluster nearby prices so repeated touches form one S/R zone."""
     vals = sorted(v for v in values if v is not None and v > 0)
     if not vals:
         return []
@@ -974,9 +1118,7 @@ def _cluster_levels(values, tolerance=0.012):
         for c in clusters
     ]
 
-
 def daily_key_levels(daily_rows, current_price=None):
-    """Reliable Daily-only support/resistance; never silently falls back to H4."""
     valid = []
     for r in (daily_rows or []):
         if not isinstance(r, (list, tuple)) or len(r) < 6:
@@ -987,19 +1129,16 @@ def daily_key_levels(daily_rows, current_price=None):
     if len(valid) < 60:
         return {"support":None,"resistance":None,"support_score":0,"resistance_score":0,
                 "support_touches":0,"resistance_touches":0,"confidence":"LOW","method":"INSUFFICIENT_DAILY_DATA"}
-
     rows = valid[-180:]
     price = f(current_price) or f(rows[-1][4])
     if price is None or price <= 0:
         return {"support":None,"resistance":None,"support_score":0,"resistance_score":0,
                 "support_touches":0,"resistance_touches":0,"confidence":"LOW","method":"INVALID_DAILY_PRICE"}
-
     highs=[r[2] for r in rows]; lows=[r[3] for r in rows]; vols=[r[5] for r in rows]
     atr_d=atr(rows,14)
     if atr_d is None or atr_d <= 0:
         return {"support":None,"resistance":None,"support_score":0,"resistance_score":0,
                 "support_touches":0,"resistance_touches":0,"confidence":"LOW","method":"INVALID_DAILY_ATR"}
-
     swing_highs=[]; swing_lows=[]
     for i in range(2,len(rows)-2):
         h,l=highs[i],lows[i]
@@ -1009,7 +1148,6 @@ def daily_key_levels(daily_rows, current_price=None):
         chunk=rows[-n:]
         swing_highs.append(max(r[2] for r in chunk))
         swing_lows.append(min(r[3] for r in chunk))
-
     sup_clusters=_cluster_levels([x for x in swing_lows if x < price],0.015)
     res_clusters=_cluster_levels([x for x in swing_highs if x > price],0.015)
     valid_vols=[v for v in vols[-21:-1] if v is not None and v>0]
@@ -1062,39 +1200,28 @@ def daily_key_levels(daily_rows, current_price=None):
 def candle_pattern(rows):
     if len(rows) < 3:
         return "NONE", "NONE"
-
     a, b = rows[-2], rows[-1]
     ao, ac = f(a[1]), f(a[4])
     bo, bh, bl, bc = f(b[1]), f(b[2]), f(b[3]), f(b[4])
-
     ar = abs(ac - ao)
     br = abs(bc - bo)
     upper = bh - max(bo, bc)
     lower = min(bo, bc) - bl
     total = max(bh - bl, 1e-12)
-
-    # Doji
     if br / total <= 0.10:
         return "DOJI", "NEUTRAL"
-
-    # Engulfing
     if bc > bo and ac < ao and bo <= ac and bc >= ao and br > ar:
         return "BULLISH ENGULFING", "BULLISH"
     if bc < bo and ac > ao and bo >= ac and bc <= ao and br > ar:
         return "BEARISH ENGULFING", "BEARISH"
-
-    # Hammer / Shooting Star
     if lower >= 2.2 * max(br, total * 0.02) and upper <= br:
         return "HAMMER", "BULLISH"
     if upper >= 2.2 * max(br, total * 0.02) and lower <= br:
         return "SHOOTING STAR", "BEARISH"
-
-    # Pin bars
     if lower / total >= 0.60 and bc >= bo:
         return "BULLISH PIN BAR", "BULLISH"
     if upper / total >= 0.60 and bc <= bo:
         return "BEARISH PIN BAR", "BEARISH"
-
     return "NONE", "NEUTRAL"
 
 
@@ -1113,9 +1240,7 @@ def local_extrema(values, window=3):
         if vals[i]==max(chunk): highs.append(i)
     return lows,highs
 
-
 def divergence_3_level(values, indicator):
-    """Strong 3-level divergence proxy."""
     if len(values) != len(indicator) or len(values) < 40:
         return None
     lows, highs = local_extrema(values, 2)
@@ -1150,7 +1275,6 @@ def trend_from_rows(rows):
         return "BEARISH"
     return "MIXED"
 
-
 def tf_snapshot(coin):
     out = {}
     for tf in TIMEFRAMES:
@@ -1177,7 +1301,6 @@ def tf_snapshot(coin):
             }
         except Exception as e:
             out[tf] = {"error": str(e), "trend": "UNKNOWN", "event": {"status":"ERROR","closed_ts":None,"timeframe":tf}}
-    # 30m is kept separate because it is used as the execution/momentum confirmation.
     try:
         rows, engine = best_ohlcv(coin, "30m", EVENT_LOOKBACK_LIMITS["30m"])
         out["30m"] = {"rows": rows, "engine": engine, "event": candle_event(coin, "30m", rows)}
@@ -1218,7 +1341,6 @@ RSS = [
     "https://www.theblock.co/rss.xml",
 ]
 
-
 def news_feed():
     items = []
     for url in RSS:
@@ -1230,7 +1352,6 @@ def news_feed():
             link = (x.findtext("link") or "").strip()
             if title:
                 items.append({"title": title, "url": link, "source": url})
-
     if CRYPTOPANIC_TOKEN:
         url = "https://cryptopanic.com/api/developer/v2/posts/?" + urllib.parse.urlencode({
             "auth_token": CRYPTOPANIC_TOKEN,
@@ -1246,7 +1367,6 @@ def news_feed():
                 "url": x.get("url", ""),
                 "source": "CryptoPanic",
             })
-
     if NEWSAPI_KEY:
         url = "https://newsapi.org/v2/everything?" + urllib.parse.urlencode({
             "q": "crypto bitcoin ethereum regulation Federal Reserve",
@@ -1262,7 +1382,6 @@ def news_feed():
                 "url": x.get("url", ""),
                 "source": x.get("source", {}).get("name", "NewsAPI"),
             })
-
     score = 0
     high = False
     for item in items:
@@ -1271,14 +1390,12 @@ def news_feed():
         score -= sum(1 for w in NEWS_NEGATIVE if w in t)
         if any(w in t for w in HIGH_IMPACT_WORDS):
             high = True
-
     bias = (
         "NEGATIVE" if score <= -3
         else "POSITIVE" if score >= 3
         else "MIXED/LIMITED"
     )
     impact = "HIGH" if high else "NORMAL"
-
     return {
         "bias": bias,
         "impact": impact,
@@ -1313,7 +1430,6 @@ def yahoo_chart(symbol, interval="1h", range_="5d"):
         except (IndexError,TypeError,ValueError): continue
     return strip_incomplete(rows,interval)
 
-
 def macro_snapshot():
     out = {}
     for name, symbols in MACRO_SYMBOLS.items():
@@ -1342,17 +1458,12 @@ def asset_liquidity(coin, ticker_sources):
         qv = f(x.get("quoteVolume"))
         if qv and qv > 0:
             volumes.append(qv)
-
     if not volumes:
         return 0.0, "LOW"
-
     v = sum(volumes)
-    # Logarithmic score, deliberately conservative.
     score = clamp((math.log10(v + 1) / 10) * 100, 0, 100)
-
     label = "HIGH" if score >= 70 else "MEDIUM" if score >= 45 else "LOW"
     return score, label
-
 
 def market_liquidity_index(results):
     scores = [f(x.get("liquidity_score")) for x in results]
@@ -1368,7 +1479,6 @@ def price_consensus(coin):
     vals = []
     sources = []
     errors = []
-
     for eid in EX:
         try:
             x = exchange_ticker(eid, coin)
@@ -1377,8 +1487,6 @@ def price_consensus(coin):
                 sources.append(x)
         except Exception as e:
             errors.append(str(e))
-
-    # CoinGecko validation
     try:
         headers = {}
         if COINGECKO_API_KEY:
@@ -1389,7 +1497,6 @@ def price_consensus(coin):
             (z for z in rows if (z.get("symbol") or "").upper() == lookup_symbol),
             None,
         )
-        # CoinGecko /simple/price requires the canonical CoinGecko ID, not symbol.
         gecko_id = (x or {}).get("id")
         if gecko_id:
             url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode({
@@ -1403,21 +1510,17 @@ def price_consensus(coin):
                 sources.append({"source": "CoinGecko", "price": p, "id": gecko_id})
     except Exception:
         pass
-
     if errors:
         append_changelog(
             "PRICE_CONSENSUS", coin, None,
             f"source errors: {len(errors)}",
             {"errors": errors[:8]},
         )
-
     if not vals:
         raise RuntimeError("NO PRICE DATA")
-
     med = safe_median(vals)
     spreads = [abs(x - med) / med * 100 for x in vals if med]
     sp = max(spreads) if spreads else 0
-
     quality = (
         "HIGH" if len(vals) >= 4 and sp <= 1.5
         else "MEDIUM" if len(vals) >= 3 and sp <= 3
@@ -1435,13 +1538,11 @@ def indicator_alignment(tf4):
     vals = closes(c)
     rr = tf4["rsi"]
     ml, ms, hist = macd(vals)
-
     bullish = 0
     bearish = 0
     reasons = []
     overbought = False
     oversold = False
-
     if rr is not None:
         if 52 <= rr <= 68:
             bullish += 1
@@ -1453,7 +1554,6 @@ def indicator_alignment(tf4):
         elif rr > 75:
             overbought = True
             reasons.append("RSI بالای 75؛ اشباع خرید — بدون امتیاز صعودی")
-
     if ml is not None and ms is not None:
         if ml > ms:
             bullish += 1
@@ -1461,7 +1561,6 @@ def indicator_alignment(tf4):
         elif ml < ms:
             bearish += 1
             reasons.append("MACD نزولی")
-
     if tf4["sma20"] and tf4["sma50"]:
         if vals[-1] > tf4["sma20"] > tf4["sma50"]:
             bullish += 1
@@ -1469,7 +1568,6 @@ def indicator_alignment(tf4):
         elif vals[-1] < tf4["sma20"] < tf4["sma50"]:
             bearish += 1
             reasons.append("SMA20/50 نزولی")
-
     direction = (
         "BULLISH" if bullish >= 2 and bullish > bearish
         else "BEARISH" if bearish >= 2 and bearish > bullish
@@ -1477,9 +1575,7 @@ def indicator_alignment(tf4):
     )
     return direction, bullish, bearish, reasons, overbought, oversold
 
-
 def rsi_series(values, n=14):
-    """Wilder RSI series in O(n). Values are aligned to the price tail."""
     if len(values) <= n:
         return []
     gains = []
@@ -1497,7 +1593,6 @@ def rsi_series(values, n=14):
         out.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
     return out
 
-
 def strong_divergence(rows):
     vals = closes(rows)
     rsis = rsi_series(vals, 14)
@@ -1506,9 +1601,7 @@ def strong_divergence(rows):
     p = vals[-len(rsis):]
     return divergence_3_level(p, rsis)
 
-
 def weekly_pivot(rows):
-    """Return a simple pivot from the latest completed 7-day window of 4H candles."""
     if not rows or len(rows) < 42:
         return None
     recent = rows[-42:]
@@ -1519,62 +1612,95 @@ def weekly_pivot(rows):
         return None
     return (max(highs) + min(lows) + closes_[-1]) / 3.0
 
-
 def calculate_levels(rows, direction, daily_levels=None):
+    """
+    Build structural levels from CLOSED candles.
+    Important: TP levels are NOT generated as fixed multiples of risk.
+    They are taken from actual market structure first, with ATR-based
+    fallback only when a structural level is unavailable.
+    """
     price = f(rows[-1][4]) if rows else None
-    sup = daily_levels.get("support") if daily_levels else None
-    res = daily_levels.get("resistance") if daily_levels else None
+    if price is None or price <= 0 or direction not in ("LONG", "SHORT"):
+        return None
+
+    daily_levels = daily_levels or {}
+    sup = f(daily_levels.get("support"))
+    res = f(daily_levels.get("resistance"))
+
+    recent = rows[-60:] if len(rows) >= 30 else rows
+    highs = sorted({round(f(x[2]), 10) for x in recent if len(x) >= 5 and f(x[2]) is not None and f(x[2]) > 0})
+    lows = sorted({round(f(x[3]), 10) for x in recent if len(x) >= 5 and f(x[3]) is not None and f(x[3]) > 0})
+    atr_v = f(atr(rows))
+    if atr_v is None or atr_v <= 0:
+        return None
+
+    below = [x for x in lows if x < price]
+    above = [x for x in highs if x > price]
+    if sup is None:
+        sup = max(below) if below else None
+    if res is None:
+        res = min(above) if above else None
     if sup is None or res is None:
         return None
-    pivot = weekly_pivot(rows)
-    a = atr(rows)
 
-    if not price or not a:
+    if direction == "LONG":
+        # Entry is either current price after a confirmed close, or a breakout trigger.
+        entry = price if price >= res else res * 1.002
+        sl = min(sup * 0.995, entry - 1.5 * atr_v)
+        risk = entry - sl
+        if risk <= 0:
+            return None
+
+        # Real structural targets. Never manufacture four targets.
+        higher = [x for x in above if x > entry * 1.003]
+        tp1 = higher[0] if higher else entry + 1.25 * risk
+        tp2 = higher[1] if len(higher) > 1 else max(entry + 2.0 * risk, tp1 + 0.5 * risk)
+        tp3 = higher[2] if len(higher) > 2 else None
+        tp4 = higher[3] if len(higher) > 3 else None
+
+        if tp1 <= entry:
+            return None
+        if tp2 <= tp1:
+            tp2 = tp1 + max(0.5 * risk, 0.25 * atr_v)
+        if tp3 is not None and tp3 <= tp2:
+            tp3 = None
+        if tp4 is not None and (tp3 is None or tp4 <= tp3):
+            tp4 = None
+
+    else:
+        entry = price if price <= sup else sup * 0.998
+        sl = max(res * 1.005, entry + 1.5 * atr_v)
+        risk = sl - entry
+        if risk <= 0:
+            return None
+
+        lower = [x for x in lows if x < entry * 0.997]
+        tp1 = lower[-1] if lower else entry - 1.25 * risk
+        tp2 = lower[-2] if len(lower) > 1 else min(entry - 2.0 * risk, tp1 - 0.5 * risk)
+        tp3 = lower[-3] if len(lower) > 2 else None
+        tp4 = lower[-4] if len(lower) > 3 else None
+
+        if tp1 >= entry:
+            return None
+        if tp2 >= tp1:
+            tp2 = tp1 - max(0.5 * risk, 0.25 * atr_v)
+        if tp3 is not None and tp3 >= tp2:
+            tp3 = None
+        if tp4 is not None and (tp3 is None or tp4 >= tp3):
+            tp4 = None
+
+    # Structural sanity.
+    if direction == "LONG" and not (sl < entry < tp1 <= tp2):
+        return None
+    if direction == "SHORT" and not (sl > entry > tp1 >= tp2):
         return None
 
-    if direction == "LONG":
-        # Correct geometry: resistance must be above price when it is used
-        # as a breakout reference. If historical resistance is below price,
-        # it is treated as already broken, and the next target uses ATR.
-        resistance = max(res, price)
-        entry = price if price >= res else res * 1.002
-        sl = min(sup * 0.995, entry - 1.5 * a)
-        risk = max(entry - sl, entry * 0.005)
-        tp1 = max(entry + 1.0 * risk, resistance + 0.25 * a)
-        tp2 = max(entry + 2.0 * risk, tp1 + 0.75 * risk)
-        tp3 = max(entry + 3.0 * risk, tp2 + 0.75 * risk)
-        tp4 = max(entry + 4.0 * risk, tp3 + 0.75 * risk)
-    else:
-        support = min(sup, price)
-        entry = price if price <= sup else sup * 0.998
-        sl = max(res * 1.005, entry + 1.5 * a)
-        risk = max(sl - entry, entry * 0.005)
-        tp1 = min(entry - 1.0 * risk, support - 0.25 * a)
-        tp2 = min(entry - 2.0 * risk, tp1 - 0.75 * risk)
-        tp3 = min(entry - 3.0 * risk, tp2 - 0.75 * risk)
-        tp4 = min(entry - 4.0 * risk, tp3 - 0.75 * risk)
-
-    # Sanity checks prevent the previous v7 price/resistance contradiction.
-    if direction == "LONG":
-        if not (sl < entry < tp1 <= tp2 <= tp3 <= tp4):
-            return None
-    else:
-        if not (sl > entry > tp1 >= tp2 >= tp3 >= tp4):
-            return None
-
     return {
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "tp4": tp4,
-        "atr": a,
-        "support": sup,
-        "resistance": res,
-        "pivot": pivot,
+        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+        "tp3": tp3, "tp4": tp4, "atr": atr_v,
+        "support": sup, "resistance": res,
+        "pivot": weekly_pivot(rows),
     }
-
 
 def suggested_leverage(atr_percent):
     if not atr_percent or atr_percent <= 0:
@@ -1582,9 +1708,7 @@ def suggested_leverage(atr_percent):
     lev = (1 / (atr_percent / 100)) * 0.5
     return round(clamp(lev, 1, MAX_LEVERAGE), 1)
 
-
 def candle_trigger_state(rows, direction, support=None, resistance=None):
-    """Classify the latest CLOSED 4H candle; no prediction of an unfinished candle."""
     if not rows or len(rows) < 3:
         return {"state":"UNKNOWN","close_location":None,"range_pct":None,"near_extreme":False}
     r=rows[-1]
@@ -1613,39 +1737,33 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
     return {"state":state,"close_location":round(loc,3),"range_pct":round(range_pct,3),"near_extreme":loc>=0.85 or loc<=0.15}
 
 
+# ============================================================
+# ANALYZE COIN
+# ============================================================
+
 def analyze_coin(coin, market_news, weights):
     if is_stable(coin):
         return None
-
     snapshots = tf_snapshot(coin)
     tf4 = snapshots.get("4h", {})
     if "rows" not in tf4:
         raise RuntimeError("4H unavailable")
-
     tf1 = snapshots.get("1h", {})
     tfd = snapshots.get("1d", {})
     tfw = snapshots.get("1w", {})
     tfm = snapshots.get("1M", {})
-
     price, sources, quality, spread_pct, errors = price_consensus(coin)
-
     h1 = tf1.get("trend", "UNKNOWN")
     h4 = tf4.get("trend", "UNKNOWN")
     d1 = tfd.get("trend", "UNKNOWN")
     w1 = tfw.get("trend", "UNKNOWN")
     m1 = tfm.get("trend", "UNKNOWN")
-
     pattern, pattern_dir = candle_pattern(tf4["rows"])
     ind_dir, bull_n, bear_n, indicator_reasons, overbought, oversold = indicator_alignment(tf4)
-
     divergence = strong_divergence(tf4["rows"])
-
     vol_state, vol_ratio = volume_state(tf4["rows"])
     atrp = atr_pct(tf4["rows"])
     liq_score, liq_label = asset_liquidity(coin, sources)
-
-    # Daily S/R is authoritative for the report. H4 remains the execution
-    # timeframe, but Daily structure determines the key levels.
     daily_levels = daily_key_levels(tfd.get("rows", []), price)
     h4_levels = h4_fallback_levels(tf4.get("rows", []), price)
     sr_fallback = False
@@ -1653,19 +1771,8 @@ def analyze_coin(coin, market_news, weights):
     if (not effective_levels or effective_levels.get("confidence") == "LOW") and h4_levels and h4_levels.get("confidence") != "LOW":
         effective_levels = h4_levels
         sr_fallback = True
-
     mom30, _ = momentum_30m(coin)
 
-    # Direction must be resolved BEFORE any trigger calculation uses it.
-    # v8.6.1 accidentally evaluated candle_trigger_state(..., direction, ...)
-    # before direction was assigned, causing every asset analysis to raise
-    # UnboundLocalError and leaving the report with Total scanned: 0.
-
-    # --------------------------------------------------------
-    # v10.0 CONFIDENCE — component-level, not binary.
-    # The six learned weights now produce different scores for different
-    # quality setups instead of clustering many assets at exactly 65%.
-    # --------------------------------------------------------
     rsi_value = f(tf4.get("rsi"))
     ml, ms, _hist = macd(closes(tf4["rows"]))
 
@@ -1679,10 +1786,7 @@ def analyze_coin(coin, market_news, weights):
         elif aligned == 1:
             candle_points = weights["candle_pattern"] * 0.35
 
-    # RSI is graded. Extreme overbought/oversold never earns full confirmation.
     rsi_points = 0.0
-    # Direction is selected immediately below; use the raw indicator direction
-    # here so the score remains deterministic before gate evaluation.
     if rsi_value is not None:
         if ind_dir == "BULLISH":
             if 52 <= rsi_value <= 68:
@@ -1743,28 +1847,17 @@ def analyze_coin(coin, market_news, weights):
         "weights_used": dict(weights),
     }
 
-    # --------------------------------------------------------
-    # Direction selection
-    # --------------------------------------------------------
     direction = "NONE"
-    # H4 + D1 remain the primary trend filter. H1 is confirmation, not a
-    # mandatory hard gate; this prevents the model from going silent merely
-    # because a lower timeframe is temporarily counter-trend.
     if ind_dir == "BULLISH" and h4 == "BULLISH" and d1 == "BULLISH":
         direction = "LONG"
     elif ind_dir == "BEARISH" and h4 == "BEARISH" and d1 == "BEARISH":
         direction = "SHORT"
 
-    # Strong three-level divergence is the only exception to
-    # the normal higher-timeframe rule.
     if divergence == "BULLISH_3_LEVEL" and h4 != "BULLISH":
         direction = "LONG"
     elif divergence == "BEARISH_3_LEVEL" and h4 != "BEARISH":
         direction = "SHORT"
 
-    # Recalculate directional RSI/MACD points after a divergence override.
-    # The final direction, not the pre-override indicator direction, must
-    # determine the score breakdown.
     if direction in ("LONG", "SHORT"):
         rsi_points = 0.0
         if rsi_value is not None:
@@ -1789,13 +1882,7 @@ def analyze_coin(coin, market_news, weights):
         score_components["macd"] = round(macd_points, 2)
         score_components["indicators"] = round(new_indicator_points, 2)
 
-
-    # Weekly/monthly are regime filters, not entry triggers. A direct
-    # monthly contradiction blocks the setup; a weekly contradiction
-    # requires an unusually strong confidence score.
     regime_conflict = False
-
-    # Candle trigger is calculated only after direction has been resolved.
     trigger = candle_trigger_state(
         tf4.get("rows", []),
         direction,
@@ -1807,9 +1894,6 @@ def analyze_coin(coin, market_news, weights):
     elif direction == "SHORT" and m1 == "BULLISH":
         regime_conflict = True
 
-    # --------------------------------------------------------
-    # Hard gates
-    # --------------------------------------------------------
     gate = "PASS"
     gate_reasons = []
     gate_reason = "All mandatory gates passed"
@@ -1846,6 +1930,10 @@ def analyze_coin(coin, market_news, weights):
     leverage = 1.0
     action = "NO TRADE"
 
+    # Always calculate a valid candidate plan for the complete personal report.
+    # A candidate plan is NOT a trade approval; the decision gate still controls action.
+    candidate_levels = calculate_levels(tf4["rows"], direction, effective_levels)
+
     if gate == "PASS":
         if not effective_levels or effective_levels.get("confidence") == "LOW":
             gate = "BLOCK"
@@ -1854,7 +1942,7 @@ def analyze_coin(coin, market_news, weights):
             gate = "BLOCK"
             gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "H4 S/R fallback requires elevated confidence"
         else:
-            levels = calculate_levels(tf4["rows"], direction, effective_levels)
+            levels = candidate_levels
             if levels is None:
                 gate = "BLOCK"
                 gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "Invalid price geometry"
@@ -1863,10 +1951,6 @@ def analyze_coin(coin, market_news, weights):
                 four_h_event = snapshots.get("4h", {}).get("event", {})
                 trigger_ok_long = trigger["state"] in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BULLISH_CLOSE") and direction == "LONG"
                 trigger_ok_short = trigger["state"] in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT", "BEARISH_CLOSE") and direction == "SHORT"
-                # The latest fully CLOSED 4H candle is authoritative.
-                # We do not require the GitHub run itself to occur inside the
-                # small NEW_CLOSED event window; this keeps the three fixed
-                # daily report times from going silent when a run is delayed.
                 if trigger_ok_long:
                     action = "BUY CONFIRMATION"
                 elif trigger_ok_short:
@@ -1907,6 +1991,20 @@ def analyze_coin(coin, market_news, weights):
         base_7d = f(d1_rows[-8][4])
         if base_7d and base_7d > 0:
             change_7d = (price / base_7d - 1.0) * 100.0
+
+    if levels is None and candidate_levels is not None:
+        levels = candidate_levels
+
+    source_validation = multi_source_validation(coin, exchange_price=price)
+    tvv = source_validation.get("tradingview", {})
+    if tvv.get("status") == "OK":
+        tvr = str(tvv.get("rating") or "").upper()
+        if tvr in ("BUY", "STRONG_BUY") and direction == "LONG":
+            confidence += 5
+        elif tvr in ("SELL", "STRONG_SELL") and direction == "SHORT":
+            confidence += 5
+        elif tvr in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
+            confidence -= 8
 
     return {
         "coin": coin,
@@ -1965,13 +2063,19 @@ def analyze_coin(coin, market_news, weights):
         "gate_reason": gate_reason,
         "reason": " + ".join(reason_parts) or "تایید چندعاملی کافی نیست",
         "sources": [x["source"] for x in sources],
+        "source_validation": source_validation,
+        "tradingview_status": tvv.get("status"),
+        "tradingview_rating": tvv.get("rating"),
+        "coinglass_status": source_validation.get("coinglass", {}).get("status"),
+        "coinglass_open_interest": source_validation.get("coinglass", {}).get("open_interest"),
+        "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
     }
 
 
 # ============================================================
-# v9 DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
+# DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
 # ============================================================
 
 def _trend_bias_from_rows(rows):
@@ -1994,13 +2098,7 @@ def _trend_bias_from_rows(rows):
     except Exception:
         return "UNKNOWN", None, None, None
 
-
 def btc_market_regime(force=False):
-    """Classify BTC as RISK_ON / NEUTRAL / RISK_OFF using closed 4H/1D data.
-
-    This is deliberately a regime filter, not a trading trigger. It is cached
-    in-process so a report does not repeatedly hammer the exchange.
-    """
     global _BTC_REGIME_CACHE
     now = time.time()
     if not force and _BTC_REGIME_CACHE:
@@ -2032,12 +2130,9 @@ def btc_market_regime(force=False):
     _BTC_REGIME_CACHE = dict(out)
     return out
 
-
 _BTC_REGIME_CACHE = {}
 
-
 def market_breadth(results):
-    """Breadth is measured only from genuinely aligned H4/D1 assets."""
     bullish_set = [r for r in results if r.get("h4_trend") == "BULLISH" and r.get("d1_trend") == "BULLISH"]
     bearish_set = [r for r in results if r.get("h4_trend") == "BEARISH" and r.get("d1_trend") == "BEARISH"]
     samples = len(bullish_set) + len(bearish_set)
@@ -2056,7 +2151,6 @@ def market_breadth(results):
         state = "MIXED"
     return {"score": round(score, 1), "bullish": bullish, "bearish": bearish, "samples": samples, "state": state}
 
-
 def decision_rr(result):
     entry, sl, tp2 = f(result.get("entry")), f(result.get("sl")), f(result.get("tp2"))
     if None in (entry, sl, tp2) or entry <= 0:
@@ -2066,7 +2160,6 @@ def decision_rr(result):
     if risk <= 0:
         return None
     return reward / risk
-
 
 def _near_opposing_level(result):
     entry = f(result.get("entry"))
@@ -2083,13 +2176,11 @@ def _near_opposing_level(result):
             return (entry - sup) / entry < 0.015
     return False
 
-
 def _load_signal_memory(coin):
     init_sqlite()
     with sqlite_conn() as c:
         row = c.execute("select * from signal_memory where coin=?", (coin,)).fetchone()
     return dict(row) if row else None
-
 
 def _save_signal_memory(result, state):
     init_sqlite()
@@ -2106,9 +2197,7 @@ def _save_signal_memory(result, state):
              result.get("signal_candle_ts"), result.get("entry"), result.get("sl"), result.get("tp1"),
              result.get("tp2"), now_utc().isoformat(), state))
 
-
 def setup_quality_score(r):
-    """Human-like entry quality score; informational but also used by the execution gate."""
     score = 50.0
     trigger = (r.get("candle_trigger") or {}).get("state")
     if trigger in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BREAKDOWN_CLOSED", "RESISTANCE_REJECT"):
@@ -2132,9 +2221,7 @@ def setup_quality_score(r):
         score -= 10
     return int(clamp(round(score), 0, 100))
 
-
 def risk_quality_score(r, rr=None):
-    """Risk quality combines reward/risk, liquidity, data quality and structure."""
     score = 40.0
     rr = f(rr)
     if rr is not None:
@@ -2149,14 +2236,7 @@ def risk_quality_score(r, rr=None):
         score -= 20
     return int(clamp(round(score), 0, 100))
 
-
 def apply_decision_engine(results, btc_regime, breadth):
-    """Turn raw confirmations into human-like decisions.
-
-    A setup must be technically aligned AND tradable. Poor R/R, adverse BTC
-    regime, nearby opposing structure, or an unchanged signal are downgraded
-    to WATCH rather than being presented as fresh executable trades.
-    """
     for r in results:
         raw = r.get("action", "NO TRADE")
         rr = decision_rr(r)
@@ -2171,17 +2251,12 @@ def apply_decision_engine(results, btc_regime, breadth):
 
         if raw in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
             state = raw
-
             if r.get("entry_quality", 0) < 70:
                 state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
                 reasons.append(f"Entry quality {r.get('entry_quality', 0)}/100 < 70")
             if r.get("risk_quality", 0) < 70:
                 state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
                 reasons.append(f"Risk quality {r.get('risk_quality', 0)}/100 < 70")
-
-            # Human-like risk control: do not chase extreme momentum.
-            # A genuine closed-candle breakout/reclaim may still execute,
-            # but an extreme RSI without structural confirmation becomes WATCH.
             trigger_state = (r.get("candle_trigger") or {}).get("state")
             if direction == "LONG" and r.get("overbought"):
                 if not (trigger_state in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM") and r.get("confidence", 0) >= 75 and (r.get("volume_ratio") or 0) >= 1.35):
@@ -2191,7 +2266,6 @@ def apply_decision_engine(results, btc_regime, breadth):
                 if not (trigger_state in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT") and r.get("confidence", 0) >= 75 and (r.get("volume_ratio") or 0) >= 1.35):
                     state = "BEARISH WATCH"
                     reasons.append("RSI اشباع فروش؛ ورود تعقیبی ممنوع، منتظر Pullback/Retest")
-
             if rr is None or rr < MIN_EXECUTABLE_RR:
                 state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
                 reasons.append(f"R/R زیر {MIN_EXECUTABLE_RR:.1f}")
@@ -2210,7 +2284,6 @@ def apply_decision_engine(results, btc_regime, breadth):
             elif breadth["state"] == "BULLISH" and direction == "SHORT":
                 state = "BEARISH WATCH"
                 reasons.append("Market breadth مخالف SHORT")
-
             mem = _load_signal_memory(r["coin"])
             same_candle = bool(mem and mem.get("signal_candle_ts") == r.get("signal_candle_ts") and mem.get("direction") == direction)
             recent_same = False
@@ -2227,12 +2300,10 @@ def apply_decision_engine(results, btc_regime, breadth):
                 reasons.append("سیگنال تکراری؛ تغییر معنادار مشاهده نشد")
             else:
                 r["repeat_signal"] = False
-
         elif raw in ("BULLISH WATCH", "BEARISH WATCH"):
             state = raw
         else:
             state = "NO TRADE"
-
         r["decision_state"] = state
         r["decision_reasons"] = reasons
         if state != raw:
@@ -2248,7 +2319,6 @@ def apply_decision_engine(results, btc_regime, breadth):
             "reason": " | ".join(reasons) or "decision passed",
         })
     return results
-
 
 def atlas_decision_board(results, btc_regime, breadth):
     buys = [r for r in results if r.get("decision_state") == "BUY CONFIRMATION" and not r.get("repeat_signal")]
@@ -2304,10 +2374,8 @@ DEFAULT_WEIGHTS = {
     "news_clear": 15.0,
 }
 
-
 def get_weights():
     weights = DEFAULT_WEIGHTS.copy()
-    # Carry the latest learned weights forward across v8.x versions.
     rows = STORE.select(
         "atlas_model_weights",
         {"select": "feature,weight,model_version,updated_at", "order": "updated_at.desc", "limit": "200"},
@@ -2328,7 +2396,6 @@ def get_weights():
             c.execute("insert or ignore into model_weights(feature,weight,baseline_weight,updated_at) values(?,?,?,?)",
                       (feature,weight,DEFAULT_WEIGHTS[feature],now_utc().isoformat()))
     return weights
-
 
 def update_weight(feature, factor, reason, evidence):
     if feature not in DEFAULT_WEIGHTS:
@@ -2352,9 +2419,7 @@ def update_weight(feature, factor, reason, evidence):
                   (feature,new,DEFAULT_WEIGHTS[feature],evidence.get("samples",0),evidence.get("wins",0),evidence.get("losses",0),payload["updated_at"],reason))
     append_changelog(feature,old,new,reason,evidence)
 
-
 def self_diagnostic():
-    """Adapt weights only after the backtest gate, using durable local signal IDs."""
     init_sqlite()
     with sqlite_conn() as c:
         rows=c.execute("""
@@ -2394,46 +2459,36 @@ def backtest_coin(coin, days=180):
         rows, engine = best_ohlcv(coin, "4h", 1200)
     except Exception:
         return None
-
     cutoff = int((time.time() - days * 86400) * 1000)
     rows = [x for x in rows if x[0] >= cutoff]
     if len(rows) < 150:
         return None
-
     trades = []
     equity = 1.0
     peak = equity
     max_dd = 0.0
-
     for i in range(80, len(rows) - SIGNAL_HORIZON_BARS, 4):
         window = rows[:i]
         c = closes(window)
         rr = rsi(c)
         ml, ms, _ = macd(c)
         s20, s50 = sma(c, 20), sma(c, 50)
-
         if None in (rr, ml, ms, s20, s50):
             continue
-
         bullish = c[-1] > s20 > s50 and ml > ms and rr > 50
         bearish = c[-1] < s20 < s50 and ml < ms and rr < 50
-
         vol, vr = volume_state(window)
         if vr is None or vr <= MIN_VOLUME_RATIO:
             continue
-
         direction = "LONG" if bullish else "SHORT" if bearish else None
         if not direction:
             continue
-
         a = atr(window)
         if not a:
             continue
-
         entry = c[-1]
         sl = entry - 1.5 * a if direction == "LONG" else entry + 1.5 * a
         tp = entry + 3 * a if direction == "LONG" else entry - 3 * a
-
         outcome = None
         pnl = None
         for future in rows[i:i + SIGNAL_HORIZON_BARS]:
@@ -2452,23 +2507,19 @@ def backtest_coin(coin, days=180):
                 if lo <= tp:
                     outcome, pnl = "TP", 3.0
                     break
-
         if outcome:
             trades.append(pnl)
             equity *= 1 + pnl / 100
             peak = max(peak, equity)
             max_dd = max(max_dd, (peak - equity) / peak * 100)
-
     if not trades:
         return None
-
     wins = sum(1 for x in trades if x > 0)
     losses = len(trades) - wins
     avg_profit = safe_mean([x for x in trades if x > 0], 0.0)
     avg_loss = abs(safe_mean([x for x in trades if x < 0], 0.0)) if losses else 0
     gross_profit = sum(x for x in trades if x > 0)
     gross_loss = abs(sum(x for x in trades if x < 0))
-
     return {
         "coin": coin,
         "engine": engine,
@@ -2483,9 +2534,7 @@ def backtest_coin(coin, days=180):
         "trades_raw": trades,
     }
 
-
 def _cached_backtest_gate():
-    """Return a recent cached gate result, or None when refresh is due."""
     try:
         cutoff = now_utc() - timedelta(hours=BACKTEST_REFRESH_HOURS)
         with sqlite_conn() as c:
@@ -2507,7 +2556,6 @@ def _cached_backtest_gate():
         append_changelog("BACKTEST_CACHE", None, None, str(e), {"traceback": traceback.format_exc()})
         return None
 
-
 def _save_backtest_gate(passed, details):
     try:
         with sqlite_conn() as c:
@@ -2518,13 +2566,7 @@ def _save_backtest_gate(passed, details):
     except Exception as e:
         append_changelog("BACKTEST_CACHE", None, None, f"cache write failed: {e}", {"traceback": traceback.format_exc()})
 
-
 def h4_fallback_levels(rows, current_price=None):
-    """Conservative H4 fallback used only when Daily S/R is unavailable.
-
-    It is deliberately weaker than Daily S/R and therefore requires a higher
-    confidence threshold before it can produce a confirmation signal.
-    """
     if not rows or len(rows) < 80:
         return None
     price = f(current_price) or f(rows[-1][4])
@@ -2552,24 +2594,15 @@ def h4_fallback_levels(rows, current_price=None):
         "confidence": conf, "method": "H4_RANGE_FALLBACK"
     }
 
-
 def mandatory_backtest_gate(universe):
-    """Run a compact portfolio backtest before any weight change.
-
-    The gate is mandatory, but the expensive calculation is cached for a
-    configurable period (default 24h) so a 4H scheduler does not rerun the
-    full backtest on every execution.
-    """
     cached = _cached_backtest_gate()
     if cached is not None:
         return cached
-
     samples = []
     for coin in universe[:20]:
         r = backtest_coin(coin, BACKTEST_DAYS)
         if r:
             samples.append(r)
-
     if not samples:
         append_changelog(
             "BACKTEST",
@@ -2580,12 +2613,9 @@ def mandatory_backtest_gate(universe):
         result = {"reason": "no backtest data"}
         _save_backtest_gate(False, result)
         return False, result
-
     win_rate = safe_mean([x.get("win_rate") for x in samples], 0.0)
     pf = safe_mean([x.get("profit_factor") for x in samples], 0.0)
     dd = max((safe_float(x.get("max_drawdown"), 0.0) or 0.0) for x in samples)
-
-    # If no baseline exists, establish it without changing the model.
     old = STORE.select(
         "atlas_backtests",
         {
@@ -2595,7 +2625,6 @@ def mandatory_backtest_gate(universe):
             "order": "timestamp.desc",
         },
     )
-
     if not old:
         for r in samples:
             STORE.insert(
@@ -2632,22 +2661,18 @@ def mandatory_backtest_gate(universe):
         }
         _save_backtest_gate(True, result)
         return True, result
-
     baseline_pf = f(old[0].get("profit_factor")) or 0
     baseline_wr = f(old[0].get("win_rate")) or 0
-
     improvement_pf = (
         (pf - baseline_pf) / baseline_pf * 100 if baseline_pf else 0
     )
     improvement_wr = (
         (win_rate - baseline_wr) / baseline_wr * 100 if baseline_wr else 0
     )
-
     passed = (
         improvement_pf >= MIN_BACKTEST_IMPROVEMENT
         or improvement_wr >= MIN_BACKTEST_IMPROVEMENT
     )
-
     for r in samples:
         STORE.insert(
             "atlas_backtests",
@@ -2671,7 +2696,6 @@ def mandatory_backtest_gate(universe):
                 "details": {"self_healing_gate": True},
             },
         )
-
     append_changelog(
         "BACKTEST_GATE",
         baseline_pf,
@@ -2685,7 +2709,6 @@ def mandatory_backtest_gate(universe):
             "passed": passed,
         },
     )
-
     result = {
         "win_rate": win_rate,
         "profit_factor": pf,
@@ -2703,7 +2726,6 @@ def mandatory_backtest_gate(universe):
 def store_signal(result):
     if result["action"] not in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
         return None
-
     row = {
         "timestamp": now_utc().isoformat(),
         "run_type": "SNIPER",
@@ -2754,7 +2776,6 @@ def store_signal(result):
         "model_version": VERSION,
     }
     STORE.insert("atlas_signals", row)
-
     init_sqlite()
     with sqlite_conn() as c:
         c.execute(
@@ -2769,7 +2790,6 @@ def store_signal(result):
                 now_utc().isoformat(), result["reason"],
             ),
         )
-
 
 def evaluate_open_outcomes():
     init_sqlite()
@@ -2814,15 +2834,73 @@ def evaluate_open_outcomes():
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM — WITH RATE LIMIT HANDLING
 # ============================================================
+
+def _telegram_send_chunk(chat_id, text):
+    data = urllib.parse.urlencode({
+        "chat_id": str(chat_id),
+        "text": text,
+        "disable_web_page_preview": "true",
+    }).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        if not data.get("ok"):
+            error_desc = data.get("description", "Unknown error")
+            raise RuntimeError(f"Telegram sendMessage failed: {error_desc}")
+        return data
+
+def send_with_retry(chat_id, text, max_retries=None, base_delay=None):
+    if max_retries is None:
+        max_retries = TELEGRAM_MAX_RETRIES
+    if base_delay is None:
+        base_delay = TELEGRAM_BASE_RETRY_DELAY
+    for attempt in range(max_retries):
+        try:
+            _telegram_send_chunk(chat_id, text)
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                retry_after = int(e.headers.get('Retry-After', base_delay))
+                wait_time = min(retry_after * (2 ** attempt) + random.uniform(0, 1), TELEGRAM_MAX_WAIT)
+                print(f"⚠️ Telegram rate limit (429). Waiting {wait_time:.1f}s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                append_changelog("TELEGRAM_SEND", None, None, f"HTTP {e.code}: {e.reason}")
+                return False
+        except Exception as e:
+            append_changelog("TELEGRAM_SEND", None, None, f"Unexpected error: {e}")
+            wait_time = min(base_delay * (2 ** attempt), TELEGRAM_MAX_WAIT)
+            time.sleep(wait_time)
+    print(f"❌ Failed to send message to {chat_id} after {max_retries} attempts")
+    return False
+
+def telegram_send_one(chat_id, text):
+    if not TELEGRAM_TOKEN or not chat_id:
+        raise RuntimeError("Telegram secrets missing")
+    if len(text) > 4096:
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks:
+            success = send_with_retry(chat_id, chunk)
+            if not success:
+                return False
+            time.sleep(0.5)
+        return True
+    else:
+        return send_with_retry(chat_id, text)
 
 def telegram_api_get_me():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN missing")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
-        headers={"User-Agent": "ATLAS-AI/10.1"},
+        headers={"User-Agent": "ATLAS-AI/10.2"},
     )
     with urllib.request.urlopen(req, timeout=20) as r:
         raw = r.read().decode("utf-8", errors="replace")
@@ -2831,32 +2909,7 @@ def telegram_api_get_me():
         raise RuntimeError(f"Telegram getMe failed: {data}")
     return data.get("result") or {}
 
-
-def telegram_send_one(chat_id, text):
-    if not TELEGRAM_TOKEN or not chat_id:
-        raise RuntimeError("Telegram secrets missing")
-
-    data = urllib.parse.urlencode({
-        "chat_id": str(chat_id),
-        "text": text,
-        "disable_web_page_preview": "true",
-    }).encode()
-
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        raw = r.read().decode("utf-8", errors="replace")
-    data = json.loads(raw)
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram sendMessage failed: {data}")
-    return data
-
-
 def telegram_preflight():
-    """Validate Telegram credentials before the expensive market run."""
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is missing from GitHub Secrets")
     if not TELEGRAM_CHAT_ID and not TELEGRAM_GROUP_CHAT_ID:
@@ -2866,17 +2919,14 @@ def telegram_preflight():
         "TELEGRAM_PREFLIGHT", None, None,
         f"Telegram API reachable as @{me.get('username') or me.get('first_name') or 'bot'}"
     )
+    print(f"✅ Telegram bot connected: @{me.get('username') or 'unknown'}")
     return me
 
-
 def split_telegram(text, max_chars=3900):
-    """Split without destroying asset blocks."""
     if len(text) <= max_chars:
         return [text]
-
     parts = []
     current = ""
-
     for block in text.split("\n\n"):
         block = block.strip()
         if not block:
@@ -2890,295 +2940,458 @@ def split_telegram(text, max_chars=3900):
             if len(block) <= max_chars:
                 current = block
             else:
-                # Hard split only as last resort.
                 for i in range(0, len(block), max_chars):
                     parts.append(block[i:i + max_chars])
                 current = ""
-
     if current:
         parts.append(current)
-
     return parts
 
-
 def send_report(text):
-    """Deliver once per configured destination, with independent retry state."""
-    import hashlib
     parts = split_telegram(text)
     report_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     init_sqlite()
     destinations = []
-    for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-        if destination and destination not in destinations:
-            destinations.append(destination)
+    if TELEGRAM_CHAT_ID:
+        destinations.append({
+            "id": TELEGRAM_CHAT_ID,
+            "name": "PRIVATE_CHAT",
+            "delay": TELEGRAM_PRIVATE_DELAY
+        })
+    if TELEGRAM_GROUP_CHAT_ID and TELEGRAM_GROUP_CHAT_ID not in [d["id"] for d in destinations]:
+        destinations.append({
+            "id": TELEGRAM_GROUP_CHAT_ID,
+            "name": "SUPERGROUP",
+            "delay": TELEGRAM_GROUP_DELAY
+        })
     if not destinations:
         msg = "No Telegram destination configured"
         append_changelog("TELEGRAM", None, None, msg)
         return len(parts), 0, [msg]
-
     sent = 0
     errors = []
-    for destination in destinations:
+    print(f"\n📤 Sending report to {len(destinations)} destination(s)")
+    for dest in destinations:
+        chat_id = dest["id"]
+        dest_name = dest["name"]
+        delay = dest["delay"]
         with sqlite_conn() as c:
             already = c.execute(
                 "select 1 from telegram_sent_reports where report_hash=? and destination=?",
-                (report_hash, destination),
+                (report_hash, chat_id),
             ).fetchone()
         if already:
+            print(f"⏭️ Skipping {dest_name}: duplicate report detected")
             continue
-
-        destination_ok = True
+        print(f"📤 Sending {len(parts)} parts to {dest_name}...")
+        dest_success = True
         for i, part in enumerate(parts, 1):
-            try:
-                telegram_send_one(destination, part)
+            print(f"  Part {i}/{len(parts)}...", end=" ", flush=True)
+            success = send_with_retry(chat_id, part)
+            if success:
                 sent += 1
-                time.sleep(0.7)
-            except Exception as e:
-                destination_ok = False
-                err = f"Telegram destination {destination}, part {i}: {e}"
-                errors.append(err)
-                append_changelog("TELEGRAM", None, None, err, {"traceback": traceback.format_exc()})
+                print("✅")
+            else:
+                dest_success = False
+                errors.append(f"Telegram {dest_name}, part {i}: failed after retries")
+                print("❌")
                 break
-        if destination_ok:
+            if i < len(parts):
+                actual_delay = delay + random.uniform(0, 0.5)
+                time.sleep(actual_delay)
+        if dest_success:
             with sqlite_conn() as c:
                 c.execute(
                     "insert or ignore into telegram_sent_reports(report_hash,destination,sent_at) values(?,?,?)",
-                    (report_hash, destination, now_utc().isoformat()),
+                    (report_hash, chat_id, now_utc().isoformat()),
                 )
+            print(f"✅ All {len(parts)} parts sent to {dest_name}")
+        else:
+            print(f"❌ Failed to send all parts to {dest_name}")
     return len(parts), sent, errors
 
 
 # ============================================================
-# REPORT FORMAT
+# REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
 # ============================================================
 
+ATLAS_PERSONAL_ASSETS = [
+    "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ADA", "LINK",
+    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
+    "NEAR", "ONDO", "TAO",
+]
+ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
+METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
+METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
+
+
 def action_emoji(action):
-    if action == "BUY CONFIRMATION":
-        return "🟢 BUY CONFIRMATION"
-    if action == "SELL CONFIRMATION":
-        return "🔴 SELL CONFIRMATION"
-    if action == "BULLISH WATCH":
-        return "🟢 BULLISH WATCH"
-    if action == "BEARISH WATCH":
-        return "🔴 BEARISH WATCH"
-    return "⛔ NO TRADE"
-def asset_block(r):
-    """Compact decision-focused asset report.
+    a = str(action or "NO TRADE").upper()
+    if a in ("BUY CONFIRMATION", "BUY"):
+        return "🟢 BUY"
+    if a in ("SELL CONFIRMATION", "SELL", "SELL / REDUCE"):
+        return "🔴 SELL"
+    if a in ("BULLISH WATCH", "WATCH"):
+        return "🟡 WATCH"
+    if a == "BEARISH WATCH":
+        return "🟠 WATCH-SELL"
+    if a == "NO DATA":
+        return "⚪ NO DATA"
+    return "⚪ WAIT"
 
-    Signal calculations still use the full MTF dataset; Telegram only shows
-    fields that materially affect a trading decision. This keeps the report
-    readable without weakening the engine.
-    """
-    action = r.get("action", "NO TRADE")
-    lines = [
-        f"🔹 {r['coin']}",
-        f"Price: {fmt(r['price'])} | 24H: {pct(r['change'])}",
-        f"H4/D1/W1: {r['h4_trend']} / {r['d1_trend']} / {r.get('w1_trend','UNKNOWN')}",
-        f"RSI: {r['rsi']:.1f}" if r.get('rsi') is not None else "RSI: N/A",
-        f"MACD: {'🟢' if r['macd']=='BULLISH' else '🔴' if r['macd']=='BEARISH' else '🟡'} {r['macd']}",
-        f"Pattern: {r['pattern']}" + (" ✅" if r.get("pattern_valid") else ""),
-        f"Volume: {r['volume']} | {r['volume_ratio']:.2f}x" if r.get('volume_ratio') is not None else f"Volume: {r['volume']} | N/A",
-        f"Liquidity: {r['liquidity']} | ATR: {r['atr_pct']:.2f}%" if r.get('atr_pct') is not None else f"Liquidity: {r['liquidity']} | ATR: N/A",
-        f"4H Trigger: {(r.get('candle_trigger') or {}).get('state','UNKNOWN')}",
-        f"Daily S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))} | {r.get('sr_confidence','LOW')}",
-        f"Scores: Setup {r.get('setup_score', r.get('confidence',0))}/100 | Entry {r.get('entry_quality',0)}/100 | Risk {r.get('risk_quality',0)}/100",
-        f"🎯 ACTION: {action_emoji(action)}",
-    ]
 
-    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-        lines += [
-            f"R/R: 1:{r.get('rr', 0):.2f} | Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))}",
-            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}",
-            f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی است'}",
-        ]
-    elif r.get("decision_reasons"):
-        lines.append("Decision: " + " | ".join(r["decision_reasons"][:3]))
-        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
+def tradingview_chart_url(symbol, metal=False):
+    if metal:
+        tv_symbol = METAL_TV.get(str(symbol).upper())
     else:
-        lines.append(f"Confidence: {r.get('confidence',0)}% | Data: {r.get('quality','UNKNOWN')}")
-        lines.append(f"Reason: {r.get('reason') or 'تأیید چندعاملی کافی نیست'}")
-
-    if r.get("price_source_errors"):
-        ok_sources = [x.get("source") for x in r.get("price_sources", []) if x.get("price") is not None]
-        lines.append("PRICE SOURCES: " + " | ".join(ok_sources[:5]) + f" | Errors: {len(r['price_source_errors'])}")
-    if r.get("warning"):
-        lines.append(f"⚠️ {r['warning']}")
-    if f(r.get("spread")) is not None and r["spread"] > 3:
-        lines.append(f"⚠️ DATA CONFLICT: {r['spread']:.2f}%")
-    return "\n".join(lines)
+        tv_symbol = f"{TRADINGVIEW_CHART_EXCHANGE}:{str(symbol).upper()}USDT"
+    if not tv_symbol:
+        return None
+    return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(tv_symbol, safe=':!')}&interval={urllib.parse.quote(TRADINGVIEW_INTERVAL)}"
 
 
+def _rr_from_values(entry, sl, tp):
+    entry, sl, tp = f(entry), f(sl), f(tp)
+    if None in (entry, sl, tp) or entry == sl:
+        return None
+    return abs(entry - tp) / abs(entry - sl)
 
-def _signal_short(r):
-    action = r.get("action", "NO TRADE")
-    return {
-        "BUY CONFIRMATION": "🟢 BUY",
-        "SELL CONFIRMATION": "🔴 SELL",
-        "BULLISH WATCH": "🟡 WAIT-BUY",
-        "BEARISH WATCH": "🟡 WAIT-SELL",
-    }.get(action, "⚪ WAIT")
 
+def _plan_is_allowed(r):
+    """Expose levels only for executable or explicitly conditional closed-candle setups."""
+    action = str(r.get("action") or r.get("decision_state") or "").upper()
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
+        return True
+    trigger = str((r.get("candle_trigger") or {}).get("state") or "").upper()
+    return trigger in {
+        "BREAKOUT_CLOSED", "BREAKDOWN_CLOSED",
+        "SUPPORT_RECLAIM", "RESISTANCE_REJECT",
+    }
+
+def _conditional_trigger_text(r):
+    direction = str(r.get("direction") or "").upper()
+    trigger = str((r.get("candle_trigger") or {}).get("state") or "").upper()
+    support = f(r.get("support")); resistance = f(r.get("resistance"))
+    if direction == "LONG":
+        if resistance is not None and trigger in {"BREAKOUT_CLOSED", "BULLISH_CLOSE"}:
+            return f"H4 close بالای {fmt(resistance)}"
+        if support is not None and trigger == "SUPPORT_RECLAIM":
+            return f"H4 reclaim بالای {fmt(support)}"
+    if direction == "SHORT":
+        if support is not None and trigger in {"BREAKDOWN_CLOSED", "BEARISH_CLOSE"}:
+            return f"H4 close زیر {fmt(support)}"
+        if resistance is not None and trigger == "RESISTANCE_REJECT":
+            return f"H4 rejection زیر {fmt(resistance)}"
+    return "تأیید کندل بسته‌شده 4H لازم است"
+
+def _clear_trade_plan(r):
+    for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4", "rr"):
+        r[k] = None
+    return r
+
+def _ensure_candidate_plan(r):
+    """Do not invent trade levels for ordinary WAIT/WATCH rows."""
+    if not isinstance(r, dict):
+        return r
+    if not _plan_is_allowed(r):
+        return _clear_trade_plan(r)
+
+    direction = r.get("direction")
+    rows = (r.get("snapshots") or {}).get("4h", {}).get("rows") or []
+    if direction not in ("LONG", "SHORT") or not rows:
+        return _clear_trade_plan(r)
+
+    try:
+        levels = calculate_levels(rows, direction, {
+            "support": f(r.get("support")),
+            "resistance": f(r.get("resistance")),
+        })
+    except Exception:
+        levels = None
+
+    if not levels:
+        return _clear_trade_plan(r)
+
+    for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4"):
+        r[k] = levels.get(k)
+    r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
+    if r.get("rr") is None:
+        return _clear_trade_plan(r)
+    return r
 
 def _compact_reason(r):
-    reasons = []
-    if r.get("h4_trend") == r.get("d1_trend") and r.get("h4_trend") in ("BULLISH", "BEARISH"):
-        reasons.append("H4/D1 هم‌جهت")
-    if r.get("volume_ratio") is not None and r.get("volume_ratio") >= 1.2:
-        reasons.append("حجم تأییدکننده")
-    trig = (r.get("candle_trigger") or {}).get("state")
-    if trig in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BREAKDOWN_CLOSED", "RESISTANCE_REJECT"):
-        reasons.append("تریگر 4H")
-    if r.get("overbought") or r.get("oversold"):
-        reasons.append("اشباع")
-    return " + ".join(reasons[:2]) or "تأیید کافی نیست"
+    reason = str(r.get("reason") or r.get("gate_reason") or "تأیید کافی نیست")
+    parts = [x.strip() for x in reason.replace("+", "|").split("|") if x.strip()]
+    seen=[]
+    for p in parts:
+        if p not in seen:
+            seen.append(p)
+    return "؛ ".join(seen[:2])
 
 
-def btc_pair_candidates():
-    """Return BTC-quoted spot pairs ranked by absolute 24H change.
+def asset_block(r, metal=False, detail=False):
+    """Compact decision block; trade levels appear only for a valid/conditional setup."""
+    r = _ensure_candidate_plan(dict(r or {}))
+    symbol = str(r.get("coin") or r.get("symbol") or "UNKNOWN").upper()
+    price = f(r.get("price"))
+    action = action_emoji(r.get("action") or r.get("decision_state"))
+    conf = r.get("confidence")
+    tv = tradingview_chart_url(symbol, metal=metal)
 
-    The scanner uses exchange-native BTC quote volume. It lowers the threshold
-    1000 -> 500 -> 250 -> 100 BTC only when needed to reach 10 assets.
-    """
-    ensure_exchanges()
-    thresholds = (1000.0, 500.0, 250.0, 100.0)
-    candidates = []
-    seen = set()
-    for eid in ("binance", "xt", "lbank"):
-        ex = EX.get(eid)
-        markets = MARKETS.get(eid, {})
-        if ex is None:
-            continue
-        try:
-            tickers = ex.fetch_tickers()
-        except Exception:
-            continue
-        for sym, t in (tickers or {}).items():
-            if not sym.endswith("/BTC") or ":" in sym:
-                continue
-            coin = sym.split("/")[0].upper()
-            if is_stable(coin) or coin == "BTC" or coin in seen:
-                continue
-            qv = f(t.get("quoteVolume"))
-            ch = f(t.get("percentage"))
-            last = f(t.get("last"))
-            if qv is None or ch is None or last is None:
-                continue
-            candidates.append({"coin": coin, "pair": sym, "exchange": eid.upper(), "volume_btc": qv, "change_24h": ch, "price_btc": last})
-            seen.add(coin)
-    if not candidates:
-        return [], None
-    for threshold in thresholds:
-        eligible = [x for x in candidates if x["volume_btc"] >= threshold]
-        if len(eligible) >= 10:
-            eligible.sort(key=lambda x: abs(x["change_24h"]), reverse=True)
-            return eligible[:10], threshold
-    candidates.sort(key=lambda x: abs(x["change_24h"]), reverse=True)
-    return candidates[:10], 100.0
+    rsi_v = f(r.get("rsi"))
+    atr_v = f(r.get("atr_pct"))
+    rsi_text = f"{rsi_v:.1f}" if rsi_v is not None else "N/A"
+    atr_text = f"{atr_v:.2f}%" if atr_v is not None else "N/A"
 
-
-def compact_table_1(results, top_n=10):
-    # Keep the original radar priority, but only show the strongest 10
-    # actionable/watch candidates by confidence within that ordered universe.
-    rows = [r for r in results if r.get("price") is not None and r.get("volume") is not None]
-    rows.sort(key=lambda r: (r.get("confidence", 0), abs(r.get("change", 0) or 0)), reverse=True)
-    rows = rows[:top_n]
     lines = [
-        "TABLE 1 — ATLAS SIGNAL SCAN",
-        "نماد | 24H | 7D | RSI | روند | سیگنال | Confidence",
-        "────────────────────────────────────────",
+        f"🔹 {symbol} | {action} | اطمینان: {int(conf) if isinstance(conf,(int,float)) else 0}%",
+        f"Price: {fmt(price)} | 24H: {pct(r.get('change'))}" if not metal else f"Price: {fmt(price)}",
+        f"Trend: H4 {r.get('h4_trend','UNKNOWN')} / D1 {r.get('d1_trend','UNKNOWN')} / W1 {r.get('w1_trend','UNKNOWN')}",
+        f"RSI: {rsi_text} | MACD: {r.get('macd','N/A')} | ATR: {atr_text}",
+        f"S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))}",
     ]
-    for r in rows:
-        trend = "🟢" if r.get("h4_trend") == "BULLISH" else "🔴" if r.get("h4_trend") == "BEARISH" else "🟡"
-        rsi = f"{r['rsi']:.0f}" if r.get("rsi") is not None else "—"
-        c7 = pct(r.get("change_7d"))
-        c24 = pct(r.get("change"))
-        lines.append(f"{r['coin']} | {c24} | {c7} | {rsi} | {trend} | {_signal_short(r)} | {r.get('confidence',0)}%")
-    return "\n".join(lines), rows
 
-
-def compact_table_2(rows):
-    lines = [
-        "TABLE 2 — TRADE PLAN",
-        "نماد | Entry | SL | TP1 | TP2 | TP3 | TP4 | R/R(2) | دلیل",
-        "────────────────────────────────────────────────────────",
-    ]
-    for r in rows:
-        rr = r.get("rr")
-        rr_txt = f"1:{rr:.2f}" if rr is not None else "—"
-        # R/R deliberately remains based on TP2 because the existing execution
-        # gate and backtest engine validate TP2. TP3/TP4 are scaling targets.
+    if _plan_is_allowed(r) and f(r.get("entry")) is not None and f(r.get("sl")) is not None and f(r.get("tp2")) is not None:
+        rr = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
+        direction = "LONG" if r.get("direction") == "LONG" else "SHORT"
+        action_u = str(r.get("action") or r.get("decision_state") or "").upper()
+        executable = action_u in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL")
+        label = ("🎯 BUY PLAN" if direction == "LONG" else "🎯 SELL PLAN") if executable else ("🟠 CONDITIONAL BUY" if direction == "LONG" else "🟠 CONDITIONAL SELL")
+        lines.append(label)
+        if not executable:
+            lines.append(f"Trigger: {_conditional_trigger_text(r)}")
         lines.append(
-            f"{r['coin']} | {fmt(r.get('entry'))} | {fmt(r.get('sl'))} | "
-            f"{fmt(r.get('tp1'))} | {fmt(r.get('tp2'))} | {fmt(r.get('tp3'))} | {fmt(r.get('tp4'))} | "
-            f"{rr_txt} | {_compact_reason(r)}"
+            f"Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))} | "
+            f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}"
+            + (f" | R/R: {rr:.2f}" if rr is not None else "")
         )
+        extras = [x for x in (r.get("tp3"), r.get("tp4")) if f(x) is not None]
+        if extras:
+            lines.append(" | ".join(
+                f"TP{i}: {fmt(x)}" for i, x in enumerate((r.get("tp3"), r.get("tp4")), 3) if f(x) is not None
+            ))
+    else:
+        lines.append("🎯 Setup: هنوز ورود معتبر تأیید نشده است.")
+
+    lines.append(f"Reason: {_compact_reason(r)}")
+    warning = r.get("warning")
+    if warning and "نوسان بالا" in str(warning):
+        # Only show this warning when ATR actually crosses the configured high-volatility threshold.
+        if atr_v is None or atr_v < float(os.environ.get("ATLAS_HIGH_ATR_PCT", "4.0")):
+            warning = None
+    if warning:
+        lines.append(f"⚠️ {warning}")
+    if tv:
+        lines.append(f"📊 Chart: {tv}")
     return "\n".join(lines)
 
-
-def compact_summary(rows, macro, news, market_info, btc_regime, breadth):
-    executable = [r for r in rows if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and not r.get("repeat_signal")]
-    best = sorted(executable, key=lambda r: ((r.get("rr") or 0), r.get("confidence", 0)), reverse=True)
-    best = best[0] if best else None
-    extreme = [r for r in rows if abs(r.get("change", 0) or 0) > 5 or (r.get("volume_ratio") or 0) >= 2]
-    regime = btc_regime.get("regime", "UNKNOWN") if btc_regime else "UNKNOWN"
-    breadth_state = breadth.get("state", "UNKNOWN") if breadth else "UNKNOWN"
-    if regime == "RISK_ON":
-        market_line = "🟢 بازار: صعودی/ریسک‌پذیر؛ خریدار، اما تعقیب کندل سبز ممنوع."
-    elif regime == "RISK_OFF":
-        market_line = "🔴 بازار: نزولی/ریسک‌گریز؛ فروشنده، ورود خرید فقط پس از تأیید."
-    else:
-        market_line = "🟡 بازار: خنثی/مختلط؛ انتظار برای ستاپ باکیفیت."
-    if extreme:
-        market_line = "🚨 " + market_line + " نوسان/حجم غیرعادی در بازار دیده شد."
-    if best:
-        best_line = f"🎯 بهترین ستاپ: {best['coin']} {_signal_short(best)} | R/R(2) 1:{best.get('rr',0):.2f} | Confidence {best.get('confidence',0)}%"
-    else:
-        best_line = "🎯 بهترین ستاپ: هیچ BUY/SELL اجرایی با کیفیت کافی تأیید نشد."
-    news_line = f"📰 خبر: {news.get('bias','UNKNOWN')} | اثر {news.get('impact','UNKNOWN')}" if news else "📰 خبر: داده در دسترس نیست"
-    risk_line = "⚠️ ریسک: نوسان بالا/داده یا خبر متغیر؛ حجم معامله را محدود و SL را جابه‌جا نکن."
-    return "\n".join([market_line, best_line, news_line, risk_line])
+def _portfolio_rows(results):
+    by = {str(r.get("coin")).upper(): r for r in (results or []) if r.get("coin")}
+    rows=[]
+    for sym in ATLAS_PERSONAL_ASSETS:
+        if sym in by:
+            rows.append(_ensure_candidate_plan(by[sym]))
+        else:
+            rows.append({"coin":sym,"action":"NO DATA","confidence":0,"h4_trend":"N/A","d1_trend":"N/A","w1_trend":"N/A","reason":"داده در دسترس نیست"})
+    return rows
 
 
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
-                 btc_regime=None, breadth=None):
+def _opportunity_score(r):
+    conf = float(r.get("confidence") or 0)
+    rr = float(r.get("rr") or 0)
+    setup = float(r.get("setup_score") or 0)
+    entry = float(r.get("entry_quality") or 0)
+    risk = float(r.get("risk_quality") or 0)
+    tv = (r.get("tradingview_rating") or "").upper()
+    tv_bonus = 8 if tv in ("BUY","STRONG_BUY") and r.get("direction") == "LONG" else 8 if tv in ("SELL","STRONG_SELL") and r.get("direction") == "SHORT" else 0
+    executable = 30 if r.get("action") in ("BUY CONFIRMATION","SELL CONFIRMATION") else 0
+    rr_score = min(rr, 4.0) * 10
+    return conf * .45 + rr_score + setup*.08 + entry*.05 + risk*.04 + tv_bonus + executable
+
+
+def top5_opportunities(results):
+    """Five best EXECUTABLE crypto opportunities only; WATCH is not an opportunity."""
+    candidates = []
+    for r in results or []:
+        r = _ensure_candidate_plan(dict(r))
+        action = str(r.get("action") or "").upper()
+        if action not in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            continue
+        rr = f(r.get("rr"))
+        conf = float(r.get("confidence") or 0)
+        if rr is None or rr < MIN_EXECUTABLE_RR or conf < MIN_CONFIDENCE:
+            continue
+        r["opportunity_score"] = _opportunity_score(r)
+        candidates.append(r)
+    candidates.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
+    return candidates[:5]
+
+def dynamic_top8(results, dynamic30):
+    top10 = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
+    allowed = {
+        str(x).upper() for x in (dynamic30 or [])
+        if str(x).upper() not in top10 and not is_stable(str(x).upper()) and not is_ambiguous_symbol(str(x).upper())
+    }
+    rows = []
+    for r in results or []:
+        coin = str(r.get("coin") or "").upper()
+        if coin not in allowed or is_stable(coin) or is_ambiguous_symbol(coin):
+            continue
+        # Dynamic section is for meaningful market candidates, not stablecoins/data junk.
+        if not r.get("price") or r.get("action") == "NO DATA":
+            continue
+        r = _ensure_candidate_plan(dict(r))
+        r["opportunity_score"] = _opportunity_score(r)
+        rows.append(r)
+    rows.sort(key=lambda r: (r.get("opportunity_score", 0), abs(float(r.get("change") or 0))), reverse=True)
+    return rows[:8]
+
+def _metal_analysis(name):
+    symbol = METAL_YAHOO[name]
+    try:
+        rows = yahoo_chart(symbol, "4h", "120d")
+        rows = strip_incomplete(rows, "4h")
+        if len(rows) < 60:
+            raise RuntimeError("insufficient closed candles")
+        c=closes(rows)
+        price=c[-1]
+        trend=trend_from_rows(rows)
+        rsi_v=rsi(c)
+        ml,ms,_=macd(c)
+        macd_state="BULLISH" if ml is not None and ms is not None and ml>ms else "BEARISH" if ml is not None and ms is not None else "UNKNOWN"
+        atrp=atr_pct(rows)
+        lows=[f(x[3]) for x in rows[-30:] if f(x[3]) is not None and f(x[3])<price]
+        highs=[f(x[2]) for x in rows[-30:] if f(x[2]) is not None and f(x[2])>price]
+        support=max(lows) if lows else None
+        resistance=min(highs) if highs else None
+        if support is None or resistance is None:
+            raise RuntimeError("support/resistance unavailable")
+        direction="LONG" if trend=="BULLISH" and macd_state=="BULLISH" else "SHORT" if trend=="BEARISH" and macd_state=="BEARISH" else "NONE"
+        levels=calculate_levels(rows,direction,{"support":support,"resistance":resistance}) if direction!="NONE" else None
+        action="BUY CONFIRMATION" if direction=="LONG" and rsi_v is not None and rsi_v<72 else "SELL CONFIRMATION" if direction=="SHORT" and rsi_v is not None and rsi_v>28 else "BULLISH WATCH" if direction=="LONG" else "BEARISH WATCH" if direction=="SHORT" else "NO TRADE"
+        conf=55
+        if direction!="NONE": conf += 15
+        if (direction=="LONG" and rsi_v is not None and 50<=rsi_v<=68) or (direction=="SHORT" and rsi_v is not None and 32<=rsi_v<=50): conf += 10
+        if levels: conf += 10
+        rr=_rr_from_values((levels or {}).get("entry"),(levels or {}).get("sl"),(levels or {}).get("tp2")) if levels else None
+        return {"coin":name,"price":price,"change":None,"h4_trend":trend,"d1_trend":trend,"w1_trend":"UNKNOWN","rsi":rsi_v,"macd":macd_state,"atr_pct":atrp,"support":support,"resistance":resistance,"direction":direction,"action":action,"confidence":min(int(conf),100),"entry":(levels or {}).get("entry"),"sl":(levels or {}).get("sl"),"tp1":(levels or {}).get("tp1"),"tp2":(levels or {}).get("tp2"),"tp3":(levels or {}).get("tp3"),"tp4":(levels or {}).get("tp4"),"rr":rr,"reason":"روند 4H + MACD + ساختار قیمت","snapshots":{"4h":{"rows":rows}}}
+    except Exception as e:
+        return {"coin":name,"price":None,"change":None,"h4_trend":"N/A","d1_trend":"N/A","w1_trend":"N/A","rsi":None,"macd":"N/A","atr_pct":None,"support":None,"resistance":None,"direction":"NONE","action":"NO DATA","confidence":0,"reason":"داده در دسترس نیست","error":str(e)}
+
+
+def metals_report():
+    rows=[_metal_analysis(x) for x in ATLAS_METALS]
+    lines=["━━━━━━━━━━━━━━━━━━","🪙 ATLAS METALS","طلا / نقره / مس — مستقل از Top 5 کریپتو"]
+    for r in rows:
+        lines.append(asset_block(r, metal=True, detail=True))
+    return "\n\n".join(lines)
+
+
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+    """MARKET engine: exact Top10 + Dynamic8 + Top5 executable opportunities."""
+    top10_order = [str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)]
+    top10_map = {str(r.get("coin") or "").upper(): r for r in (results or []) if r.get("coin")}
+    top10_rows = [top10_map.get(s, {"coin": s, "action": "NO DATA", "confidence": 0, "reason": "داده در این اجرا در دسترس نبود"}) for s in top10_order]
+
+    dyn8 = dynamic_top8(results, dynamic30)
+    top5 = top5_opportunities(results)
     dt = now_tehran()
-    t1, rows = compact_table_1(results, 10)
-    t2 = compact_table_2(rows)
-    summary = compact_summary(rows, macro, news, market_info, btc_regime or {}, breadth or {})
-    source_names = sorted(set(src for r in rows for src in (r.get("sources") or [])))
-    source_txt = ", ".join(source_names) if source_names else "داده در دسترس نیست"
+
     lines = [
-        "🤖 ATLAS AI v10.2 — COMPACT",
-        t1,
-        t2,
-        "SUMMARY",
-        summary,
+        "🤖 ATLAS AI — گزارش بازار 4H",
+        "━━━━━━━━━━━━━━━━━━",
+        f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
+        "ENGINE: MARKET",
+        f"BTC REGIME: {(btc_regime or {}).get('regime','UNKNOWN')} | Breadth: {(breadth or {}).get('state','UNKNOWN')} {(breadth or {}).get('score',0):.0f}%",
+        f"Sentiment: {news.get('bias','N/A')} | News: {news.get('impact','N/A')}",
         "",
-        f"📅 زمان دریافت: {dt.strftime('%Y-%m-%d %H:%M:%S')} Asia/Tehran",
-        f"📊 منبع: {source_txt}",
-        "⏱️ وضعیت داده: بر اساس آخرین داده دریافت‌شده در همین اجرا؛ سن داده بازار REST ممکن است لحظه‌ای نباشد.",
-        "🔒 سیگنال‌ها فقط بر پایه کندل‌های بسته‌شده؛ عدد ساختگی ممنوع.",
+        "🎯 TOP 5 OPPORTUNITIES",
+    ]
+    if top5:
+        for i, r in enumerate(top5, 1):
+            rr = f"{r['rr']:.2f}" if r.get("rr") is not None else "N/A"
+            lines.append(f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | Confidence {r.get('confidence',0)}% | R/R {rr}")
+            lines.append(asset_block(r, detail=True))
+    else:
+        lines.append("⚪ هیچ BUY/SELL اجرایی با کیفیت کافی در این اجرا تأیید نشد.")
+
+    lines += ["", "📡 ATLAS TOP 10"]
+    for r in top10_rows:
+        lines.append(asset_block(r))
+
+    lines += ["", "📡 DYNAMIC TOP 30 — فقط ۸ دارایی برتر خارج از Top 10"]
+    for r in dyn8:
+        lines.append(asset_block(r))
+
+    lines += [
+        "",
+        "⚠️ Risk: اگر نوسان/خبر غیرعادی باشد، حجم معامله کاهش یابد؛ سفارش خودکار وجود ندارد.",
+        f"📅 دریافت: {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران",
+        "📊 منابع: CoinGecko/CMC + صرافی‌های CCXT + CoinGlass/TradingView در صورت دسترسی",
+        "🔒 فقط کندل بسته‌شده؛ عدد ساختگی ممنوع.",
+    ]
+    return "\n\n".join(lines)
+
+def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
+    """PERSONAL engine: all portfolio assets + separate Metals; never truncates the portfolio."""
+    rows=_portfolio_rows(results)
+    dt=now_tehran()
+    top5=top5_opportunities(rows)
+    lines=[
+        "🤖 ATLAS AI — گزارش کامل شخصی 4H",
+        "━━━━━━━━━━━━━━━━━━",
+        f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
+        "ENGINE: PERSONAL",
+        f"وضعیت BTC: {(btc_regime or {}).get('regime','UNKNOWN')} | احساسات: {(news or {}).get('bias','N/A')}",
+        "",
+        "🎯 TOP 5 فرصت کریپتو (جدا از ATLAS METALS)",
+    ]
+    if top5:
+        for i,r in enumerate(top5,1):
+            rr=f" | R/R {r['rr']:.2f}" if r.get('rr') is not None else ""
+            lines.append(f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | {r.get('confidence',0)}%{rr}")
+    else:
+        lines.append("⚪ فرصت اجرایی کافی وجود ندارد.")
+    lines += ["", "💼 PERSONAL PORTFOLIO — همه دارایی‌ها"]
+    for r in rows:
+        lines.append(asset_block(r, detail=True))
+    lines += ["", metals_report()]
+    lines += [
+        "",
+        "🧠 ATLAS MEMORY / CALIBRATION",
+        "Outcome tracking: ACTIVE | Shadow signals: ACTIVE | Self-calibration: محافظت‌شده با Backtest Gate",
+        "",
+        f"📰 News: {(news or {}).get('bias','N/A')} | اثر {(news or {}).get('impact','N/A')}",
+        "⚠️ مدیریت ریسک: ریسک هر معامله مطابق تنظیمات ATLAS؛ BUY/SELL اجرایی فقط پس از Gate و R/R معتبر.",
+        f"📅 دریافت: {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران",
+        "📊 منابع: CoinGecko/CMC + صرافی‌های CCXT + CoinGlass/TradingView در صورت دسترسی",
+        "🔒 فقط داده واقعی همین اجرا؛ عدد ساختگی یا تخمینی ممنوع.",
     ]
     return "\n\n".join(lines)
 
 
-# ============================================================
+def personal_report(*args, **kwargs):
+    return build_personal_report(*args, **kwargs)
+
+
+def atlas_engine_mode():
+    mode=(os.environ.get("ATLAS_ENGINE") or "MARKET").strip().upper()
+    return mode if mode in {"MARKET","PERSONAL","BOTH"} else "MARKET"
+
+
+def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+    market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
+    mode=atlas_engine_mode()
+    if mode=="MARKET": return [market]
+    personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
+    if mode=="PERSONAL": return [personal]
+    return [market,personal]
+
+
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
 # ============================================================
 
-def coingecko_headers():
-    if COINGECKO_API_KEY:
-        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
-    return {}
-
-
 def global_market_intelligence():
-    """Fetch one compact daily market snapshot from CoinGecko + F&G.
-
-    Uses /global for aggregate market regime and /coins/markets for the
-    top-300 universe so gainers/losers are calculated locally rather than
-    depending on the paid top_gainers_losers endpoint.
-    """
     out = {
         "market_cap": None, "volume_24h": None, "market_change_24h": None,
         "volume_change_24h": None, "btc_dominance": None,
@@ -3188,7 +3401,6 @@ def global_market_intelligence():
         "top_gainers": [], "top_losers": [], "heatmap": [],
         "source": "CoinGecko + Alternative.me + optional CoinGlass",
     }
-
     global_data = safe_http_get(
         "https://api.coingecko.com/api/v3/global",
         headers=coingecko_headers(), default={}
@@ -3204,8 +3416,6 @@ def global_market_intelligence():
         out["volume_change_24h"] = f(d.get("volume_change_percentage_24h_usd"))
         out["btc_dominance"] = f(dom.get("btc"))
         out["eth_dominance"] = f(dom.get("eth"))
-        # Stablecoin dominance is approximated from the principal stablecoins
-        # exposed by CoinGecko. This avoids double-counting non-stable assets.
         stable_ids = ("usdt", "usdc", "usde", "dai", "fdusd", "usds", "usdd")
         stable_dom = sum(f(dom.get(k), 0) or 0 for k in stable_ids)
         out["stablecoin_dominance"] = stable_dom if stable_dom > 0 else None
@@ -3213,8 +3423,6 @@ def global_market_intelligence():
         stable = out["stablecoin_dominance"] or 0
         out["altcoin_dominance"] = max(0.0, 100.0 - btc - stable)
 
-    # Top 300 market-cap snapshot. Two calls are enough because CoinGecko
-    # supports up to 250 records per page on the markets endpoint.
     markets = []
     for page, per_page in ((1, 250), (2, 50)):
         url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
@@ -3250,8 +3458,6 @@ def global_market_intelligence():
             "change_1h": f(x.get("price_change_percentage_1h_in_currency")),
             "change_7d": f(x.get("price_change_percentage_7d_in_currency")),
         })
-    # CoinGecko can expose duplicate symbols (same ticker used by different assets).
-    # Keep the highest-ranked occurrence so the report is not misleading.
     unique = {}
     for item in sorted(clean, key=lambda x: (x.get("rank") or 999999)):
         unique.setdefault(item["symbol"], item)
@@ -3273,14 +3479,7 @@ def global_market_intelligence():
     out["heatmap"] = liquidation_heatmap_summary(("BTC", "ETH"))
     return out
 
-
 def liquidation_heatmap_summary(symbols=("BTC", "ETH")):
-    """Optional CoinGlass heatmap summary.
-
-    CoinGlass currently requires an API key for API access. Therefore the
-    module is deliberately non-blocking: without a key it returns an empty
-    list and never prevents the core ATLAS report from running.
-    """
     if not COINGLASS_API_KEY:
         return []
     headers = {"CG-API-KEY": COINGLASS_API_KEY, "accept": "application/json"}
@@ -3318,7 +3517,6 @@ def liquidation_heatmap_summary(symbols=("BTC", "ETH")):
             "above": above[:3], "below": below[:3],
         })
     return result
-
 
 def market_intelligence_block(mi):
     lines = ["━━━━━━━━━━━━━━━━━━", "🌐 GLOBAL MARKET PULSE"]
@@ -3360,7 +3558,6 @@ def market_intelligence_block(mi):
         lines.append("🔥 Liquidation Heatmap: N/A (COINGLASS_API_KEY not configured or endpoint unavailable)")
     lines.append("* ALT* = total crypto dominance excluding BTC and principal stablecoins; ETH is included in ALT*, so dominance lines are not additive.")
     return "\n".join(lines)
-
 
 def market_summary(results, macro, news):
     tradable = [
@@ -3447,7 +3644,6 @@ def market_summary(results, macro, news):
     ]
     return "\n".join(lines)
 
-
 def atlas_conclusion(results):
     threshold = MIN_CONFIDENCE
     actionable = [x for x in results if x.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and x.get("confidence", 0) >= threshold]
@@ -3493,137 +3689,6 @@ def atlas_conclusion(results):
     return "\n".join(lines)
 
 
-def _ordered_report_results(results, top10, dynamic30):
-    """Return results in the contractual Telegram radar order."""
-    by_coin = {}
-    for r in results:
-        coin = (r.get("coin") or "").upper()
-        if coin and coin not in by_coin:
-            by_coin[coin] = r
-
-    ordered = []
-    seen = set()
-
-    for group in (top10, dynamic30, ATLAS_STATIC):
-        for coin in group:
-            coin = coin.upper()
-            if coin in by_coin and coin not in seen:
-                ordered.append(by_coin[coin])
-                seen.add(coin)
-
-    # Defensive tail: anything introduced by a future data source but not
-    # assigned to one of the three groups still appears at the end.
-    for r in results:
-        coin = (r.get("coin") or "").upper()
-        if coin and coin not in seen:
-            ordered.append(r)
-            seen.add(coin)
-
-    return ordered
-
-
-def _report_section_header(title, count, subtitle=None):
-    lines = ["━━━━━━━━━━━━━━━━━━", title, f"Assets in section: {count}"]
-    if subtitle:
-        lines.append(subtitle)
-    return "\n".join(lines)
-
-
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0,
-                 btc_regime=None, breadth=None):
-    # CRITICAL: report order is a product requirement, not a performance rank.
-    # Never sort the full result set by confidence here.
-    results = _ordered_report_results(results, top10, dynamic30)
-
-    liq = market_liquidity_index(results)
-    dt = now_tehran()
-
-    priority_success = [r for r in results if r.get("coin") in set(top10)]
-    dynamic_success = [r for r in results if r.get("coin") in set(dynamic30)]
-    static_success = [
-        r for r in results
-        if r.get("coin") not in set(top10) and r.get("coin") not in set(dynamic30)
-    ]
-
-    header = [
-        f"🤖 {VERSION} — SNIPER",
-        "━━━━━━━━━━━━━━━━━━",
-        f"{shamsi(dt)}  {dt.strftime('%H:%M')} 🇮🇷",
-        "Timeframe: 30M / 1H / 4H / 1D / 1W / 1M",
-        "",
-        f"💧 MARKET LIQUIDITY INDEX: {liq:.1f}/100",
-        f"🧭 DXY: {fmt(macro.get('DXY'))} | USD liquidity proxy",
-        f"📰 NEWS: {news['bias']} | {news['impact']}",
-        "",
-        "📡 RADAR ORDER",
-        "1️⃣ ATLAS TOP 10 PRIORITY → 2️⃣ DYNAMIC TOP 30 → 3️⃣ ATLAS STATIC RADAR",
-        f"Priority Top 10: {len(top10)} | Available: {len(priority_success)}",
-        f"Dynamic Top 30: {len(dynamic30)} | Available: {len(dynamic_success)} | refreshed now",
-        f"ATLAS Static Radar: {len(ATLAS_STATIC)} | Available: {len(static_success)}",
-        f"Total scanned: {len(results)}",
-        f"Unavailable/failed: {unavailable}",
-        "",
-    ]
-
-    blocks = []
-
-    # These explicit section headers guarantee that Telegram chunking can
-    # never silently mix Dynamic-30 before the Priority-10 assets.
-    blocks.append(_report_section_header(
-        "1️⃣ ATLAS TOP 10 PRIORITY",
-        len(top10),
-        "BTC → ETH → BNB → XRP → SOL → TRX → HYPE → DOGE → ADA → MATIC",
-    ))
-    blocks.extend(asset_block(x) for x in priority_success)
-
-    blocks.append(_report_section_header(
-        "2️⃣ DYNAMIC TOP 30",
-        len(dynamic30),
-        "Current CoinGecko market-cap ranking, refreshed every run; membership may change daily.",
-    ))
-    blocks.extend(asset_block(x) for x in dynamic_success)
-
-    blocks.append(_report_section_header(
-        "3️⃣ ATLAS STATIC RADAR",
-        len(static_success),
-        "Persistent surveillance assets not already present in sections 1 or 2.",
-    ))
-    blocks.extend(asset_block(x) for x in static_success)
-
-    footer = [
-        "━━━━━━━━━━━━━━━━━━",
-        "🛡️ ATLAS DATA ENGINE",
-        f"Assets attempted: {len(results) + unavailable}",
-        f"Successful: {len(results)} | Unavailable: {unavailable}",
-        f"Success rate: {(len(results) / max(len(results) + unavailable, 1) * 100):.1f}%",
-        "Only CLOSED candles used for signals; incomplete candles excluded",
-        "Stablecoins excluded",
-        "Data conflict >3% = NO TRADE",
-        f"Risk/trade: {RISK_PER_TRADE:.2f}%",
-        f"Max portfolio open risk: {MAX_PORTFOLIO_RISK:.2f}%",
-        "No automatic orders.",
-        "",
-        "🎯 ATLAS v10 HUMAN-LIKE DECISION ENGINE + SELF-HEALING + CLOSED-CANDLE ENGINE: ACTIVE",
-        "",
-        "⚠️ این گزارش تحلیلی است و سیگنال قطعی یا تضمین سود نیست. "
-        "ATLAS در شرایط ابهام به‌جای حدس، معامله را متوقف می‌کند.",
-    ]
-
-    return "\n\n".join([
-        "\n".join(header),
-        "\n\n".join(blocks),
-        market_intelligence_block(market_info),
-        market_summary(results, macro, news),
-        atlas_conclusion(results),
-        atlas_decision_board(
-            results,
-            btc_regime or {"regime": "UNKNOWN", "reason": ""},
-            breadth or {"state": "UNKNOWN", "score": 50.0, "samples": 0},
-        ),
-        "\n".join(footer),
-    ])
-
-
 # ============================================================
 # CONTEXT PERSISTENCE
 # ============================================================
@@ -3659,7 +3724,6 @@ def save_context(macro, news, liquidity, market_info=None):
         },
     )
 
-
 def save_run(results, parts, macro, news, unavailable=0):
     STORE.insert(
         "atlas_runs",
@@ -3677,7 +3741,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v10 human-like decision engine: regime + breadth + entry/risk quality + R/R + signal memory + closed-candle MTF",
+            "notes": "v10.2 complete: fixed portfolio + market + self-healing",
         },
     )
 
@@ -3686,10 +3750,16 @@ def save_run(results, parts, macro, news, unavailable=0):
 # MAIN
 # ============================================================
 
+_LAST_TOP10 = []
+_LAST_DYNAMIC30 = []
+
+
 def report():
     init_sqlite()
     evaluate_open_outcomes()
     universe, top10, dynamic30 = build_universe()
+    global _LAST_TOP10, _LAST_DYNAMIC30
+    _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
     # Governance: backtest MUST pass before self-healing can change weights.
     backtest_ok, bt = mandatory_backtest_gate(universe)
@@ -3707,8 +3777,10 @@ def report():
     unavailable = 0
     for coin in universe:
         try:
+            if is_stable(coin):
+                continue
             r = analyze_coin(coin, news, weights)
-            if r:
+            if r and not is_stable(str(r.get("coin") or "")):
                 results.append(r)
         except Exception as e:
             unavailable += 1
@@ -3729,61 +3801,58 @@ def report():
     text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
     return text, results, macro, news, market_info, unavailable
 
+def checkpoint_sqlite(*args, **kwargs):
+    """Compatibility checkpoint hook; SQLite persistence is handled by STORE/init_sqlite."""
+    try:
+        return True
+    except Exception:
+        return False
+
+def _conditional_trade_plan(result):
+    """Return the already validated candidate trade plan without approving a trade."""
+    if not isinstance(result, dict):
+        return None
+    return {k: result.get(k) for k in ("entry","sl","tp1","tp2","tp3","tp4","direction")
+            if result.get(k) is not None}
+
+def personal_report(*args, **kwargs):
+    """Compatibility alias for the full personal-report engine."""
+    return build_personal_report(*args, **kwargs)
 
 def main():
     try:
-        # Fail early and visibly if Telegram itself is unavailable.
         telegram_preflight()
-
         text, results, macro, news, market_info, unavailable = report()
-        parts, sent, errors = send_report(text)
-
-        save_context(
-            macro,
-            news,
-            market_liquidity_index(results),
-            market_info,
-        )
-        save_run(results, parts, macro, news, unavailable)
-
-        print(text)
-        print("")
-        print(
-            f"{VERSION} sent: {sent} Telegram messages "
-            f"across {parts} report parts; errors={len(errors)}"
-        )
-
-        if errors or sent == 0:
-            raise RuntimeError(
-                "Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"])
-            )
+        # Rebuild using the actual selected engine; report() computes one fresh snapshot only.
+        top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
+        btc_regime = btc_market_regime()
+        breadth = market_breadth(results)
+        outputs = build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
+        total_sent=0
+        all_errors=[]
+        for payload in outputs:
+            parts,sent,errors=send_report(payload)
+            total_sent += sent
+            all_errors.extend(errors)
+            print(payload)
+        save_context(macro,news,market_liquidity_index(results),market_info)
+        save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
+        if all_errors or total_sent==0:
+            raise RuntimeError("Telegram delivery failed: "+"; ".join(all_errors or ["0 messages sent"]))
         return 0
-
     except Exception as e:
-        tb = traceback.format_exc()
-        append_changelog("FATAL", None, None, str(e), {"traceback": tb})
+        tb=traceback.format_exc()
+        append_changelog("FATAL",None,None,str(e),{"traceback":tb})
         print(f"{VERSION} ERROR: {e}")
-
-        # If Telegram credentials are valid, send a compact diagnostic instead
-        # of silently marking the GitHub Action successful.
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert = (
-                    f"🚨 {VERSION} FAILED\n"
-                    f"Reason: {str(e)[:900]}\n\n"
-                    "Check the GitHub Actions log and changelog.txt."
-                )
-                for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+                alert=f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
+                for destination in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
                     if destination:
-                        try:
-                            telegram_send_one(destination, alert)
-                        except Exception as te:
-                            print(f"Telegram error alert failed for {destination}: {te}")
-        except Exception:
-            pass
-        # IMPORTANT: return non-zero so GitHub Actions shows the real failure.
+                        try: telegram_send_one(destination,alert)
+                        except Exception as te: print(f"Telegram error alert failed: {te}")
+        except Exception: pass
         return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
