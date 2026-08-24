@@ -8,6 +8,7 @@
 # - BTC pair filtering with dynamic volume threshold
 # - Two-table format: market overview + trade plan
 # - 4-line summary: market regime, best setup, news, risk
+# - Separate 3H Price Snapshot with public Iranian USDT pricing; no API key required
 # - No extra paragraphs or explanations
 # - Real-time data only, no fabricated numbers
 # - Smart Telegram rate limit handling with exponential backoff
@@ -674,7 +675,7 @@ def init_exchanges():
     global EX, MARKETS
     EX = {}
     MARKETS = {}
-    for eid in ("lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+    for eid in ("kcex", "lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
         try:
             ex = make_exchange(eid)
             markets = ex.load_markets()
@@ -807,7 +808,7 @@ def candle_event(coin, timeframe, rows):
 
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
-    for eid in ("lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+    for eid in ("kcex", "lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
         try:
             return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
         except Exception:
@@ -3209,10 +3210,13 @@ def _opportunity_score(r):
     return conf * .45 + rr_score + setup*.08 + entry*.05 + risk*.04 + tv_bonus + executable
 
 
-def top5_opportunities(results):
-    """Five best EXECUTABLE crypto opportunities only; WATCH is not an opportunity."""
+def top5_opportunities(results, exclude_symbols=None):
+    """Five best EXECUTABLE crypto opportunities; excluded portfolio symbols never leak into MARKET."""
+    excluded = {str(x).upper() for x in (exclude_symbols or ())}
     candidates = []
     for r in results or []:
+        if str(r.get("coin") or "").upper() in excluded:
+            continue
         r = _ensure_candidate_plan(dict(r))
         action = str(r.get("action") or "").upper()
         if action not in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
@@ -3226,11 +3230,15 @@ def top5_opportunities(results):
     candidates.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
     return candidates[:5]
 
-def dynamic_top8(results, dynamic30):
+def dynamic_top8(results, dynamic30, exclude_symbols=None):
     top10 = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
+    excluded = {str(x).upper() for x in (exclude_symbols or ())}
     allowed = {
         str(x).upper() for x in (dynamic30 or [])
-        if str(x).upper() not in top10 and not is_stable(str(x).upper()) and not is_ambiguous_symbol(str(x).upper())
+        if str(x).upper() not in top10
+        and str(x).upper() not in excluded
+        and not is_stable(str(x).upper())
+        and not is_ambiguous_symbol(str(x).upper())
     }
     rows = []
     for r in results or []:
@@ -3289,12 +3297,21 @@ def metals_report():
 
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     """MARKET engine: exact Top10 + Dynamic8 + Top5 executable opportunities."""
-    top10_order = [str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)]
-    top10_map = {str(r.get("coin") or "").upper(): r for r in (results or []) if r.get("coin")}
-    top10_rows = [top10_map.get(s, {"coin": s, "action": "NO DATA", "confidence": 0, "reason": "داده در این اجرا در دسترس نبود"}) for s in top10_order]
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    # MARKET must never duplicate an asset that is already in PERSONAL.
+    market_results = [
+        r for r in (results or [])
+        if str(r.get("coin") or "").upper() not in personal_symbols
+    ]
+    top10_order = [
+        str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)
+        if str(x).upper() not in personal_symbols
+    ]
+    top10_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
+    top10_rows = [top10_map[s] for s in top10_order if s in top10_map]
 
-    dyn8 = dynamic_top8(results, dynamic30)
-    top5 = top5_opportunities(results)
+    dyn8 = dynamic_top8(market_results, dynamic30, exclude_symbols=personal_symbols)
+    top5 = top5_opportunities(market_results, exclude_symbols=personal_symbols)
     dt = now_tehran()
 
     lines = [
@@ -3315,9 +3332,12 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     else:
         lines.append("⚪ هیچ BUY/SELL اجرایی با کیفیت کافی در این اجرا تأیید نشد.")
 
-    lines += ["", "📡 ATLAS TOP 10"]
-    for r in top10_rows:
-        lines.append(asset_block(r))
+    lines += ["", "📡 ATLAS TOP 10 — فقط دارایی‌های خارج از Personal Portfolio"]
+    if top10_rows:
+        for r in top10_rows:
+            lines.append(asset_block(r))
+    else:
+        lines.append("⚪ تمام دارایی‌های Top 10 در Personal Portfolio هستند؛ برای جلوگیری از گزارش تکراری نمایش داده نشدند.")
 
     lines += ["", "📡 DYNAMIC TOP 30 — فقط ۸ دارایی برتر خارج از Top 10"]
     for r in dyn8:
@@ -3815,11 +3835,6 @@ def _conditional_trade_plan(result):
     return {k: result.get(k) for k in ("entry","sl","tp1","tp2","tp3","tp4","direction")
             if result.get(k) is not None}
 
-def personal_report(*args, **kwargs):
-    """Compatibility alias for the full personal-report engine."""
-    return build_personal_report(*args, **kwargs)
-
-
 # ============================================================
 # ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT
 # ============================================================
@@ -3923,6 +3938,25 @@ def fetch_usdt_toman_public():
     # Median protects the snapshot from one stale/abnormal public page.
     return round(median([x[0] for x in candidates]), 0)
 
+def fetch_snapshot_results():
+    """Lightweight 3H snapshot path: tickers only, no 4H technical analysis."""
+    ensure_exchanges()
+    rows = []
+    for sym in SNAPSHOT_SYMBOLS:
+        best = None
+        for eid in ("kcex", "lbank", "bybit", "okx", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+            try:
+                t = exchange_ticker(eid, sym)
+                if f(t.get("price")) is not None:
+                    best = {"coin": sym, "price": t.get("price"), "change24": t.get("change")}
+                    break
+            except Exception:
+                continue
+        if best:
+            rows.append(best)
+    return rows
+
+
 def build_price_snapshot(results, updated_at=None):
     by_coin={str(r.get("coin") or "").upper():r for r in (results or [])}
     dt=updated_at or now_tehran()
@@ -3963,27 +3997,61 @@ def send_price_snapshot(results):
     parts,sent,errors=send_report(payload)
     return sent,errors
 
+def _automatic_run_plan(now=None):
+    """Unified scheduler: analysis every 4H, snapshot every 3H, both at overlaps."""
+    dt = now or now_tehran()
+    return {
+        "analysis": dt.hour % 4 == 0,
+        "snapshot": dt.hour % 3 == 0,
+    }
+
+
 def main():
     try:
         telegram_preflight()
-        text, results, macro, news, market_info, unavailable = report()
-        # Rebuild using the actual selected engine; report() computes one fresh snapshot only.
-        top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
-        btc_regime = btc_market_regime()
-        breadth = market_breadth(results)
-        outputs = build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
+        run_mode = (os.environ.get("ATLAS_RUN_MODE") or "BOTH").strip().upper()
+        if run_mode == "AUTO":
+            plan = _automatic_run_plan()
+            do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
+        elif run_mode == "SNAPSHOT":
+            do_analysis, do_snapshot = False, True
+        elif run_mode == "ANALYSIS":
+            do_analysis, do_snapshot = True, False
+        else:
+            do_analysis, do_snapshot = True, True
+
         total_sent=0
         all_errors=[]
-        for payload in outputs:
-            parts,sent,errors=send_report(payload)
-            total_sent += sent
-            all_errors.extend(errors)
-            print(payload)
-        snapshot_sent, snapshot_errors = send_price_snapshot(results)
-        total_sent += snapshot_sent
-        all_errors.extend(snapshot_errors)
-        save_context(macro,news,market_liquidity_index(results),market_info)
-        save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
+        analysis_results=[]
+
+        if do_analysis:
+            text, results, macro, news, market_info, unavailable = report()
+            top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
+            btc_regime = btc_market_regime()
+            breadth = market_breadth(results)
+            outputs = build_two_engine_reports(
+                results, top10, dynamic30, macro, news, market_info,
+                unavailable, btc_regime, breadth
+            )
+            for payload in outputs:
+                parts,sent,errors=send_report(payload)
+                total_sent += sent
+                all_errors.extend(errors)
+                print(payload)
+            analysis_results = results
+            save_context(macro,news,market_liquidity_index(results),market_info)
+            save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
+
+        if do_snapshot:
+            snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
+            snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
+            total_sent += snapshot_sent
+            all_errors.extend(snapshot_errors)
+
+        if not do_analysis and not do_snapshot:
+            print(f"{VERSION}: AUTO schedule has no task at this hour.")
+            return 0
+
         if all_errors or total_sent==0:
             raise RuntimeError("Telegram delivery failed: "+"; ".join(all_errors or ["0 messages sent"]))
         return 0
