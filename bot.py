@@ -1,4 +1,4 @@
-#============================================================
+# ============================================================
 # ATLAS AI v11.0 — UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
@@ -3295,10 +3295,92 @@ def metals_report():
     return "\n\n".join(lines)
 
 
+def _compact_scenario_row(r, metal=False):
+    """Ultra-compact Telegram row based on the user's uploaded table format.
+
+    Technical calculations remain fully active in the engine; only the presentation
+    is reduced to status/key level/bullish scenario/bearish scenario + TradingView.
+    """
+    r = dict(r or {})
+    symbol = str(r.get("coin") or r.get("symbol") or "UNKNOWN").upper()
+    price = f(r.get("price"))
+    change = f(r.get("change"))
+    action = str(r.get("action") or r.get("decision_state") or "WAIT").upper()
+    trend = str(r.get("h4_trend") or "UNKNOWN").upper()
+    support = f(r.get("support"))
+    resistance = f(r.get("resistance"))
+    entry = f(r.get("entry")); sl = f(r.get("sl")); tp1 = f(r.get("tp1")); tp2 = f(r.get("tp2"))
+
+    if action in ("BUY", "BUY CONFIRMATION"):
+        status = "🟢 BUY"
+    elif action in ("SELL", "SELL CONFIRMATION", "SELL / REDUCE"):
+        status = "🔴 SELL"
+    elif action in ("BULLISH WATCH", "WATCH"):
+        status = "🟡 WATCH"
+    elif action in ("BEARISH WATCH",):
+        status = "🟠 WATCH-SELL"
+    elif action == "NO DATA":
+        status = "⚪ NO DATA"
+    else:
+        status = "⚪ WAIT"
+
+    if price is not None:
+        price_text = _snapshot_price_text(price)
+    else:
+        price_text = "N/A"
+    if change is not None and not metal:
+        price_text += f" ({'+' if change > 0 else ''}{change:.2f}%)"
+
+    key = []
+    if support is not None:
+        key.append(f"S {fmt(support)}")
+    if resistance is not None:
+        key.append(f"R {fmt(resistance)}")
+    key_text = " ↔ ".join(key) if key else "N/A"
+
+    if trend == "BULLISH":
+        bullish = f"حفظ بالای {fmt(resistance) if resistance is not None else price_text}" if resistance is not None else "حفظ روند صعودی"
+        bearish = f"شکست زیر {fmt(support)}" if support is not None else "شکست حمایت"
+    elif trend == "BEARISH":
+        bullish = f"بازپس‌گیری {fmt(support) if support is not None else price_text}" if support is not None else "بازگشت بالای مقاومت"
+        bearish = f"شکست زیر {fmt(support)}" if support is not None else "ادامه روند نزولی"
+    else:
+        bullish = f"شکست و تثبیت بالای {fmt(resistance)}" if resistance is not None else "تأیید روند صعودی"
+        bearish = f"شکست زیر {fmt(support)}" if support is not None else "تأیید روند نزولی"
+
+    if tp1 is not None:
+        bullish += f" → TP1 {fmt(tp1)}"
+    if tp2 is not None:
+        bullish += f" / TP2 {fmt(tp2)}"
+    if sl is not None:
+        bearish += f" → SL {fmt(sl)}"
+
+    tv = tradingview_chart_url(symbol, metal=metal)
+    return (
+        f"🔹 {symbol} | {status} | {price_text} | Trend {trend}\n"
+        f"   کلیدی: {key_text}\n"
+        f"   🟢 صعودی: {bullish}\n"
+        f"   🔴 نزولی: {bearish}\n"
+        f"   📊 Chart: {tv}" if tv else
+        f"🔹 {symbol} | {status} | {price_text} | Trend {trend}\n"
+        f"   کلیدی: {key_text}\n"
+        f"   🟢 صعودی: {bullish}\n"
+        f"   🔴 نزولی: {bearish}"
+    )
+
+
+def _compact_section(title, rows, metal=False):
+    lines = [title, "───────────────────"]
+    if not rows:
+        lines.append("⚪ داده‌ای برای نمایش وجود ندارد.")
+    else:
+        lines.extend(_compact_scenario_row(r, metal=metal) for r in rows)
+    return "\n".join(lines)
+
+
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    """MARKET engine: exact Top10 + Dynamic8 + Top5 executable opportunities."""
+    """MARKET engine: compact table-like output only; analysis stays internal."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    # MARKET must never duplicate an asset that is already in PERSONAL.
     market_results = [
         r for r in (results or [])
         if str(r.get("coin") or "").upper() not in personal_symbols
@@ -3309,85 +3391,32 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     ]
     top10_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
     top10_rows = [top10_map[s] for s in top10_order if s in top10_map]
-
-    dyn8 = dynamic_top8(market_results, dynamic30, exclude_symbols=personal_symbols)
-    top5 = top5_opportunities(market_results, exclude_symbols=personal_symbols)
+    dynamic_set = {str(x).upper() for x in (dynamic30 or []) if str(x).upper() not in personal_symbols and str(x).upper() not in set(top10_order)}
+    result_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
+    dyn30_rows = [result_map[s] for s in (str(x).upper() for x in (dynamic30 or [])) if s in dynamic_set and s in result_map]
     dt = now_tehran()
 
     lines = [
-        "🤖 ATLAS AI — گزارش بازار 4H",
+        "🤖 ATLAS AI — MARKET 4H",
         "━━━━━━━━━━━━━━━━━━",
-        f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
-        "ENGINE: MARKET",
-        f"BTC REGIME: {(btc_regime or {}).get('regime','UNKNOWN')} | Breadth: {(breadth or {}).get('state','UNKNOWN')} {(breadth or {}).get('score',0):.0f}%",
-        f"Sentiment: {news.get('bias','N/A')} | News: {news.get('impact','N/A')}",
-        "",
-        "🎯 TOP 5 OPPORTUNITIES",
-    ]
-    if top5:
-        for i, r in enumerate(top5, 1):
-            rr = f"{r['rr']:.2f}" if r.get("rr") is not None else "N/A"
-            lines.append(f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | Confidence {r.get('confidence',0)}% | R/R {rr}")
-            lines.append(asset_block(r, detail=True))
-    else:
-        lines.append("⚪ هیچ BUY/SELL اجرایی با کیفیت کافی در این اجرا تأیید نشد.")
-
-    lines += ["", "📡 ATLAS TOP 10 — فقط دارایی‌های خارج از Personal Portfolio"]
-    if top10_rows:
-        for r in top10_rows:
-            lines.append(asset_block(r))
-    else:
-        lines.append("⚪ تمام دارایی‌های Top 10 در Personal Portfolio هستند؛ برای جلوگیری از گزارش تکراری نمایش داده نشدند.")
-
-    lines += ["", "📡 DYNAMIC TOP 30 — فقط ۸ دارایی برتر خارج از Top 10"]
-    for r in dyn8:
-        lines.append(asset_block(r))
-
-    lines += [
-        "",
-        "⚠️ Risk: اگر نوسان/خبر غیرعادی باشد، حجم معامله کاهش یابد؛ سفارش خودکار وجود ندارد.",
-        f"📅 دریافت: {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران",
-        "📊 منابع: CoinGecko/CMC + صرافی‌های CCXT + CoinGlass/TradingView در صورت دسترسی",
-        "🔒 فقط کندل بسته‌شده؛ عدد ساختگی ممنوع.",
+        f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        _compact_section("📡 ATLAS TOP 10", top10_rows),
+        _compact_section("📡 DYNAMIC TOP 30 — همه دارایی‌های خارج از Top 10 و Personal", dyn30_rows),
+        _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", [_metal_analysis(x) for x in ATLAS_METALS], metal=True),
     ]
     return "\n\n".join(lines)
+
 
 def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
-    """PERSONAL engine: all portfolio assets + separate Metals; never truncates the portfolio."""
-    rows=_portfolio_rows(results)
-    dt=now_tehran()
-    top5=top5_opportunities(rows)
-    lines=[
-        "🤖 ATLAS AI — گزارش کامل شخصی 4H",
+    """PERSONAL engine: all configured portfolio assets, compact output only."""
+    rows = _portfolio_rows(results)
+    dt = now_tehran()
+    return "\n\n".join([
+        "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
         "━━━━━━━━━━━━━━━━━━",
-        f"تاریخ: {shamsi(dt)} | ساعت {dt.strftime('%H:%M')} تهران",
-        "ENGINE: PERSONAL",
-        f"وضعیت BTC: {(btc_regime or {}).get('regime','UNKNOWN')} | احساسات: {(news or {}).get('bias','N/A')}",
-        "",
-        "🎯 TOP 5 فرصت کریپتو (جدا از ATLAS METALS)",
-    ]
-    if top5:
-        for i,r in enumerate(top5,1):
-            rr=f" | R/R {r['rr']:.2f}" if r.get('rr') is not None else ""
-            lines.append(f"{i}️⃣ {r.get('coin')} {action_emoji(r.get('action'))} | {r.get('confidence',0)}%{rr}")
-    else:
-        lines.append("⚪ فرصت اجرایی کافی وجود ندارد.")
-    lines += ["", "💼 PERSONAL PORTFOLIO — همه دارایی‌ها"]
-    for r in rows:
-        lines.append(asset_block(r, detail=True))
-    lines += ["", metals_report()]
-    lines += [
-        "",
-        "🧠 ATLAS MEMORY / CALIBRATION",
-        "Outcome tracking: ACTIVE | Shadow signals: ACTIVE | Self-calibration: محافظت‌شده با Backtest Gate",
-        "",
-        f"📰 News: {(news or {}).get('bias','N/A')} | اثر {(news or {}).get('impact','N/A')}",
-        "⚠️ مدیریت ریسک: ریسک هر معامله مطابق تنظیمات ATLAS؛ BUY/SELL اجرایی فقط پس از Gate و R/R معتبر.",
-        f"📅 دریافت: {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران",
-        "📊 منابع: CoinGecko/CMC + صرافی‌های CCXT + CoinGlass/TradingView در صورت دسترسی",
-        "🔒 فقط داده واقعی همین اجرا؛ عدد ساختگی یا تخمینی ممنوع.",
-    ]
-    return "\n\n".join(lines)
+        f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
+    ])
 
 
 def personal_report(*args, **kwargs):
