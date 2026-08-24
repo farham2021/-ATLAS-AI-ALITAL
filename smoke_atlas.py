@@ -1,43 +1,66 @@
 #!/usr/bin/env python3
-"""Offline smoke test for ATLAS AI v10.2.
-
-Does not call Telegram, exchanges, CoinGecko, or any external API.
-"""
 from pathlib import Path
-import ast
-import py_compile
+import ast, re, sys
 
-BOT = Path(__file__).with_name("bot.py")
+BOT = Path("bot.py")
+
+def fail(message):
+    print("FAIL:", message)
+    raise SystemExit(1)
+
 if not BOT.exists():
-    raise SystemExit("FAIL: bot.py not found")
+    fail("bot.py not found")
 
-py_compile.compile(str(BOT), doraise=True)
-source = BOT.read_text(encoding="utf-8-sig")
-tree = ast.parse(source, filename="bot.py")
-functions = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-required = {
-    "asset_block", "action_emoji", "btc_pair_candidates",
-    "compact_table_1", "compact_table_2", "compact_summary",
-    "build_report", "main"
-}
-missing = sorted(required - functions)
+s = BOT.read_text(encoding="utf-8")
+try:
+    tree = ast.parse(s, filename=str(BOT))
+except SyntaxError as e:
+    fail(f"bot.py syntax error: {e}")
+
+funcs = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+required = [
+    "build_report", "build_personal_report", "build_two_engine_reports",
+    "atlas_engine_mode", "analyze_coin", "main",
+    "tradingview_chart_url", "build_price_snapshot",
+    "_compact_scenario_row", "_compact_section", "_final_market_recommendation",
+    "send_price_snapshot", "fetch_usdt_toman_public",
+    "fetch_snapshot_results", "_automatic_run_plan",
+]
+missing = [x for x in required if x not in funcs]
 if missing:
-    raise SystemExit(f"FAIL: missing functions: {missing}")
+    fail("missing required functions: " + ", ".join(missing))
 
-if sum(1 for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "build_report") != 1:
-    raise SystemExit("FAIL: build_report must exist exactly once")
+checks = {
+    "version v11.0": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.0', s, re.M)),
+    "no stale v10 markers": not bool(re.search(r'ATLAS v10|v10\.[0-9]|10\.2', s)),
+    "single build_report": funcs.count("build_report") == 1,
+    "single build_personal_report": funcs.count("build_personal_report") == 1,
+    "single build_two_engine_reports": funcs.count("build_two_engine_reports") == 1,
+    "single personal_report alias": funcs.count("personal_report") == 1,
+    "two-engine": all(x in s for x in ("MARKET", "PERSONAL", "BOTH")),
+    "personal portfolio": "ATLAS_PERSONAL_ASSETS" in s,
+    "market excludes personal": "market_results" in s and "not in personal_symbols" in s,
+    "metals": "ATLAS_METALS" in s and all(x in s for x in ("GOLD", "SILVER", "COPPER")),
+    "TradingView links": "tradingview.com/chart/?symbol=" in s,
+    "separate 3h snapshot": "send_price_snapshot" in s and "این پیام هر ۳ ساعت" in s,
+    "snapshot-only path": "fetch_snapshot_results" in s and 'run_mode == "SNAPSHOT"' in s,
+    "automatic 3h/4h scheduler": "_automatic_run_plan" in s and "dt.hour % 3 == 0" in s and "dt.hour % 4 == 0" in s,
+    "public Iranian USDT sources": all(x in s.lower() for x in ("wallex.ir", "excoino.com", "nobitex.ir")),
+    "KCEX CCXT source": '"kcex"' in s,
+    "closed-candle logic": "strip_incomplete" in s and "candle_is_closed" in s,
+    "compact table output": all(x in s for x in ("_compact_scenario_row", "کلیدی:", "🟢 صعودی:", "🔴 نزولی:")),
+    "no verbose market headings": "TOP 5 OPPORTUNITIES" not in s[s.index("def build_report"):s.index("def build_personal_report")],
+    "no verbose personal headings": "🧠 ATLAS MEMORY / CALIBRATION" not in s[s.index("def build_personal_report"):s.index("def personal_report")],
+    "all dynamic30 output": "dyn30_rows" in s and "DYNAMIC TOP 30" in s and "خارج از Top 10 و Personal" in s,
+    "metals in compact market output": "ATLAS METALS — GOLD / SILVER / COPPER" in s,
 
-for token in ("TP1", "TP2", "TP3", "TP4", "SL", "R/R", "BUY", "SELL", "WAIT"):
-    if token not in source.upper():
-        raise SystemExit(f"FAIL: required token missing: {token}")
+}
+for name, ok in checks.items():
+    if not ok:
+        fail(name)
 
-if "ATLAS_PRIORITY_TOP10" not in source:
-    raise SystemExit("FAIL: market leader universe missing")
-
-print("PASS: bot.py syntax")
-print("PASS: asset_block/action_emoji")
-print("PASS: compact renderer")
-print("PASS: single build_report")
-print("PASS: TP1-TP4 / SL / R/R")
-print("PASS: market-leader Top 10 architecture")
-print("PASS: offline smoke test")
+compile(s, str(BOT), "exec")
+print("PASS: ATLAS v11.0 unified two-engine + metals + snapshot smoke test")
+for name in checks:
+    print("  OK:", name)
