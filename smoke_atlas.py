@@ -1,78 +1,55 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import ast, re, sys
+import ast
 
-BOT = Path("bot.py")
+FILES = ["bot.py", "atlas_v12_upgrade.py", "bot_v12.py"]
+for f in FILES:
+    p = Path(f)
+    if not p.exists():
+        raise SystemExit(f"Missing required file: {f}")
+    ast.parse(p.read_text(encoding="utf-8"))
 
-def fail(message):
-    print("FAIL:", message)
-    raise SystemExit(1)
-
-if not BOT.exists():
-    fail("bot.py not found")
-
-s = BOT.read_text(encoding="utf-8")
-try:
-    tree = ast.parse(s, filename=str(BOT))
-except SyntaxError as e:
-    fail(f"bot.py syntax error: {e}")
-
-funcs = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+s = Path("atlas_v12_upgrade.py").read_text(encoding="utf-8")
 
 required = [
-    "build_report", "build_personal_report", "build_two_engine_reports",
-    "atlas_engine_mode", "analyze_coin", "main",
-    "tradingview_chart_url", "build_price_snapshot",
-    "_compact_scenario_row", "_compact_section", "_final_market_recommendation",
-    "send_price_snapshot", "fetch_usdt_toman_public",
-    "fetch_snapshot_results", "_automatic_run_plan", "generate_csv_report", "send_csv_report", "_best_setup_block",
+    "fetch_tgju_fx",
+    "fetch_tgju_rate",
+    "health_check",
+    "volume_spike_warning",
+    "rsi_divergence",
+    "setup_assessment",
+    "best_setup_block",
+    "generate_csv1_analysis_snapshot",
+    "generate_csv2_institutional_data",
+    "send_dual_csv",
+    "augment_report_text",
 ]
-missing = [x for x in required if x not in funcs]
-if missing:
-    fail("missing required functions: " + ", ".join(missing))
+for name in required:
+    if f"def {name}(" not in s:
+        raise SystemExit(f"Missing v12 function: {name}")
 
 checks = {
-    "version v11.1": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.1', s, re.M)),
-    "no stale v10 markers": not bool(re.search(r'ATLAS v10|v10\.[0-9]|10\.2', s)),
-    "single build_report": funcs.count("build_report") == 1,
-    "single build_personal_report": funcs.count("build_personal_report") == 1,
-    "single build_two_engine_reports": funcs.count("build_two_engine_reports") == 1,
-    "single personal_report alias": funcs.count("personal_report") == 1,
-    "two-engine": all(x in s for x in ("MARKET", "PERSONAL", "BOTH")),
-    "personal portfolio": "ATLAS_PERSONAL_ASSETS" in s,
-    "market excludes personal": "market_results" in s and "not in personal_symbols" in s,
-    "metals": "ATLAS_METALS" in s and all(x in s for x in ("GOLD", "SILVER", "COPPER")),
-    "TradingView links": "tradingview.com/chart/?symbol=" in s,
-    "separate 3h snapshot": "send_price_snapshot" in s and "این پیام هر ۳ ساعت" in s,
-    "snapshot-only path": "fetch_snapshot_results" in s and 'run_mode == "SNAPSHOT"' in s,
-    "automatic 3h/4h scheduler": "_automatic_run_plan" in s and "dt.hour % 3 == 0" in s and "dt.hour % 4 == 0" in s,
-    "public Iranian USDT sources": all(x in s.lower() for x in ("wallex.ir", "excoino.com", "nobitex.ir")),
-    "KCEX CCXT source": '"kcex"' in s,
-    "closed-candle logic": "strip_incomplete" in s and "candle_is_closed" in s,
-    "compact table output": all(x in s for x in ("_compact_scenario_row", "کلیدی:", "🟢 صعودی:", "🔴 نزولی:")),
-    "no verbose market headings": "TOP 5 OPPORTUNITIES" not in s[s.index("def build_report"):s.index("def build_personal_report")],
-    "no verbose personal headings": "🧠 ATLAS MEMORY / CALIBRATION" not in s[s.index("def build_personal_report"):s.index("def personal_report")],
-    "all dynamic30 output": "dyn30_rows" in s and "DYNAMIC TOP 30" in s and "خارج از Top 10 و Personal" in s,
-    "metals in compact market output": "ATLAS METALS — GOLD / SILVER / COPPER" in s,
-    "trade geometry gate": "_validate_trade_geometry" in s and "invalid LONG geometry" in s and "invalid SHORT geometry" in s,
-    "negative/contradictory TP blocked": "non-positive trade level" in s and "Trade geometry blocked" in s,
-    "snapshot compares previous price": "_snapshot_previous_prices" in s and "_snapshot_direction" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
-    "snapshot persists after successful send": "if sent == parts and sent > 0" in s and "_save_snapshot_prices" in s,
-    "dashboard table": "build_dashboard_table" in s and "ATLAS AI — DASHBOARD TABLE" in s and "PERSONAL PORTFOLIO" in s,
-    "dynamic30 compact output capped": "dyn30_all_rows" in s and "dynamic_top8(" in s,
-    "no duplicate portfolio function": s.count("def _portfolio_rows(") == 1,
-    "dynamic CSV export": "CSV_COLUMNS" in s and "def generate_csv_report(" in s and "def send_csv_report(" in s,
-    "CSV includes all universes": all(x in s for x in ("MARKET_TOP10", "DYNAMIC_TOP30", "PERSONAL_PORTFOLIO")),
-    "best setup validation": "def _best_setup_block(" in s and "MIN_EXECUTABLE_RR" in s and "repeat_signal" in s,
-    "CSV invalid geometry suppressed": "_csv_safe_plan" in s and "_validate_trade_geometry" in s,
-    "snapshot arrows": "⬆️" in s and "⬇️" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
-
+    "v12": 'VERSION = "ATLAS v12.0"' in s,
+    "TGJU USD only": "TGJU_USD_URL" in s and "price_dollar_rl" in s,
+    "TGJU USDT only": "TGJU_USDT_URL" in s and "price_usdt" in s,
+    "no Wallex fallback": "wallex.ir" not in s.lower(),
+    "no Excoino fallback": "excoino" not in s.lower(),
+    "no Nobitex fallback": "nobitex" not in s.lower(),
+    "three-level setup": all(x in s for x in ("EXECUTABLE", "BEST_WATCH", "NO_VALID_SETUP")),
+    "computed RR": "reward1" in s and "risk" in s and "rr =" in s,
+    "health": "success_rate" in s,
+    "volume spike": "VOLUME_SPIKE_MULTIPLIER" in s,
+    "RSI divergence": "REGULAR_BEARISH" in s and "REGULAR_BULLISH" in s,
+    "market cap CSV": '"market_cap"' in s,
+    "dual CSV": "generate_csv1_analysis_snapshot" in s and "generate_csv2_institutional_data" in s,
+    "timestamp filenames": "atlas_v12_analysis_snapshot_" in s and "atlas_v12_institutional_" in s,
+    "UTF8 BOM": "utf-8-sig" in s,
+    "telegram documents": "sendDocument" in s,
 }
-for name, ok in checks.items():
-    if not ok:
-        fail(name)
+failed = [k for k,v in checks.items() if not v]
+if failed:
+    raise SystemExit("v12 smoke checks failed: " + ", ".join(failed))
 
-compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot smoke test")
-for name in checks:
-    print("  OK:", name)
+print("PASS: ATLAS AI v12 upgrade smoke test")
+for k in checks:
+    print("  OK:", k)
