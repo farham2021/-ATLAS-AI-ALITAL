@@ -2,20 +2,17 @@
 
 """
 ATLAS AI v12
-Test / Validation Suite
+Validation / Smoke Test Suite
 
-این فایل فقط برای تست و اعتبارسنجی است.
-موتور اصلی پروژه:
+Main engine:
     bot12.py
 
-نکته:
-    این فایل عمداً هیچ وابستگی به ATLAS_v12_bot.py یا bot.py ندارد.
+This test validates the actual public API of the current v12 engine.
 """
 
 from __future__ import annotations
 
 import importlib
-import inspect
 import sys
 from pathlib import Path
 
@@ -31,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 
 # ============================================================
-# TEST HELPERS
+# TEST COUNTERS
 # ============================================================
 
 PASSED = 0
@@ -39,22 +36,23 @@ FAILED = 0
 
 
 def check(name: str, condition: bool, detail: str = "") -> bool:
-    """
-    اجرای یک تست و نمایش نتیجه.
-    """
     global PASSED, FAILED
 
     if condition:
         PASSED += 1
         print(f"✅ PASS: {name}")
+
         if detail:
             print(f"   {detail}")
+
         return True
 
     FAILED += 1
     print(f"❌ FAIL: {name}")
+
     if detail:
         print(f"   {detail}")
+
     return False
 
 
@@ -66,24 +64,18 @@ def section(title: str) -> None:
 
 
 # ============================================================
-# 1. PROJECT FILES
+# 1. PROJECT STRUCTURE
 # ============================================================
 
 section("1. PROJECT STRUCTURE")
 
-REQUIRED_FILES = [
+REQUIRED_FILES = (
     "bot12.py",
     "atlas_v12_upgrade.py",
     "smoke_atlas.py",
     "test_v12.py",
-]
-
-OPTIONAL_FILES = [
     "requirements-v12.txt",
-    "README_v12.md",
-    ".env.example",
-]
-
+)
 
 for filename in REQUIRED_FILES:
     path = ROOT / filename
@@ -95,20 +87,13 @@ for filename in REQUIRED_FILES:
     )
 
 
-for filename in OPTIONAL_FILES:
-    path = ROOT / filename
-
-    if path.is_file():
-        print(f"ℹ️ OPTIONAL PRESENT: {filename}")
-    else:
-        print(f"ℹ️ OPTIONAL MISSING: {filename}")
-
-
 # ============================================================
-# 2. IMPORT MAIN ENGINE
+# 2. MAIN ENGINE IMPORT
 # ============================================================
 
 section("2. MAIN ENGINE IMPORT")
+
+bot = None
 
 try:
     bot = importlib.import_module("bot12")
@@ -120,7 +105,6 @@ try:
     )
 
 except Exception as exc:
-    bot = None
 
     check(
         "bot12.py imports successfully",
@@ -130,43 +114,56 @@ except Exception as exc:
 
 
 # ============================================================
-# 3. FORBIDDEN LEGACY REFERENCES
+# 3. LEGACY IMPORT VALIDATION
 # ============================================================
 
-section("3. LEGACY REFERENCE CHECK")
+section("3. LEGACY IMPORT VALIDATION")
 
-files_to_scan = [
-    ROOT / "test_v12.py",
-    ROOT / "smoke_atlas.py",
+# IMPORTANT:
+# We only inspect the actual source files.
+# We do NOT search test_v12.py for forbidden strings,
+# because that would create a false positive.
+
+SOURCE_FILES = (
+    ROOT / "bot12.py",
     ROOT / "atlas_v12_upgrade.py",
-]
+    ROOT / "smoke_atlas.py",
+)
 
-for path in files_to_scan:
+LEGACY_PATTERNS = (
+    "ATLAS_v12_bot",
+    "import bot ",
+    "from bot import",
+)
+
+for path in SOURCE_FILES:
 
     if not path.is_file():
         continue
 
     try:
-        content = path.read_text(encoding="utf-8")
+        source = path.read_text(
+            encoding="utf-8"
+        )
     except UnicodeDecodeError:
-        content = path.read_text(encoding="utf-8-sig")
-
-    forbidden = [
-        "ATLAS_v12_bot",
-        "import bot ",
-        "from bot import",
-    ]
+        source = path.read_text(
+            encoding="utf-8-sig"
+        )
 
     found = [
-        item
-        for item in forbidden
-        if item in content
+        pattern
+        for pattern in LEGACY_PATTERNS
+        if pattern in source
     ]
 
     check(
         f"No obsolete import in {path.name}",
         not found,
-        f"Found: {found}" if found else "No obsolete references detected.",
+        (
+            "No obsolete references detected."
+            if not found
+            else f"Found: {found}"
+        ),
     )
 
 
@@ -176,14 +173,12 @@ for path in files_to_scan:
 
 section("4. PYTHON SYNTAX VALIDATION")
 
-
-PYTHON_FILES = [
+PYTHON_FILES = (
     "bot12.py",
     "atlas_v12_upgrade.py",
     "smoke_atlas.py",
     "test_v12.py",
-]
-
+)
 
 for filename in PYTHON_FILES:
 
@@ -193,7 +188,10 @@ for filename in PYTHON_FILES:
         continue
 
     try:
-        source = path.read_text(encoding="utf-8")
+
+        source = path.read_text(
+            encoding="utf-8"
+        )
 
         compile(
             source,
@@ -216,7 +214,7 @@ for filename in PYTHON_FILES:
 
 
 # ============================================================
-# 5. SMOKE TEST HEADER
+# 5. SMOKE TEST SHEBANG
 # ============================================================
 
 section("5. SMOKE TEST HEADER")
@@ -226,13 +224,20 @@ smoke_path = ROOT / "smoke_atlas.py"
 if smoke_path.is_file():
 
     try:
-        first_line = smoke_path.read_text(
+
+        lines = smoke_path.read_text(
             encoding="utf-8"
-        ).splitlines()[0]
+        ).splitlines()
+
+        first_line = (
+            lines[0].strip()
+            if lines
+            else ""
+        )
 
         check(
             "smoke_atlas.py has Python shebang",
-            first_line.strip() == "#!/usr/bin/env python3",
+            first_line == "#!/usr/bin/env python3",
             f"Found: {first_line}",
         )
 
@@ -246,110 +251,148 @@ if smoke_path.is_file():
 
 
 # ============================================================
-# 6. MAIN ENGINE API DISCOVERY
+# 6. ACTUAL BOT12 API
 # ============================================================
 
-section("6. BOT12 API DISCOVERY")
+section("6. BOT12 API VALIDATION")
 
+EXPECTED_API = (
+    "build_report",
+    "personal_report",
+    "best_setup_block",
+    "generate_csv_report",
+    "generate_institutional_csv",
+    "fetch_tgju_rate",
+    "get_tgju_rates",
+    "send_report",
+    "send_csv_report",
+)
 
 if bot is not None:
 
-    public_names = [
-        name
-        for name in dir(bot)
-        if not name.startswith("_")
-    ]
+    for name in EXPECTED_API:
 
-    print(
-        f"ℹ️ Public objects discovered: "
-        f"{len(public_names)}"
+        exists = hasattr(bot, name)
+
+        if not exists:
+
+            check(
+                f"bot12 API: {name}",
+                False,
+                "Expected function is missing.",
+            )
+
+            continue
+
+        obj = getattr(bot, name)
+
+        check(
+            f"bot12 API: {name}",
+            callable(obj),
+            f"type={type(obj).__name__}",
+        )
+
+
+# ============================================================
+# 7. TGJU SUPPORT
+# ============================================================
+
+section("7. TGJU RATE SUPPORT")
+
+if bot is not None:
+
+    tgju_names = (
+        "fetch_tgju_rate",
+        "get_tgju_rates",
     )
 
-    print(
-        "   "
-        + ", ".join(public_names[:50])
-    )
-
-    # Common expected functions.
-    EXPECTED_FUNCTIONS = [
-        "build_personal_report",
-        "personal_report",
-        "build_market_report",
-    ]
-
-    for name in EXPECTED_FUNCTIONS:
+    for name in tgju_names:
 
         if hasattr(bot, name):
 
             obj = getattr(bot, name)
 
             check(
-                f"bot12 API: {name}",
+                f"TGJU function available: {name}",
                 callable(obj),
-                f"type={type(obj).__name__}",
             )
 
         else:
 
-            print(
-                f"ℹ️ OPTIONAL API not present: {name}"
+            check(
+                f"TGJU function available: {name}",
+                False,
+                "TGJU integration is required by v12.",
             )
 
 
 # ============================================================
-# 7. PERSONAL REPORT ALIAS CONSISTENCY
+# 8. CSV OUTPUT SUPPORT
 # ============================================================
 
-section("7. PERSONAL REPORT COMPATIBILITY")
-
+section("8. CSV OUTPUT SUPPORT")
 
 if bot is not None:
 
-    if hasattr(bot, "personal_report"):
+    csv_functions = (
+        "generate_csv_report",
+        "generate_institutional_csv",
+        "send_csv_report",
+    )
 
-        personal = getattr(
-            bot,
-            "personal_report",
-        )
+    for name in csv_functions:
 
-        if hasattr(bot, "build_personal_report"):
-
-            builder = getattr(
-                bot,
-                "build_personal_report",
-            )
+        if hasattr(bot, name):
 
             check(
-                "personal_report compatibility",
-                personal is builder or (
-                    callable(personal)
-                    and callable(builder)
-                ),
-                "personal_report and build_personal_report are compatible.",
+                f"CSV function available: {name}",
+                callable(getattr(bot, name)),
             )
 
         else:
 
             check(
-                "personal_report callable",
-                callable(personal),
+                f"CSV function available: {name}",
+                False,
             )
 
-    else:
 
-        print(
-            "ℹ️ personal_report alias not present; "
-            "no failure because it is optional."
-        )
+# ============================================================
+# 9. BEST SETUP SUPPORT
+# ============================================================
+
+section("9. SETUP ANALYSIS SUPPORT")
+
+if bot is not None:
+
+    setup_functions = (
+        "best_setup_block",
+        "build_report",
+        "personal_report",
+    )
+
+    for name in setup_functions:
+
+        if hasattr(bot, name):
+
+            check(
+                f"Analysis function available: {name}",
+                callable(getattr(bot, name)),
+            )
+
+        else:
+
+            check(
+                f"Analysis function available: {name}",
+                False,
+            )
 
 
 # ============================================================
-# 8. V12 UPGRADE MODULE
+# 10. UPGRADE MODULE
 # ============================================================
 
-section("8. V12 UPGRADE MODULE")
-
-upgrade = None
+section("10. V12 UPGRADE MODULE")
 
 try:
 
@@ -373,65 +416,53 @@ except Exception as exc:
 
 
 # ============================================================
-# 9. BASIC CALLABLE VALIDATION
+# 11. REQUIRED V12 FEATURES
 # ============================================================
 
-section("9. CALLABLE VALIDATION")
-
+section("11. V12 FEATURE CHECK")
 
 if bot is not None:
 
-    candidates = [
-        "build_personal_report",
-        "personal_report",
-        "build_market_report",
-        "health_check",
-        "volume_spike_warning",
-        "rsi_divergence",
-    ]
+    features = {
+        "TGJU USD": (
+            hasattr(bot, "TGJU_USD")
+            or hasattr(bot, "fetch_tgju_rate")
+            or hasattr(bot, "get_tgju_rates")
+        ),
 
-    for name in candidates:
+        "TGJU USDT": (
+            hasattr(bot, "TGJU_USDT")
+            or hasattr(bot, "fetch_tgju_rate")
+            or hasattr(bot, "get_tgju_rates")
+        ),
 
-        if hasattr(bot, name):
+        "Personal report": (
+            hasattr(bot, "personal_report")
+        ),
 
-            obj = getattr(bot, name)
+        "Best setup": (
+            hasattr(bot, "best_setup_block")
+        ),
 
-            check(
-                f"{name} is callable",
-                callable(obj),
-            )
+        "CSV report": (
+            hasattr(bot, "generate_csv_report")
+        ),
 
-        else:
+        "Institutional CSV": (
+            hasattr(bot, "generate_institutional_csv")
+        ),
+    }
 
-            print(
-                f"ℹ️ Function not present: {name}"
-            )
+    for feature, available in features.items():
 
-
-# ============================================================
-# 10. MODULE METADATA
-# ============================================================
-
-section("10. MODULE METADATA")
-
-
-if bot is not None:
-
-    module_file = getattr(
-        bot,
-        "__file__",
-        None,
-    )
-
-    check(
-        "bot12 module has valid path",
-        bool(module_file),
-        str(module_file),
-    )
+        check(
+            feature,
+            available,
+        )
 
 
 # ============================================================
-# 11. FINAL RESULT
+# 12. FINAL RESULT
 # ============================================================
 
 section("FINAL TEST RESULT")
@@ -449,8 +480,11 @@ if FAILED == 0:
     print("=" * 70)
     print("🎯 ATLAS AI v12 TEST STATUS: PASS")
     print("=" * 70)
-    print("All mandatory validation checks passed.")
-    print("Engine: bot12.py")
+    print("Main engine : bot12.py")
+    print("TGJU        : validated")
+    print("CSV         : validated")
+    print("Analysis    : validated")
+    print("Upgrade     : validated")
     print("=" * 70)
 
     sys.exit(0)
@@ -460,9 +494,7 @@ else:
     print("=" * 70)
     print("🚨 ATLAS AI v12 TEST STATUS: FAIL")
     print("=" * 70)
-    print(
-        "One or more validation checks failed."
-    )
+    print("One or more mandatory checks failed.")
     print("=" * 70)
 
     sys.exit(1)
