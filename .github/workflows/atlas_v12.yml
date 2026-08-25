@@ -40,7 +40,7 @@ jobs:
 
       # ============================================================
       # TGJU
-      # USD and USDT MUST come only from TGJU
+      # USD AND USDT MUST COME ONLY FROM TGJU
       # ============================================================
 
       TGJU_USD_URL: "https://www.tgju.org/profile/price_dollar_rl"
@@ -78,7 +78,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: false
 
       # ============================================================
       # 3. INSTALL DEPENDENCIES
@@ -91,14 +90,28 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
 
           if [ -f "requirements-v12.txt" ]; then
+            echo "Installing requirements-v12.txt"
             python -m pip install -r requirements-v12.txt
+
           elif [ -f "requirements.txt" ]; then
+            echo "Installing requirements.txt"
             python -m pip install -r requirements.txt
+
           elif [ -f "pyproject.toml" ]; then
+            echo "Installing project from pyproject.toml"
             python -m pip install .
+
           else
-            python -m pip install requests pandas numpy
+            echo "No dependency file found."
+            echo "Installing required runtime packages."
+
+            python -m pip install \
+              requests \
+              pandas \
+              numpy
           fi
+
+          echo "Dependency installation completed."
 
       # ============================================================
       # 4. PROJECT STRUCTURE
@@ -117,25 +130,20 @@ jobs:
           )
 
           for file in "${required_files[@]}"; do
+
             if [ ! -f "$file" ]; then
               echo "ERROR: Missing required file: $file"
               exit 1
             fi
 
             echo "OK: $file"
+
           done
 
           echo "Project structure validation PASSED."
 
       # ============================================================
-      # 5. OBSOLETE IMPORT CHECK
-      #
-      # IMPORTANT:
-      # Do NOT search test_v12.py for the literal string
-      # ATLAS_v12_bot because the test itself may mention it
-      # as a forbidden-reference test string.
-      #
-      # Only executable source files are checked.
+      # 5. V12 IMPORT VALIDATION
       # ============================================================
 
       - name: Validate V12 imports
@@ -151,8 +159,11 @@ jobs:
 
           for file in "${files[@]}"; do
 
-            if grep -nE '(^|[[:space:]])import[[:space:]]+bot([[:space:]]|$)|(^|[[:space:]])from[[:space:]]+bot[[:space:]]+import|ATLAS_v12_bot' "$file"; then
-              echo "ERROR: Obsolete V11 import/reference found in $file"
+            if grep -nE \
+              '(^|[[:space:]])import[[:space:]]+bot([[:space:]]|$)|(^|[[:space:]])from[[:space:]]+bot[[:space:]]+import|ATLAS_v12_bot' \
+              "$file"; then
+
+              echo "ERROR: Obsolete V11 reference found in $file"
               exit 1
             fi
 
@@ -232,14 +243,26 @@ jobs:
           import json
           import urllib.request
 
-          token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+          token = os.environ.get(
+              "TELEGRAM_TOKEN",
+              ""
+          ).strip()
 
           if not token:
-              raise SystemExit("TELEGRAM_TOKEN is empty.")
+              raise SystemExit(
+                  "TELEGRAM_TOKEN is empty."
+              )
 
-          url = f"https://api.telegram.org/bot{token}/getMe"
+          url = (
+              f"https://api.telegram.org/"
+              f"bot{token}/getMe"
+          )
 
-          with urllib.request.urlopen(url, timeout=30) as response:
+          with urllib.request.urlopen(
+              url,
+              timeout=30
+          ) as response:
+
               payload = json.loads(
                   response.read().decode("utf-8")
               )
@@ -250,11 +273,17 @@ jobs:
                   + str(payload)
               )
 
-          bot = payload.get("result", {})
+          bot = payload.get(
+              "result",
+              {}
+          )
 
           print(
               "Telegram bot OK:",
-              bot.get("username", "unknown")
+              bot.get(
+                  "username",
+                  "unknown"
+              )
           )
           PY
 
