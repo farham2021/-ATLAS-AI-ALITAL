@@ -12,32 +12,8 @@ import requests
 # ============================================================
 from telegram_delivery_v12 import send_report, send_csv as send_csv_report
 
-# ============================================================
-# PRIMARY SOURCE: TGJU (with anti-block headers)
-# ============================================================
 TGJU_USD_URL="https://www.tgju.org/profile/price_dollar_rl"
 TGJU_USDT_URL="https://www.tgju.org/profile/price_usdt"
-
-# ============================================================
-# FALLBACK SOURCES (FREE & RELIABLE)
-# ============================================================
-FALLBACK_SOURCES = [
-    {
-        "name": "Bonbast",
-        "url": "https://bonbast.com/",
-        "pattern": r'([0-9,]{4,})',
-        "usd_selector": "USD",
-        "usdt_selector": "USDT"
-    },
-    {
-        "name": "ExchangeRate-API",
-        "url": "https://api.exchangerate-api.com/v4/latest/USD",
-        "is_api": True,
-        "usd_key": "rates.IRR",
-        "usdt_key": None  # USDT not available, will derive from USD
-    }
-]
-
 STATUS_LEVELS=("STRONG BULL","BULL","NEUTRAL","BEAR","STRONG BEAR")
 SETUP_LEVELS=("EXECUTABLE","BEST WATCH","NO VALID SETUP")
 
@@ -63,112 +39,23 @@ def _number(x):
     m=re.search(r'-?[0-9][0-9,٬]*(?:\.[0-9]+)?',str(x))
     return float(m.group().replace(',','').replace('٬','')) if m else None
 
-def _tgju_with_headers(url):
-    """TGJU with enhanced headers to avoid 403 error"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.tgju.org/",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
-    }
-    r = requests.get(url, timeout=15, headers=headers)
+def _tgju(url):
+    r=requests.get(url,timeout=15,headers={"User-Agent":"Mozilla/5.0"})
     r.raise_for_status()
-    text = re.sub(r'<[^>]+>', ' ', r.text)
-    text = re.sub(r'\s+', ' ', text)
-    
-    candidates = []
+    text=re.sub(r'<[^>]+>',' ',r.text); text=re.sub(r'\s+',' ',text)
+    # Prefer explicit price/result markers; never use another provider.
+    candidates=[]
     for pat in (r'(?:قیمت|ارزش|آخرین)[^0-9]{0,80}([0-9,٬]{4,})',
                 r'(?:USD|USDT)[^0-9]{0,80}([0-9,٬]{4,})'):
-        for m in re.finditer(pat, text, re.I):
-            n = _number(m.group(1))
-            if n and n > 1000:
-                candidates.append(n)
-    if not candidates:
-        raise RuntimeError(f"TGJU rate unavailable: {url}")
+        for m in re.finditer(pat,text,re.I):
+            n=_number(m.group(1))
+            if n and n>1000:candidates.append(n)
+    if not candidates: raise RuntimeError(f"TGJU rate unavailable: {url}")
     return candidates[0]
 
-def _fetch_from_bonbast():
-    """Fallback: Fetch rates from bonbast.com"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "fa-IR,fa;q=0.9"
-        }
-        r = requests.get("https://bonbast.com/", timeout=10, headers=headers)
-        r.raise_for_status()
-        text = re.sub(r'<[^>]+>', ' ', r.text)
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Look for USD and USDT rates in the text
-        usd_match = re.search(r'USD[^0-9]*([0-9,]{4,})', text, re.I)
-        usdt_match = re.search(r'USDT[^0-9]*([0-9,]{4,})', text, re.I)
-        
-        usd = _number(usd_match.group(1)) if usd_match else None
-        usdt = _number(usdt_match.group(1)) if usdt_match else None
-        
-        if usd and usdt:
-            return {"usd_toman": usd, "usdt_toman": usdt, "source": "bonbast.com"}
-        return None
-    except Exception:
-        return None
-
-def _fetch_from_exchangerate_api():
-    """Fallback: Fetch USD from ExchangeRate-API"""
-    try:
-        r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        usd_irr = data.get("rates", {}).get("IRR")
-        if usd_irr:
-            # USDT price is approximately equal to USD in IRR
-            return {"usd_toman": usd_irr, "usdt_toman": usd_irr, "source": "exchangerate-api.com"}
-        return None
-    except Exception:
-        return None
-
 def fetch_tgju_rates():
-    """Fetch rates from TGJU with fallback sources"""
-    # Try TGJU first with enhanced headers
-    try:
-        usd = _tgju_with_headers(TGJU_USD_URL)
-        usdt = _tgju_with_headers(TGJU_USDT_URL)
-        return {
-            "usd_toman": usd,
-            "usdt_toman": usdt,
-            "source": "tgju.org",
-            "timestamp": datetime.now().astimezone().isoformat(),
-            "quality": 1.0
-        }
-    except Exception as e:
-        print(f"TGJU error: {e}, trying fallbacks...")
-    
-    # Try Bonbast
-    result = _fetch_from_bonbast()
-    if result:
-        result["timestamp"] = datetime.now().astimezone().isoformat()
-        result["quality"] = 0.85
-        return result
-    
-    # Try ExchangeRate-API
-    result = _fetch_from_exchangerate_api()
-    if result:
-        result["timestamp"] = datetime.now().astimezone().isoformat()
-        result["quality"] = 0.8
-        return result
-    
-    # Final fallback: use hardcoded rates (for testing only)
-    print("WARNING: All sources failed, using fallback rates for testing")
-    return {
-        "usd_toman": 50000,
-        "usdt_toman": 50000,
-        "source": "fallback",
-        "timestamp": datetime.now().astimezone().isoformat(),
-        "quality": 0.5
-    }
+    usd=_tgju(TGJU_USD_URL); usdt=_tgju(TGJU_USDT_URL)
+    return {"usd_toman":usd,"usdt_toman":usdt,"source":"tgju.org","timestamp":datetime.now().astimezone().isoformat(),"quality":1.0}
 
 def calculate_rr(entry,sl,tp1,tp2):
     risk=abs(entry-sl)
@@ -275,6 +162,12 @@ def build_report(market,portfolio,metals=None):
 
 def action_emoji(status): return {"STRONG BULL":"🟢","BULL":"🟢","NEUTRAL":"🟡","BEAR":"🔴","STRONG BEAR":"🔴"}.get(status,"⚪")
 def split_telegram(text,limit=4000): return [text[i:i+limit] for i in range(0,len(text),limit)]
+
+# ============================================================
+# FIXED: send_report and send_csv_report are now imported
+# from telegram_delivery_v12 at the top of the file.
+# The old empty functions have been removed.
+# ============================================================
 
 if __name__=="__main__":
     # ============================================================
