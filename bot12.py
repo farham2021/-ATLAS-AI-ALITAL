@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Optional,Dict,Any,List
 import requests
 
+# ============================================================
+# IMPORT TELEGRAM DELIVERY - FIXED
+# ============================================================
+from telegram_delivery_v12 import send_report, send_csv as send_csv_report
+
 TGJU_USD_URL="https://www.tgju.org/profile/price_dollar_rl"
 TGJU_USDT_URL="https://www.tgju.org/profile/price_usdt"
 STATUS_LEVELS=("STRONG BULL","BULL","NEUTRAL","BEAR","STRONG BEAR")
@@ -157,8 +162,81 @@ def build_report(market,portfolio,metals=None):
 
 def action_emoji(status): return {"STRONG BULL":"🟢","BULL":"🟢","NEUTRAL":"🟡","BEAR":"🔴","STRONG BEAR":"🔴"}.get(status,"⚪")
 def split_telegram(text,limit=4000): return [text[i:i+limit] for i in range(0,len(text),limit)]
-def send_report(*a,**k): return False
-def send_csv_report(*a,**k): return False
-def send_csv_via_telegram(*a,**k): return False
 
-if __name__=="__main__": print("ATLAS AI v12 ready")
+# ============================================================
+# FIXED: send_report and send_csv_report are now imported
+# from telegram_delivery_v12 at the top of the file.
+# The old empty functions have been removed.
+# ============================================================
+
+if __name__=="__main__":
+    # ============================================================
+    # SAMPLE DATA - REPLACE WITH YOUR ACTUAL DATA
+    # ============================================================
+    
+    # Example market data structure
+    market = {
+        "BTC": {
+            "current_price": 65000,
+            "support": 64000,
+            "resistance": 66000,
+            "trend": "bullish",
+            "rsi": 55,
+            "volume_ratio": 1.3,
+            "support_confirmations": 2,
+            "confirmed_breakout": True,
+            "volume_trend": "HIGH",
+            "data_quality": 0.9
+        },
+        "ETH": {
+            "current_price": 3200,
+            "support": 3100,
+            "resistance": 3300,
+            "trend": "neutral",
+            "rsi": 60,
+            "volume_ratio": 0.9,
+            "support_confirmations": 1,
+            "confirmed_breakout": False,
+            "volume_trend": "LOW",
+            "data_quality": 0.8
+        }
+    }
+    
+    # Example portfolio data structure
+    portfolio = {
+        "SOL": {
+            "current_price": 150,
+            "support": 140,
+            "resistance": 160,
+            "trend": "bullish",
+            "rsi": 45,
+            "volume_ratio": 1.5,
+            "support_confirmations": 3,
+            "confirmed_breakout": True,
+            "volume_trend": "HIGH",
+            "data_quality": 0.95
+        }
+    }
+    
+    print("ATLAS AI v12 starting...")
+    
+    # Build the report
+    try:
+        report_text = build_report(market, portfolio)
+        print("Report built successfully.")
+        
+        # SEND TO TELEGRAM - FIXED
+        print("Sending report to Telegram...")
+        parts_count, sent_count, errors = send_report(report_text)
+        
+        if errors:
+            print(f"WARNING: {len(errors)} errors occurred during delivery:")
+            for err in errors:
+                print(f"  - {err}")
+        else:
+            print(f"SUCCESS: Report sent to {sent_count} destinations ({parts_count} parts)")
+        
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
