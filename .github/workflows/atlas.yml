@@ -1,4 +1,4 @@
-name: ATLAS v11.1 — Unified Two-Engine + Trade Geometry + Dynamic CSV + Dashboard + 3H Snapshot
+name: ATLAS v11.2 — Unified Two-Engine + Confirmed Trade Geometry + Dashboard + CSV + 3H Snapshot
 
 on:
   workflow_dispatch:
@@ -7,125 +7,463 @@ on:
         description: "MARKET / PERSONAL / BOTH"
         required: false
         default: "BOTH"
+
       run_mode:
         description: "AUTO / BOTH / ANALYSIS / SNAPSHOT"
         required: false
-        default: "BOTH"
+        default: "AUTO"
+
   schedule:
-    # Unified hourly scheduler. The bot itself decides:
-    # - analytical engines every 4 hours
-    # - Price Snapshot every 3 hours
+    # Hourly scheduler.
+    # The engine decides internally:
+    # - analytical engine every 4 hours
+    # - price snapshot every 3 hours
     # - both at overlap hours
-    # Telegram analytical output is compact table-style; full technical analysis remains internal.
     - cron: "0 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: atlas-v11-${{ github.ref }}
+  group: atlas-v11-2-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  atlas:
+
+  atlas-v11-2:
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 60
+
     env:
+
       PYTHONUNBUFFERED: "1"
-      ATLAS_VERSION: "11.1"
+
+      ATLAS_VERSION: "11.2"
       ATLAS_ENGINE: ${{ github.event.inputs.engine || 'BOTH' }}
       ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
-      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
-      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
       ATLAS_TIMEFRAME: "4H"
-      ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
-      ATLAS_TRADINGVIEW_INTERVAL: "240"
+
+      # ==========================================================
+      # TRADE GEOMETRY
+      # ==========================================================
+
+      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+
+      ATLAS_MIN_EXECUTABLE_RR: "2.0"
+      ATLAS_MIN_WATCH_RR: "1.0"
+
+      ATLAS_MIN_CONFIDENCE: "65"
+      ATLAS_MIN_WATCH_CONFIDENCE: "55"
+
+      # ==========================================================
+      # CONFIRMATION ENGINE
+      # ==========================================================
+
+      ATLAS_CONFIRMATION_CANDLES: "2"
+
+      ATLAS_VOLUME_LOOKBACK: "20"
+      ATLAS_MIN_VOLUME_RATIO: "1.20"
+
+      ATLAS_RSI_LENGTH: "14"
+      ATLAS_RSI_OVERBOUGHT: "70"
+      ATLAS_RSI_OVERSOLD: "30"
+
+      # ==========================================================
+      # RISK
+      # ==========================================================
+
       RISK_PER_TRADE_PCT: "1.5"
       MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
-      ATLAS_MIN_CONFIDENCE: "60"
       ATLAS_MAX_LEVERAGE: "10"
-      ATLAS_MIN_EXECUTABLE_RR: "2.0"
-      ATLAS_MIN_WATCH_CONFIDENCE: "55"
+
+      # ==========================================================
+      # SNAPSHOT
+      # ==========================================================
+
+      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+      # ==========================================================
+      # BACKTEST / GOVERNANCE
+      # ==========================================================
+
       ATLAS_BACKTEST_DAYS: "180"
       ATLAS_SIGNAL_HORIZON_BARS: "36"
       ATLAS_BACKTEST_IMPROVEMENT: "10"
       ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
       ATLAS_CANDLE_EVENT_DEDUP: "1"
+
+      # ==========================================================
+      # PERSISTENCE
+      # ==========================================================
+
       ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
       ATLAS_CHANGELOG: "changelog.txt"
+
+      # ==========================================================
+      # TRADINGVIEW
+      # ==========================================================
+
+      ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+      ATLAS_TRADINGVIEW_INTERVAL: "240"
+
+      # ==========================================================
+      # TELEGRAM
+      # ==========================================================
+
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+      # ==========================================================
+      # OPTIONAL DATA
+      # ==========================================================
+
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
       COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
       CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
       COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
       CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
       ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
       TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
     steps:
+
+      # ==========================================================
+      # 1. CHECKOUT
+      # ==========================================================
+
       - name: Checkout
         uses: actions/checkout@v5
+
+      # ==========================================================
+      # 2. PYTHON
+      # ==========================================================
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
+      # ==========================================================
+      # 3. DEPENDENCIES
+      # ==========================================================
+
       - name: Install dependencies
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --upgrade ccxt
 
-      - name: Verify source
+          python -m pip install --upgrade pip setuptools wheel
+
+          python -m pip install "ccxt>=4.5.0,<5"
+
+      # ==========================================================
+      # 4. PROJECT STRUCTURE
+      # ==========================================================
+
+      - name: Validate project structure
         run: |
           set -euo pipefail
-          test -f bot.py
-          test -f smoke_atlas.py
+
+          required_files=(
+            "bot.py"
+            "smoke_atlas.py"
+            "test_v11_1.py"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Missing required file: $file"
+              exit 1
+            fi
+
+            echo "PASS: $file"
+          done
+
+      # ==========================================================
+      # 5. PYTHON SYNTAX
+      # ==========================================================
+
+      - name: Validate Python syntax
+        run: |
+          set -euo pipefail
+
           python -m py_compile bot.py
           python -m py_compile smoke_atlas.py
+          python -m py_compile test_v11_1.py
 
-      - name: Run v11 smoke test
+          echo "Python syntax validation PASSED."
+
+      # ==========================================================
+      # 6. V11.2 STATIC VALIDATION
+      # ==========================================================
+
+      - name: Validate v11.2 architecture
         run: |
           set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          s = Path("bot.py").read_text(encoding="utf-8")
+
+          required = [
+              "VERSION",
+              "build_report",
+              "build_personal_report",
+              "build_two_engine_reports",
+              "build_price_snapshot",
+              "send_price_snapshot",
+              "fetch_snapshot_results",
+              "_automatic_run_plan",
+              "generate_csv_report",
+              "send_csv_report",
+              "_validate_trade_geometry",
+              "_best_setup_block",
+              "analyze_coin",
+              "main",
+          ]
+
+          for item in required:
+              if item not in s:
+                  raise SystemExit(
+                      f"ERROR: required v11.2 component missing: {item}"
+                  )
+
+          checks = {
+              "two-engine": all(
+                  x in s for x in ("MARKET", "PERSONAL", "BOTH")
+              ),
+
+              "metals": all(
+                  x in s for x in ("GOLD", "SILVER", "COPPER")
+              ),
+
+              "3H snapshot": "این پیام هر ۳ ساعت" in s,
+
+              "closed candles": (
+                  "strip_incomplete" in s
+                  and "candle_is_closed" in s
+              ),
+
+              "trade geometry": (
+                  "_validate_trade_geometry" in s
+              ),
+
+              "dashboard": (
+                  "build_dashboard_table" in s
+              ),
+
+              "dynamic CSV": (
+                  "generate_csv_report" in s
+                  and "send_csv_report" in s
+              ),
+
+              "Telegram": (
+                  "telegram_preflight" in s
+                  and "send_report" in s
+              ),
+
+              "RSI": "rsi" in s.lower(),
+
+              "volume": "volume" in s.lower(),
+          }
+
+          failed = [
+              name for name, ok in checks.items()
+              if not ok
+          ]
+
+          if failed:
+              raise SystemExit(
+                  "V11.2 architecture validation failed: "
+                  + ", ".join(failed)
+              )
+
+          print("ATLAS v11.2 architecture validation PASSED.")
+          for name in checks:
+              print("PASS:", name)
+          PY
+
+      # ==========================================================
+      # 7. SMOKE TEST
+      # ==========================================================
+
+      - name: Run ATLAS smoke test
+        run: |
+          set -euo pipefail
+
           python smoke_atlas.py
 
-      - name: Run v11 export unit test
+      # ==========================================================
+      # 8. UNIT TEST
+      # ==========================================================
+
+      - name: Run v11.1 compatibility tests
         run: |
           set -euo pipefail
+
           python test_v11_1.py
 
-      - name: Validate Telegram
-        run: |
-          set -euo pipefail
-          test -n "$TELEGRAM_TOKEN"
-          test -n "$TELEGRAM_CHAT_ID" || test -n "$TELEGRAM_GROUP_CHAT_ID"
+      # ==========================================================
+      # 9. TELEGRAM CONFIGURATION
+      # ==========================================================
 
-      - name: Run ATLAS v11.1
+      - name: Validate Telegram configuration
         run: |
           set -euo pipefail
+
+          if [ -z "${TELEGRAM_TOKEN:-}" ]; then
+            echo "ERROR: TELEGRAM_TOKEN is missing."
+            exit 1
+          fi
+
+          if [ -z "${TELEGRAM_CHAT_ID:-}" ] && \
+             [ -z "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
+            echo "ERROR: No Telegram destination configured."
+            exit 1
+          fi
+
+          echo "Telegram configuration PASSED."
+
+      # ==========================================================
+      # 10. TELEGRAM PREFLIGHT
+      # ==========================================================
+
+      - name: Telegram preflight
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["TELEGRAM_TOKEN"].strip()
+
+          url = f"https://api.telegram.org/bot{token}/getMe"
+
+          req = urllib.request.Request(
+              url,
+              headers={
+                  "User-Agent": "ATLAS-AI/11.2"
+              },
+          )
+
+          with urllib.request.urlopen(
+              req,
+              timeout=30
+          ) as response:
+
+              data = json.loads(
+                  response.read().decode("utf-8")
+              )
+
+          if not data.get("ok"):
+              raise SystemExit(
+                  "Telegram preflight failed: "
+                  + str(data)
+              )
+
+          bot = data.get("result", {})
+
+          print(
+              "Telegram API OK:",
+              bot.get("username")
+              or bot.get("first_name")
+              or "unknown"
+          )
+          PY
+
+      # ==========================================================
+      # 11. RUN ATLAS v11.2
+      # ==========================================================
+
+      - name: Run ATLAS AI v11.2
+        run: |
+          set -euo pipefail
+
           python bot.py
+
+      # ==========================================================
+      # 12. FINALIZE SQLITE
+      # ==========================================================
 
       - name: Finalize SQLite
         if: always()
         run: |
           set -euo pipefail
+
           if [ -f "$ATLAS_SQLITE_FILE" ]; then
+
             python - <<'PY'
-          import os, sqlite3
-          db=os.environ['ATLAS_SQLITE_FILE']
-          con=sqlite3.connect(db,timeout=30)
+          import os
+          import sqlite3
+
+          db = os.environ["ATLAS_SQLITE_FILE"]
+
+          con = sqlite3.connect(
+              db,
+              timeout=30
+          )
+
           try:
-              con.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-              con.execute('PRAGMA optimize')
-              result=con.execute('PRAGMA integrity_check').fetchone()
-              print('SQLite integrity:', result[0] if result else 'UNKNOWN')
-              if not result or result[0] != 'ok': raise SystemExit(1)
+              con.execute(
+                  "PRAGMA wal_checkpoint(TRUNCATE)"
+              )
+
+              con.execute(
+                  "PRAGMA optimize"
+              )
+
+              result = con.execute(
+                  "PRAGMA integrity_check"
+              ).fetchone()
+
+              status = (
+                  result[0]
+                  if result
+                  else "UNKNOWN"
+              )
+
+              print(
+                  "SQLite integrity:",
+                  status
+              )
+
+              if status != "ok":
+                  raise SystemExit(1)
+
           finally:
               con.close()
           PY
+
           fi
+
+      # ==========================================================
+      # 13. FINAL STATUS
+      # ==========================================================
+
+      - name: Final status
+        if: success()
+        run: |
+          echo "=================================================="
+          echo "ATLAS AI v11.2 COMPLETED SUCCESSFULLY"
+          echo "=================================================="
+          echo "Two-engine architecture: ACTIVE"
+          echo "4H analytical engine: ACTIVE"
+          echo "3H price snapshot: ACTIVE"
+          echo "Trade geometry: ACTIVE"
+          echo "RSI / Volume confirmation: ACTIVE"
+          echo "Dashboard: ACTIVE"
+          echo "CSV export: ACTIVE"
+          echo "Telegram delivery: ACTIVE"
+          echo "=================================================="
