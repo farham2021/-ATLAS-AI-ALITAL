@@ -136,14 +136,14 @@ jobs:
               exit 1
             fi
 
-            echo "OK: $file"
+            echo "PASS: $file"
 
           done
 
           echo "Project structure validation PASSED."
 
       # ============================================================
-      # 5. V12 IMPORT VALIDATION
+      # 5. LEGACY REFERENCE CHECK
       # ============================================================
 
       - name: Validate V12 imports
@@ -163,13 +163,15 @@ jobs:
               '(^|[[:space:]])import[[:space:]]+bot([[:space:]]|$)|(^|[[:space:]])from[[:space:]]+bot[[:space:]]+import|ATLAS_v12_bot' \
               "$file"; then
 
-              echo "ERROR: Obsolete V11 reference found in $file"
+              echo "ERROR: Obsolete V11 engine reference found in $file"
               exit 1
             fi
 
+            echo "PASS: no obsolete engine reference in $file"
+
           done
 
-          echo "V12 import validation PASSED."
+          echo "Legacy reference validation PASSED."
 
       # ============================================================
       # 6. PYTHON SYNTAX
