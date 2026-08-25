@@ -1,64 +1,121 @@
-name: ATLAS AI v12 — Reliable Analytical Engine
+name: ATLAS AI v12 CI
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
-  schedule:
-    - cron: "0 */4 * * *"
 
 permissions:
   contents: read
 
-concurrency:
-  group: atlas-v12
-  cancel-in-progress: false
-
 jobs:
-  atlas:
+  validate-and-test:
+    name: Validate ATLAS AI v12
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      PYTHONUNBUFFERED: "1"
-      ATLAS_VERSION: "12.0"
-      ATLAS_TIMEFRAME: "4H"
-      ATLAS_V12_MIN_EXECUTABLE_RR: "1.50"
-      ATLAS_V12_MIN_WATCH_RR: "1.00"
-      ATLAS_V12_VOLUME_SPIKE: "2.50"
-      TGJU_USD_URL: "https://www.tgju.org/profile/price_dollar_rl"
-      TGJU_USDT_URL: "https://www.tgju.org/profile/price_dollar_usdt"
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-      COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements-v12.txt
+
+      - name: Verify required files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            "README_v12.md"
+            "atlas_v12_upgrade.py"
+            "bot12.py"
+            "requirements-v12.txt"
+            "smoke_atlas.py"
+            "test_v12.py"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "ERROR: Required file not found: $file"
+              exit 1
+            fi
+            echo "OK: $file"
+          done
+
+          if [[ ! -f ".github/workflows/atlas_v12.yml" ]]; then
+            echo "ERROR: Workflow file not found."
+            exit 1
+          fi
 
       - name: Install dependencies
+        shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip setuptools wheel
+
+          python -m pip install --upgrade pip
           python -m pip install -r requirements-v12.txt
 
-      - name: Validate v12 source
+      - name: Validate Python syntax
+        shell: bash
         run: |
           set -euo pipefail
-          test -f bot12.py
-          test -f atlas_v12_upgrade.py
-          test -f smoke_atlas.py
-          test "$(head -n 1 smoke_atlas.py)" = '#!/usr/bin/env python3'
-          python -m py_compile bot12.py
-          python -m py_compile atlas_v12_upgrade.py
-          python -m py_compile smoke_atlas.py
-          python smoke_atlas.py
 
-      - name: Run ATLAS v12
+          python -m py_compile atlas_v12_upgrade.py
+          python -m py_compile bot12.py
+          python -m py_compile smoke_atlas.py
+          python -m py_compile test_v12.py
+
+          echo "Python syntax validation passed."
+
+      - name: Check smoke test executable
+        shell: bash
         run: |
           set -euo pipefail
-          python bot12.py
+
+          chmod +x smoke_atlas.py
+
+          first_line="$(head -n 1 smoke_atlas.py)"
+
+          if [[ "$first_line" != "#!/usr/bin/env python3" ]]; then
+            echo "ERROR: smoke_atlas.py must start with:"
+            echo "#!/usr/bin/env python3"
+            echo "Actual first line:"
+            echo "$first_line"
+            exit 1
+          fi
+
+          echo "Smoke test shebang is valid."
+
+      - name: Run smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./smoke_atlas.py
+
+      - name: Run v12 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python test_v12.py
+
+      - name: Final validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo " ATLAS AI v12 CI PASSED"
+          echo "=========================================="
+          echo "Python: $(python --version)"
+          echo "Pip:    $(python -m pip --version)"
+          echo "Status: ALL CHECKS PASSED"
