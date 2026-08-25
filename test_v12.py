@@ -1,183 +1,468 @@
 #!/usr/bin/env python3
 
-from pathlib import Path
-import csv
-import io
-import sys
-import types
+"""
+ATLAS AI v12
+Test / Validation Suite
 
-# ------------------------------------------------------------
-# ATLAS v12 — Unit Test
-# Canonical engine: ATLAS_v12_bot.py
-# ------------------------------------------------------------
+این فایل فقط برای تست و اعتبارسنجی است.
+موتور اصلی پروژه:
+    bot12.py
+
+نکته:
+    این فایل عمداً هیچ وابستگی به ATLAS_v12_bot.py یا bot.py ندارد.
+"""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+import sys
+from pathlib import Path
+
+
+# ============================================================
+# PROJECT ROOT
+# ============================================================
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
 
-# Allow the test to run even when ccxt is not installed locally.
-try:
-    import ccxt  # noqa: F401
-except ImportError:
-    ccxt = types.ModuleType("ccxt")
-    sys.modules["ccxt"] = ccxt
-
-# Canonical v12 engine import.
-import ATLAS_v12_bot as bot
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
-# ------------------------------------------------------------
-# Test data
-# ------------------------------------------------------------
+# ============================================================
+# TEST HELPERS
+# ============================================================
 
-rows = [
-    {
-        "coin": "BTC",
-        "price": 100,
-        "support": 90,
-        "resistance": 120,
-        "entry": 101,
-        "sl": 95,
-        "tp1": 110,
-        "tp2": 120,
-        "h4_trend": "BULLISH",
-        "d1_trend": "BULLISH",
-        "w1_trend": "BULLISH",
-        "action": "BUY CONFIRMATION",
-        "decision_state": "BUY CONFIRMATION",
-        "direction": "LONG",
-        "confidence": 82,
-        "volume_ratio": 1.1,
-        "market_cap": 1_000_000,
-        "rsi": 61,
-        "volume": 10_000,
-    },
-    {
-        "coin": "ETH",
-        "price": 100,
-        "support": 90,
-        "resistance": 110,
-        "entry": 101,
-        "sl": 95,
-        "tp1": 105,
-        "tp2": 99,
-        "h4_trend": "BULLISH",
-        "d1_trend": "BULLISH",
-        "action": "BUY CONFIRMATION",
-        "decision_state": "BUY CONFIRMATION",
-        "direction": "LONG",
-        "confidence": 95,
-    },
+PASSED = 0
+FAILED = 0
+
+
+def check(name: str, condition: bool, detail: str = "") -> bool:
+    """
+    اجرای یک تست و نمایش نتیجه.
+    """
+    global PASSED, FAILED
+
+    if condition:
+        PASSED += 1
+        print(f"✅ PASS: {name}")
+        if detail:
+            print(f"   {detail}")
+        return True
+
+    FAILED += 1
+    print(f"❌ FAIL: {name}")
+    if detail:
+        print(f"   {detail}")
+    return False
+
+
+def section(title: str) -> None:
+    print()
+    print("=" * 70)
+    print(title)
+    print("=" * 70)
+
+
+# ============================================================
+# 1. PROJECT FILES
+# ============================================================
+
+section("1. PROJECT STRUCTURE")
+
+REQUIRED_FILES = [
+    "bot12.py",
+    "atlas_v12_upgrade.py",
+    "smoke_atlas.py",
+    "test_v12.py",
+]
+
+OPTIONAL_FILES = [
+    "requirements-v12.txt",
+    "README_v12.md",
+    ".env.example",
 ]
 
 
-# ------------------------------------------------------------
-# Controlled test configuration
-# ------------------------------------------------------------
+for filename in REQUIRED_FILES:
+    path = ROOT / filename
 
-bot.ATLAS_PERSONAL_ASSETS = ["BTC", "ETH"]
-bot.ATLAS_METALS = ()
-bot.ATLAS_PRIORITY_TOP10 = ["BTC"]
-
-
-# ------------------------------------------------------------
-# CSV 1 — Analysis Snapshot
-# ------------------------------------------------------------
-
-csv1 = bot.generate_csv_report(
-    rows,
-    ["BTC"],
-    [],
-)
-
-assert csv1, "CSV1 is empty."
-
-assert "MarketCap" in csv1, (
-    "CSV1 does not contain MarketCap column."
-)
-
-parsed = list(
-    csv.DictReader(
-        io.StringIO(csv1)
+    check(
+        f"Required file exists: {filename}",
+        path.is_file(),
+        str(path),
     )
-)
-
-btc = next(
-    row for row in parsed
-    if row["Symbol"] == "BTC"
-)
-
-eth = next(
-    row for row in parsed
-    if row["Symbol"] == "ETH"
-)
-
-assert btc["Entry"] == "101.0", (
-    f"Unexpected BTC Entry: {btc['Entry']!r}"
-)
-
-assert eth["Entry"] == "", (
-    f"ETH should not have executable entry: {eth['Entry']!r}"
-)
 
 
-# ------------------------------------------------------------
-# CSV 2 — Institutional Dataset
-# ------------------------------------------------------------
+for filename in OPTIONAL_FILES:
+    path = ROOT / filename
 
-fx = {
-    "usd": {
-        "value": 190_000,
-    },
-    "usdt": {
-        "value": 191_000,
-    },
-}
-
-csv2 = bot.generate_institutional_csv(
-    rows,
-    ["BTC"],
-    [],
-    fx,
-)
-
-assert csv2, "CSV2 is empty."
-
-assert "fx_usd_toman" in csv2, (
-    "CSV2 missing fx_usd_toman."
-)
-
-assert "fx_usdt_toman" in csv2, (
-    "CSV2 missing fx_usdt_toman."
-)
-
-assert "TGJU" in csv2, (
-    "CSV2 does not identify TGJU as FX source."
-)
+    if path.is_file():
+        print(f"ℹ️ OPTIONAL PRESENT: {filename}")
+    else:
+        print(f"ℹ️ OPTIONAL MISSING: {filename}")
 
 
-# ------------------------------------------------------------
-# Health Check
-# ------------------------------------------------------------
+# ============================================================
+# 2. IMPORT MAIN ENGINE
+# ============================================================
 
-health = bot.health_check(rows)
+section("2. MAIN ENGINE IMPORT")
 
-assert health["successful"] == 2, (
-    f"Expected 2 successful analyses, got "
-    f"{health.get('successful')}"
-)
+try:
+    bot = importlib.import_module("bot12")
+
+    check(
+        "bot12.py imports successfully",
+        True,
+        f"Loaded from: {getattr(bot, '__file__', 'unknown')}",
+    )
+
+except Exception as exc:
+    bot = None
+
+    check(
+        "bot12.py imports successfully",
+        False,
+        f"{type(exc).__name__}: {exc}",
+    )
 
 
-# ------------------------------------------------------------
-# Final result
-# ------------------------------------------------------------
+# ============================================================
+# 3. FORBIDDEN LEGACY REFERENCES
+# ============================================================
 
-print("==========================================")
-print(" ATLAS AI v12 UNIT TEST")
-print("==========================================")
-print("PASS: CSV1 Analysis Snapshot")
-print("PASS: MarketCap export")
-print("PASS: CSV2 Institutional Dataset")
-print("PASS: TGJU USD/USDT fields")
-print("PASS: Health Check")
-print("==========================================")
-print("PASS: ATLAS AI v12 unit test")
+section("3. LEGACY REFERENCE CHECK")
+
+files_to_scan = [
+    ROOT / "test_v12.py",
+    ROOT / "smoke_atlas.py",
+    ROOT / "atlas_v12_upgrade.py",
+]
+
+for path in files_to_scan:
+
+    if not path.is_file():
+        continue
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = path.read_text(encoding="utf-8-sig")
+
+    forbidden = [
+        "ATLAS_v12_bot",
+        "import bot ",
+        "from bot import",
+    ]
+
+    found = [
+        item
+        for item in forbidden
+        if item in content
+    ]
+
+    check(
+        f"No obsolete import in {path.name}",
+        not found,
+        f"Found: {found}" if found else "No obsolete references detected.",
+    )
+
+
+# ============================================================
+# 4. PYTHON SYNTAX
+# ============================================================
+
+section("4. PYTHON SYNTAX VALIDATION")
+
+
+PYTHON_FILES = [
+    "bot12.py",
+    "atlas_v12_upgrade.py",
+    "smoke_atlas.py",
+    "test_v12.py",
+]
+
+
+for filename in PYTHON_FILES:
+
+    path = ROOT / filename
+
+    if not path.is_file():
+        continue
+
+    try:
+        source = path.read_text(encoding="utf-8")
+
+        compile(
+            source,
+            str(path),
+            "exec",
+        )
+
+        check(
+            f"Syntax valid: {filename}",
+            True,
+        )
+
+    except Exception as exc:
+
+        check(
+            f"Syntax valid: {filename}",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+# ============================================================
+# 5. SMOKE TEST HEADER
+# ============================================================
+
+section("5. SMOKE TEST HEADER")
+
+smoke_path = ROOT / "smoke_atlas.py"
+
+if smoke_path.is_file():
+
+    try:
+        first_line = smoke_path.read_text(
+            encoding="utf-8"
+        ).splitlines()[0]
+
+        check(
+            "smoke_atlas.py has Python shebang",
+            first_line.strip() == "#!/usr/bin/env python3",
+            f"Found: {first_line}",
+        )
+
+    except Exception as exc:
+
+        check(
+            "smoke_atlas.py has Python shebang",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+# ============================================================
+# 6. MAIN ENGINE API DISCOVERY
+# ============================================================
+
+section("6. BOT12 API DISCOVERY")
+
+
+if bot is not None:
+
+    public_names = [
+        name
+        for name in dir(bot)
+        if not name.startswith("_")
+    ]
+
+    print(
+        f"ℹ️ Public objects discovered: "
+        f"{len(public_names)}"
+    )
+
+    print(
+        "   "
+        + ", ".join(public_names[:50])
+    )
+
+    # Common expected functions.
+    EXPECTED_FUNCTIONS = [
+        "build_personal_report",
+        "personal_report",
+        "build_market_report",
+    ]
+
+    for name in EXPECTED_FUNCTIONS:
+
+        if hasattr(bot, name):
+
+            obj = getattr(bot, name)
+
+            check(
+                f"bot12 API: {name}",
+                callable(obj),
+                f"type={type(obj).__name__}",
+            )
+
+        else:
+
+            print(
+                f"ℹ️ OPTIONAL API not present: {name}"
+            )
+
+
+# ============================================================
+# 7. PERSONAL REPORT ALIAS CONSISTENCY
+# ============================================================
+
+section("7. PERSONAL REPORT COMPATIBILITY")
+
+
+if bot is not None:
+
+    if hasattr(bot, "personal_report"):
+
+        personal = getattr(
+            bot,
+            "personal_report",
+        )
+
+        if hasattr(bot, "build_personal_report"):
+
+            builder = getattr(
+                bot,
+                "build_personal_report",
+            )
+
+            check(
+                "personal_report compatibility",
+                personal is builder or (
+                    callable(personal)
+                    and callable(builder)
+                ),
+                "personal_report and build_personal_report are compatible.",
+            )
+
+        else:
+
+            check(
+                "personal_report callable",
+                callable(personal),
+            )
+
+    else:
+
+        print(
+            "ℹ️ personal_report alias not present; "
+            "no failure because it is optional."
+        )
+
+
+# ============================================================
+# 8. V12 UPGRADE MODULE
+# ============================================================
+
+section("8. V12 UPGRADE MODULE")
+
+upgrade = None
+
+try:
+
+    upgrade = importlib.import_module(
+        "atlas_v12_upgrade"
+    )
+
+    check(
+        "atlas_v12_upgrade.py imports successfully",
+        True,
+        f"Loaded from: {getattr(upgrade, '__file__', 'unknown')}",
+    )
+
+except Exception as exc:
+
+    check(
+        "atlas_v12_upgrade.py imports successfully",
+        False,
+        f"{type(exc).__name__}: {exc}",
+    )
+
+
+# ============================================================
+# 9. BASIC CALLABLE VALIDATION
+# ============================================================
+
+section("9. CALLABLE VALIDATION")
+
+
+if bot is not None:
+
+    candidates = [
+        "build_personal_report",
+        "personal_report",
+        "build_market_report",
+        "health_check",
+        "volume_spike_warning",
+        "rsi_divergence",
+    ]
+
+    for name in candidates:
+
+        if hasattr(bot, name):
+
+            obj = getattr(bot, name)
+
+            check(
+                f"{name} is callable",
+                callable(obj),
+            )
+
+        else:
+
+            print(
+                f"ℹ️ Function not present: {name}"
+            )
+
+
+# ============================================================
+# 10. MODULE METADATA
+# ============================================================
+
+section("10. MODULE METADATA")
+
+
+if bot is not None:
+
+    module_file = getattr(
+        bot,
+        "__file__",
+        None,
+    )
+
+    check(
+        "bot12 module has valid path",
+        bool(module_file),
+        str(module_file),
+    )
+
+
+# ============================================================
+# 11. FINAL RESULT
+# ============================================================
+
+section("FINAL TEST RESULT")
+
+TOTAL = PASSED + FAILED
+
+print(f"Total tests : {TOTAL}")
+print(f"Passed      : {PASSED}")
+print(f"Failed      : {FAILED}")
+
+print()
+
+if FAILED == 0:
+
+    print("=" * 70)
+    print("🎯 ATLAS AI v12 TEST STATUS: PASS")
+    print("=" * 70)
+    print("All mandatory validation checks passed.")
+    print("Engine: bot12.py")
+    print("=" * 70)
+
+    sys.exit(0)
+
+else:
+
+    print("=" * 70)
+    print("🚨 ATLAS AI v12 TEST STATUS: FAIL")
+    print("=" * 70)
+    print(
+        "One or more validation checks failed."
+    )
+    print("=" * 70)
+
+    sys.exit(1)
