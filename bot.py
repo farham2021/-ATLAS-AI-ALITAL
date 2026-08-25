@@ -1,8 +1,8 @@
 #============================================================
-# ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE
+# ATLAS AI v12.0 — RELIABLE UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
-# v11.0 architecture:
+# v12.0 architecture:
 # - Fixed portfolio symbols (user-defined, never changes)
 # - Compact dashboard-style report output
 # - BTC pair filtering with dynamic volume threshold
@@ -58,7 +58,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.1 UNIFIED TWO-ENGINE"
+VERSION = "ATLAS v12.0 RELIABLE TWO-ENGINE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -133,7 +133,7 @@ MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.80"))
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
-MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
+MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "1.50"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
 TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
 SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
@@ -141,7 +141,7 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11.sqlite3")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v12.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
 
 
@@ -2362,7 +2362,7 @@ def atlas_decision_board(results, btc_regime, breadth):
     best = buys[0] if buys else (sells[0] if sells else None)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        "🎯 ATLAS v11 DECISION BOARD",
+        "🎯 ATLAS v12 DECISION BOARD",
         f"BTC REGIME: {btc_regime.get('regime','UNKNOWN')} | {btc_regime.get('reason','')}",
         f"MARKET BREADTH: {breadth.get('state')} | {breadth.get('score'):.1f}% bullish | N={breadth.get('samples',0)}",
     ]
@@ -3179,27 +3179,114 @@ def _telegram_send_document(chat_id, content, filename, caption=None):
         raise RuntimeError(f"Telegram sendDocument failed: {data}")
     return data
 
-def send_csv_report(results, top10, dynamic30):
-    """Send one dynamically generated CSV to every configured destination."""
-    content = generate_csv_report(results, top10, dynamic30)
-    if not content.strip():
-        return 0, ["CSV is empty"]
-    dt = now_tehran()
-    filename = f"atlas_report_{shamsi(dt).replace('/','')}_{dt.strftime('%H%M%S')}.csv"
-    caption = f"📎 ATLAS AI — CSV کامل | {VERSION} | {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران"
+def _csv_base_rows(results, top10, dynamic30):
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
+    ordered=[]
+    for sym in list(top10 or ATLAS_PRIORITY_TOP10)+list(dynamic30 or [])+list(ATLAS_PERSONAL_ASSETS)+list(ATLAS_METALS):
+        s=str(sym).upper()
+        if s and s not in ordered: ordered.append(s)
+    rows=[]
+    for sym in ordered:
+        r=result_map.get(sym)
+        if r is None and sym in ATLAS_METALS: r=_metal_analysis(sym)
+        if not r: continue
+        plan=_csv_safe_plan(r)
+        entry=sl=tp1=tp2=tp3=tp4=rr=""
+        if plan:
+            entry,sl,tp1,tp2=plan
+            tp3,tp4=f(r.get("tp3")),f(r.get("tp4"))
+            rr=_rr_from_values(entry,sl,tp2)
+        rows.append((sym,r,plan,entry,sl,tp1,tp2,tp3,tp4,rr))
+    return rows
+
+def generate_csv_report(results, top10, dynamic30):
+    """CSV1: human-readable analysis snapshot. Invalid geometry is blanked, never invented."""
+    import csv, io
+    out=io.StringIO(newline="")
+    w=csv.writer(out,lineterminator="\n")
+    cols=list(CSV_COLUMNS)+["MarketCap","VolumeSpike","RSIDivergence","HealthStatus","FXSource"]
+    w.writerow(cols)
+    health=health_check(results)["text"]
+    for sym,r,plan,entry,sl,tp1,tp2,tp3,tp4,rr in _csv_base_rows(results,top10,dynamic30):
+        w.writerow([
+            _csv_group(sym,top10,dynamic30,{str(x).upper() for x in ATLAS_PERSONAL_ASSETS}),sym,
+            _csv_status(r),str(r.get("decision_state") or r.get("action") or "WAIT"),
+            _csv_number(r.get("price")),_csv_number(r.get("change"),4),
+            _csv_number(r.get("support")),_csv_number(r.get("resistance")),
+            _csv_number(entry),_csv_number(sl),_csv_number(tp1),_csv_number(tp2),
+            _csv_number(tp3),_csv_number(tp4),_csv_number(rr,3),_csv_number(r.get("confidence"),2),
+            r.get("h4_trend","UNKNOWN"),r.get("d1_trend","UNKNOWN"),r.get("w1_trend","UNKNOWN"),
+            _csv_number(r.get("rsi"),2),r.get("macd",""),r.get("volume",""),_csv_number(r.get("volume_ratio"),3),
+            _csv_number(r.get("atr_pct"),3),r.get("liquidity",""),r.get("gate",""),r.get("gate_reason",""),
+            r.get("direction",""),bool(r.get("repeat_signal")),r.get("reason",""),VERSION,
+            _csv_number(r.get("market_cap")),volume_spike_warning(r) or "",rsi_divergence_signal(r) or "",health,"TGJU"
+        ])
+    return out.getvalue()
+
+def generate_institutional_csv(results, top10, dynamic30, fx=None):
+    """CSV2: machine/backtest-oriented snapshot with provenance and quality metadata."""
+    import csv, io, json
+    out=io.StringIO(newline=""); w=csv.writer(out,lineterminator="\n")
+    w.writerow([
+        "timestamp_utc","timestamp_tehran","symbol","group","setup_level","decision_state",
+        "price","entry","sl","tp1","tp2","rr","confidence","h4_trend","d1_trend","w1_trend",
+        "rsi","macd","volume","volume_ratio","atr_pct","liquidity","gate","gate_reason",
+        "direction","repeat_signal","volume_spike","rsi_divergence","market_cap",
+        "required_conditions","missing_conditions","price_source","data_timestamp",
+        "data_quality","fx_usd_toman","fx_usdt_toman","fx_source","model_version"
+    ])
+    now=time.time(); dt=now_tehran()
+    usd=((fx or {}).get("usd") or {}).get("value")
+    usdt=((fx or {}).get("usdt") or {}).get("value")
+    for sym,r,plan,entry,sl,tp1,tp2,tp3,tp4,rr in _csv_base_rows(results,top10,dynamic30):
+        if plan:
+            setup="EXECUTABLE" if (rr is not None and rr>=MIN_EXECUTABLE_RR and float(r.get("confidence") or 0)>=MIN_CONFIDENCE) else "BEST_WATCH"
+        else:
+            setup="NO_VALID"
+        quality=r.get("data_quality",r.get("quality_score",""))
+        data_ts=r.get("data_timestamp",r.get("timestamp",""))
+        w.writerow([
+            datetime.fromtimestamp(now,timezone.utc).isoformat(),
+            dt.isoformat(),sym,_csv_group(sym,top10,dynamic30,{str(x).upper() for x in ATLAS_PERSONAL_ASSETS}),
+            setup,str(r.get("decision_state") or r.get("action") or "WAIT"),
+            _csv_number(r.get("price")),_csv_number(entry),_csv_number(sl),_csv_number(tp1),_csv_number(tp2),
+            _csv_number(rr,4),_csv_number(r.get("confidence"),2),r.get("h4_trend","UNKNOWN"),r.get("d1_trend","UNKNOWN"),
+            r.get("w1_trend","UNKNOWN"),_csv_number(r.get("rsi"),2),r.get("macd",""),r.get("volume",""),
+            _csv_number(r.get("volume_ratio"),3),_csv_number(r.get("atr_pct"),3),r.get("liquidity",""),
+            r.get("gate",""),r.get("gate_reason",""),r.get("direction",""),bool(r.get("repeat_signal")),
+            volume_spike_warning(r) or "",rsi_divergence_signal(r) or "",_csv_number(r.get("market_cap")),
+            json.dumps(r.get("required_conditions",[]),ensure_ascii=False),
+            json.dumps(r.get("missing_conditions",[]),ensure_ascii=False),
+            r.get("price_source",r.get("source","")),data_ts,quality,usd,usdt,"TGJU",VERSION
+        ])
+    return out.getvalue()
+
+def send_csv_report(results, top10, dynamic30, fx=None):
+    """Send CSV1 + CSV2 to every configured Telegram destination."""
+    dt=now_tehran()
+    stamp=f"{shamsi(dt).replace('/','')}_{dt.strftime('%H%M%S')}"
+    files_to_send=[
+        (generate_csv_report(results,top10,dynamic30),f"atlas_analysis_snapshot_{stamp}.csv",
+         "📎 CSV1 — Analysis Snapshot"),
+        (generate_institutional_csv(results,top10,dynamic30,fx),f"atlas_institutional_{stamp}.csv",
+         "📎 CSV2 — Institutional Dataset"),
+    ]
     destinations=[]
-    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-        if chat_id and chat_id not in destinations:
-            destinations.append(chat_id)
+    for chat_id in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
+        if chat_id and chat_id not in destinations: destinations.append(chat_id)
     sent=0; errors=[]
-    for chat_id in destinations:
-        try:
-            _telegram_send_document(chat_id, content, filename, caption)
-            sent += 1
-        except Exception as e:
-            errors.append(f"CSV {chat_id}: {e}")
-            append_changelog("CSV_EXPORT", None, None, str(e), {"traceback": traceback.format_exc()})
-    return sent, errors
+    for content,filename,label in files_to_send:
+        if not content.strip(): continue
+        for chat_id in destinations:
+            try:
+                _telegram_send_document(chat_id,content,filename,
+                    f"{label} | {VERSION} | {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران")
+                sent+=1
+            except Exception as e:
+                errors.append(f"{filename} {chat_id}: {e}")
+                append_changelog("CSV_EXPORT",None,None,str(e),{"traceback":traceback.format_exc()})
+    return sent,errors
 
 # ============================================================
 # REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
@@ -3624,7 +3711,7 @@ def _compact_dashboard_table(title, rows):
         lines.append("  ".join(str(v).ljust(widths[i]) for i,v in enumerate(row)))
     return "\n".join(lines)
 
-def build_dashboard_table(results, top10, dynamic30):
+def build_dashboard_table(results, top10, dynamic30, include_personal=False):
     """Separate table message covering all requested universes + metals."""
     personal_symbols={str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
     by={str(r.get("coin") or "").upper():r for r in (results or []) if r.get("coin")}
@@ -3637,7 +3724,7 @@ def build_dashboard_table(results, top10, dynamic30):
         "━━━━━━━━━━━━━━━━━━",
         _compact_dashboard_table("📡 MARKET TOP 10 (EX-PERSONAL)", top10_rows),
         _compact_dashboard_table("📡 DYNAMIC TOP 30 (ALL CANDIDATES)", dynamic_rows),
-        _compact_dashboard_table("💼 PERSONAL PORTFOLIO", personal_rows),
+        *([_compact_dashboard_table("💼 PERSONAL PORTFOLIO", personal_rows)] if include_personal else []),
         _compact_dashboard_table("🪙 ATLAS METALS", metals),
     ]
     return "\n\n".join(blocks)
@@ -3708,7 +3795,7 @@ def _best_setup_block(results, universe_filter=None, title="🔥 BEST SETUP"):
             f"   Entry: {fmt(entry)} | SL: {fmt(sl)} | TP1: {fmt(tp1)} | TP2: {fmt(tp2)}\n"
             f"   Confidence: {float(r.get('confidence') or 0):.0f}% | H4/D1: {r.get('h4_trend','UNKNOWN')}/{r.get('d1_trend','UNKNOWN')}{risk_note}")
 
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None, fx=None):
     """MARKET engine: only the compact table-style dashboard is exposed."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
     market_results = [
@@ -3737,7 +3824,9 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "🤖 ATLAS AI — MARKET 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
-        _best_setup_block(market_results),
+        _fx_line(fx),
+        health_check(results)["text"],
+        _best_setup_v12_block(market_results),
         _compact_section("📡 ATLAS TOP 10", top10_rows),
         _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
         _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
@@ -3746,7 +3835,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     return "\n\n".join(lines)
 
 
-def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
+def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None, fx=None):
     """PERSONAL engine: all portfolio assets, same compact table format."""
     rows = _portfolio_rows(results)
     dt = now_tehran()
@@ -3754,7 +3843,9 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
-        _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP"),
+        _fx_line(fx),
+        health_check(rows)["text"],
+        _best_setup_v12_block(rows, title="🔥 BEST PERSONAL SETUP"),
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
         _final_market_recommendation(rows, [], [], macro, btc_regime),
     ])
@@ -3769,11 +3860,11 @@ def atlas_engine_mode():
     return mode if mode in {"MARKET","PERSONAL","BOTH"} else "MARKET"
 
 
-def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
+def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None, fx=None):
+    market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth,fx)
     mode=atlas_engine_mode()
     if mode=="MARKET": return [market]
-    personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
+    personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth,fx)
     if mode=="PERSONAL": return [personal]
     return [market,personal]
 
@@ -4131,7 +4222,7 @@ def save_run(results, parts, macro, news, unavailable=0):
             "market_liquidity": market_liquidity_index(results),
             "dxy": macro.get("DXY"),
             "news_bias": news["bias"],
-            "notes": "v11.0 complete: unified market + personal + metals + snapshot + self-healing",
+            "notes": "v12.0 complete: unified market + personal + metals + snapshot + TGJU FX + dual CSV",
         },
     )
 
@@ -4206,15 +4297,185 @@ def _conditional_trade_plan(result):
             if result.get(k) is not None}
 
 # ============================================================
-# ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT
+# ATLAS v12.0 — SEPARATE 3H PRICE SNAPSHOT
 # ============================================================
 SNAPSHOT_SYMBOLS = ("BTC","ETH","XRP","SOL","BNB","DOGE","ADA","TRX","LINK","XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR")
-PUBLIC_USDT_PAGES = (
-    "https://wallex.ir/price/usdt",
-    "https://www.excoino.com/coins",
-    "https://nobitex.ir/usdt/",
-)
+# v12 FX policy: TGJU is the sole source for USD/Toman and USDT/Toman.
+TGJU_USD_URL = "https://www.tgju.org/profile/price_dollar_rl"
+TGJU_USDT_LOCAL_URL = "https://www.tgju.org/profile/crypto-tether/markets-local"
+PUBLIC_USDT_PAGES = (TGJU_USDT_LOCAL_URL,)
 
+
+
+# ============================================================
+# v12 RELIABILITY / FX / SETUP HELPERS
+# ============================================================
+
+def _parse_tgju_number(raw):
+    if raw is None:
+        return None
+    text = str(raw)
+    trans = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+    text = text.translate(trans).replace(",", "").replace("٬", "").replace(" ", "")
+    m = re.search(r"\d+(?:\.\d+)?", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
+
+def fetch_tgju_usd_toman():
+    """Fetch USD free-market rate ONLY from TGJU. Returns toman + metadata."""
+    try:
+        html = _public_page_text(TGJU_USD_URL)
+        # TGJU publishes the current rate in Rial; first prefer the labelled current rate.
+        patterns = (
+            r"نرخ فعلی\s*[:：]?\s*([0-9۰-۹٬,]+)",
+            r"قیمت دلار آزاد.*?([0-9۰-۹٬,]{5,})\s*ریال",
+            r'"price"\s*:\s*"?(?:[0-9۰-۹٬,]+)"?',
+        )
+        value = None
+        for pat in patterns:
+            m = re.search(pat, html or "", re.I | re.S)
+            if m:
+                value = _parse_tgju_number(m.group(1))
+                if value and value >= 100000:
+                    break
+        if value is None or value < 100000:
+            return {"value": None, "unit": "toman", "source": "TGJU", "url": TGJU_USD_URL,
+                    "timestamp": int(time.time()), "quality": 0.0, "error": "TGJU USD parse failed"}
+        return {"value": round(value / 10.0, 2), "unit": "toman", "source": "TGJU",
+                "url": TGJU_USD_URL, "timestamp": int(time.time()), "quality": 1.0}
+    except Exception as e:
+        return {"value": None, "unit": "toman", "source": "TGJU", "url": TGJU_USD_URL,
+                "timestamp": int(time.time()), "quality": 0.0, "error": str(e)}
+
+def fetch_tgju_usdt_toman():
+    """Fetch local USDT/IRR sell quote ONLY from TGJU local-market table."""
+    try:
+        html = _public_page_text(TGJU_USDT_LOCAL_URL)
+        compact = re.sub(r"\s+", " ", html or "")
+        # The local-market table exposes USDT/IRR and prices in Rial.
+        patterns = (
+            r"USDT\s*/\s*IRR.{0,500}?([0-9][0-9,٬]{5,})",
+            r"USDT\s*/\s*IRR.{0,500}?([0-9۰-۹][0-9۰-۹,٬]{5,})",
+            r"USDT.{0,500}?قیمت فروش\s*(?:\(ریال\))?.{0,500}?([0-9۰-۹][0-9۰-۹,٬]{5,})",
+        )
+        value = None
+        for pat in patterns:
+            m = re.search(pat, compact, re.I | re.S)
+            if m:
+                value = _parse_tgju_number(m.group(1))
+                if value and value >= 100000:
+                    break
+        if value is None or value < 100000:
+            return {"value": None, "unit": "toman", "source": "TGJU", "url": TGJU_USDT_LOCAL_URL,
+                    "timestamp": int(time.time()), "quality": 0.0, "error": "TGJU USDT local parse failed"}
+        return {"value": round(value / 10.0, 2), "unit": "toman", "source": "TGJU",
+                "url": TGJU_USDT_LOCAL_URL, "timestamp": int(time.time()), "quality": 1.0}
+    except Exception as e:
+        return {"value": None, "unit": "toman", "source": "TGJU", "url": TGJU_USDT_LOCAL_URL,
+                "timestamp": int(time.time()), "quality": 0.0, "error": str(e)}
+
+def fetch_tgju_fx():
+    """Refresh both Iranian FX references on every analytical run."""
+    usd = fetch_tgju_usd_toman()
+    usdt = fetch_tgju_usdt_toman()
+    return {"usd": usd, "usdt": usdt, "fetched_at": int(time.time()), "source": "TGJU ONLY"}
+
+def _fx_line(fx):
+    usd = (fx or {}).get("usd", {}).get("value")
+    usdt = (fx or {}).get("usdt", {}).get("value")
+    usd_text = f"{usd:,.0f}" if usd is not None else "N/A"
+    usdt_text = f"{usdt:,.0f}" if usdt is not None else "N/A"
+    return f"💵 دلار TGJU: {usd_text} تومان | ₮ تتر TGJU: {usdt_text} تومان"
+
+def health_check(results):
+    total = len(results or [])
+    successful = sum(1 for r in (results or []) if f(r.get("price")) is not None)
+    failed = total - successful
+    return {"total": total, "successful": successful, "failed": failed,
+            "text": f"📊 Health: {successful}/{total} دارایی با داده قیمت معتبر تحلیل شد"}
+
+def volume_spike_warning(r):
+    vr = f(r.get("volume_ratio"))
+    if vr is not None and vr > 2.5:
+        return f"⚠️ Volume Spike: {vr:.2f}x میانگین"
+    return None
+
+def rsi_divergence_signal(r):
+    """Use only explicit divergence fields from the engine; never infer a divergence from one RSI value."""
+    for key in ("strong_divergence", "rsi_divergence", "divergence"):
+        value = r.get(key)
+        if value:
+            text = str(value).upper()
+            if text not in ("NONE", "FALSE", "0", "NEUTRAL"):
+                return str(value)
+    return None
+
+def _best_watch_candidates(results, universe_filter=None):
+    allowed = {str(x).upper() for x in universe_filter} if universe_filter is not None else None
+    out=[]
+    for raw in results or []:
+        r=dict(raw or {})
+        sym=str(r.get("coin") or "").upper()
+        if not sym or (allowed is not None and sym not in allowed):
+            continue
+        plan=_csv_safe_plan(r)
+        if not plan:
+            continue
+        rr=_rr_from_values(*plan[:2], plan[3])
+        if rr is None:
+            continue
+        conf=float(r.get("confidence") or 0)
+        state=str(r.get("decision_state") or r.get("action") or "").upper()
+        if state in ("BUY CONFIRMATION","SELL CONFIRMATION","BUY","SELL") and rr >= MIN_EXECUTABLE_RR and conf >= MIN_CONFIDENCE:
+            continue
+        score=conf + min(rr,4)*6
+        if volume_spike_warning(r):
+            score -= 8
+        out.append((score,r,rr))
+    return sorted(out,key=lambda x:x[0],reverse=True)
+
+def _best_setup_v12_block(results, universe_filter=None, title="🔥 SETUP STATUS"):
+    candidates=[]
+    for raw in results or []:
+        r=_ensure_candidate_plan(dict(raw or {}))
+        sym=str(r.get("coin") or "").upper()
+        if universe_filter is not None and sym not in {str(x).upper() for x in universe_filter}:
+            continue
+        state=str(r.get("decision_state") or r.get("action") or "").upper()
+        plan=_csv_safe_plan(r)
+        conf=float(r.get("confidence") or 0)
+        if plan:
+            rr=_rr_from_values(*plan[:2], plan[3])
+            if rr is not None and state in ("BUY CONFIRMATION","SELL CONFIRMATION","BUY","SELL") and rr >= MIN_EXECUTABLE_RR and conf >= MIN_CONFIDENCE and not r.get("repeat_signal"):
+                candidates.append((conf+min(rr,5)*5,r,rr,"EXECUTABLE"))
+    if candidates:
+        _,r,rr,_=max(candidates,key=lambda x:x[0])
+        entry,sl,tp1,tp2=_csv_safe_plan(r)
+        return (f"{title}: 🟢 EXECUTABLE — {r.get('coin')} — "
+                f"{'BUY' if str(r.get('direction')).upper()=='LONG' else 'SELL'} — R/R 1:{rr:.2f}\n"
+                f"   Entry {fmt(entry)} | SL {fmt(sl)} | TP1 {fmt(tp1)} | TP2 {fmt(tp2)} | Confidence {float(r.get('confidence') or 0):.0f}%")
+    watches=_best_watch_candidates(results,universe_filter)
+    if watches:
+        _,r,rr=watches[0]
+        entry,sl,tp1,tp2=_csv_safe_plan(r)
+        missing=[]
+        if float(r.get("confidence") or 0) < MIN_CONFIDENCE:
+            missing.append(f"Confidence ≥ {MIN_CONFIDENCE:.0f}%")
+        if rr < MIN_EXECUTABLE_RR:
+            missing.append(f"R/R ≥ 1:{MIN_EXECUTABLE_RR:.2f}")
+        if str(r.get("h4_trend") or "").upper() not in ("BULLISH","STRONG_BULLISH"):
+            missing.append("تأیید روند H4")
+        if str(r.get("d1_trend") or "").upper() not in ("BULLISH","STRONG_BULLISH"):
+            missing.append("هم‌جهتی D1")
+        cond=" | ".join(missing) if missing else "تأیید نهایی Gate"
+        return (f"{title}: 🟡 BEST WATCH — {r.get('coin')} — WAIT\n"
+                f"   Entry {fmt(entry)} | SL {fmt(sl)} | TP1 {fmt(tp1)} | TP2 {fmt(tp2)} | R/R 1:{rr:.2f}\n"
+                f"   شرط تبدیل به EXECUTABLE: {cond}")
+    return f"{title}: ⚪ NO VALID SETUP — در این اجرا هیچ ستاپ با داده و هندسه کافی تأیید نشد."
 
 def _snapshot_price_text(value):
     v = f(value)
@@ -4368,7 +4629,7 @@ def _save_snapshot_prices(results, captured_at):
     except Exception as e:
         append_changelog("SNAPSHOT_STATE", None, None, f"save failed: {e}")
 
-def build_price_snapshot(results, updated_at=None, previous_prices=None):
+def build_price_snapshot(results, updated_at=None, previous_prices=None, fx=None):
     by_coin={str(r.get("coin") or "").upper():r for r in (results or [])}
     dt=updated_at or now_tehran()
     previous_prices = previous_prices if previous_prices is not None else _snapshot_previous_prices()
@@ -4393,11 +4654,11 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         arrow=_snapshot_direction(price, previous_prices.get(sym))
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
     lines.append("───────────────────")
-    usdt=fetch_usdt_toman_public()
-    if usdt is None:
-        lines.append("💵 🟡 نرخ تتر  :   در دسترس نیست")
-    else:
-        lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
+    fx = fx or fetch_tgju_fx()
+    usd = ((fx.get("usd") or {}).get("value"))
+    usdt = ((fx.get("usdt") or {}).get("value"))
+    lines.append(f"💵 دلار TGJU :   {usd:,.0f} تومان" if usd is not None else "💵 دلار TGJU :   N/A")
+    lines.append(f"₮ تتر TGJU  :   {usdt:,.0f} تومان" if usdt is not None else "₮ تتر TGJU  :   N/A")
     lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
     return "\n".join(lines)
 
@@ -4406,7 +4667,7 @@ def send_price_snapshot(results):
     """Send snapshot separately; persist comparison state only after successful delivery."""
     captured_at=now_tehran().isoformat()
     previous=_snapshot_previous_prices()
-    payload=build_price_snapshot(results, previous_prices=previous)
+    payload=build_price_snapshot(results, previous_prices=previous, fx=fetch_tgju_fx())
     parts,sent,errors=send_report(payload)
     if sent == parts and sent > 0:
         _save_snapshot_prices(results, captured_at)
@@ -4441,21 +4702,22 @@ def main():
 
         if do_analysis:
             text, results, macro, news, market_info, unavailable = report()
+            fx = fetch_tgju_fx()
             top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
             btc_regime = btc_market_regime()
             breadth = market_breadth(results)
             outputs = build_two_engine_reports(
                 results, top10, dynamic30, macro, news, market_info,
-                unavailable, btc_regime, breadth
+                unavailable, btc_regime, breadth, fx
             )
-            outputs.append(build_dashboard_table(results, top10, dynamic30))
+            outputs.append(build_dashboard_table(results, top10, dynamic30, include_personal=False))
             for payload in outputs:
                 parts,sent,errors=send_report(payload)
                 total_sent += sent
                 all_errors.extend(errors)
                 print(payload)
             analysis_results = results
-            csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
+            csv_sent, csv_errors = send_csv_report(results, top10, dynamic30, fx)
             total_sent += csv_sent
             all_errors.extend(csv_errors)
             print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
