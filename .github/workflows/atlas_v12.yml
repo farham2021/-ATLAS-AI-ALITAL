@@ -1,0 +1,64 @@
+name: ATLAS AI v12 — Reliable Analytical Engine
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-v12
+  cancel-in-progress: false
+
+jobs:
+  atlas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      ATLAS_VERSION: "12.0"
+      ATLAS_TIMEFRAME: "4H"
+      ATLAS_V12_MIN_EXECUTABLE_RR: "1.50"
+      ATLAS_V12_MIN_WATCH_RR: "1.00"
+      ATLAS_V12_VOLUME_SPIKE: "2.50"
+      TGJU_USD_URL: "https://www.tgju.org/profile/price_dollar_rl"
+      TGJU_USDT_URL: "https://www.tgju.org/profile/price_dollar_usdt"
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+      COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements-v12.txt
+
+      - name: Validate v12 source
+        run: |
+          set -euo pipefail
+          test -f bot12.py
+          test -f atlas_v12_upgrade.py
+          test -f smoke_atlas.py
+          test "$(head -n 1 smoke_atlas.py)" = '#!/usr/bin/env python3'
+          python -m py_compile bot12.py
+          python -m py_compile atlas_v12_upgrade.py
+          python -m py_compile smoke_atlas.py
+          python smoke_atlas.py
+
+      - name: Run ATLAS v12
+        run: |
+          set -euo pipefail
+          python bot12.py
