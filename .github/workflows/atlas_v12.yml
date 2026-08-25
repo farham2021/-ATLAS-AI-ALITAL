@@ -2,131 +2,83 @@ name: ATLAS AI v12
 
 on:
   workflow_dispatch:
-
-  push:
-    branches:
-      - main
-      - master
+  schedule:
+    - cron: "0 */3 * * *"
 
 permissions:
   contents: read
 
 jobs:
-  test-v12:
-    name: ATLAS v12 Validation
+  validate-v12:
     runs-on: ubuntu-latest
 
     steps:
-
-      # 1. Checkout
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Python 3.12
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: "pip"
           cache-dependency-path: requirements-v12.txt
 
-      # 3. Verify project files
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-v12.txt
+
       - name: Verify required files
-        shell: bash
         run: |
           set -euo pipefail
 
           required_files=(
-            "README_v12.md"
             "bot12.py"
             "atlas_v12_upgrade.py"
-            "requirements-v12.txt"
             "smoke_atlas.py"
             "test_v12.py"
+            "requirements-v12.txt"
           )
 
-          echo "Checking ATLAS v12 project structure..."
-
           for file in "${required_files[@]}"; do
-            if [[ ! -f "$file" ]]; then
-              echo "ERROR: Required file not found: $file"
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Missing required file: $file"
               exit 1
             fi
-
             echo "OK: $file"
           done
 
-          echo "Project structure validation passed."
-
-      # 4. Install dependencies
-      - name: Install dependencies
-        shell: bash
+      - name: Python syntax validation
         run: |
           set -euo pipefail
 
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-v12.txt
+          python -m py_compile \
+            bot12.py \
+            atlas_v12_upgrade.py \
+            smoke_atlas.py \
+            test_v12.py
 
-      # 5. Validate Python syntax
-      - name: Validate Python syntax
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python -m py_compile bot12.py
-          python -m py_compile atlas_v12_upgrade.py
-          python -m py_compile smoke_atlas.py
-          python -m py_compile test_v12.py
-
-          echo "Python syntax validation passed."
-
-      # 6. Check smoke test shebang
-      - name: Validate smoke test
-        shell: bash
+      - name: Verify smoke test shebang
         run: |
           set -euo pipefail
 
           first_line="$(head -n 1 smoke_atlas.py)"
 
-          if [[ "$first_line" != "#!/usr/bin/env python3" ]]; then
+          if [ "$first_line" != "#!/usr/bin/env python3" ]; then
             echo "ERROR: smoke_atlas.py must start with:"
             echo "#!/usr/bin/env python3"
             exit 1
           fi
 
-          chmod +x smoke_atlas.py
+          echo "OK: smoke_atlas.py shebang"
 
-          echo "Smoke test header validated."
-
-      # 7. Run unit tests
-      - name: Run v12 unit tests
-        shell: bash
+      - name: Run v12 test suite
         run: |
           set -euo pipefail
-
           python test_v12.py
 
-      # 8. Run smoke test
-      - name: Run v12 smoke test
-        shell: bash
+      - name: Run smoke test
         run: |
           set -euo pipefail
-
-          ./smoke_atlas.py
-
-      # 9. Final status
-      - name: Final validation
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo "       ATLAS AI v12 VALIDATION"
-          echo "=========================================="
-          echo "Python: $(python --version)"
-          echo "Engine: bot12.py"
-          echo "Unit tests: PASSED"
-          echo "Smoke test: PASSED"
-          echo "=========================================="
-          echo "ATLAS AI v12 validation completed."
-          echo "=========================================="
+          python smoke_atlas.py
