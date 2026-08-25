@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """ATLAS AI v12 - Reliable Analytical Engine. No forced signals."""
 from __future__ import annotations
-import csv,json,re
+import csv,json,re,time
 from dataclasses import dataclass,asdict
 from datetime import datetime
 from typing import Optional,Dict,Any,List
 import requests
 
-# ============================================================
-# IMPORT TELEGRAM DELIVERY - FIXED
-# ============================================================
+# Telegram delivery is the real implementation; do not shadow these functions locally.
 from telegram_delivery_v12 import send_report, send_csv as send_csv_report
 
 TGJU_USD_URL="https://www.tgju.org/profile/price_dollar_rl"
@@ -39,23 +37,90 @@ def _number(x):
     m=re.search(r'-?[0-9][0-9,٬]*(?:\.[0-9]+)?',str(x))
     return float(m.group().replace(',','').replace('٬','')) if m else None
 
-def _tgju(url):
-    r=requests.get(url,timeout=15,headers={"User-Agent":"Mozilla/5.0"})
-    r.raise_for_status()
-    text=re.sub(r'<[^>]+>',' ',r.text); text=re.sub(r'\s+',' ',text)
-    # Prefer explicit price/result markers; never use another provider.
-    candidates=[]
-    for pat in (r'(?:قیمت|ارزش|آخرین)[^0-9]{0,80}([0-9,٬]{4,})',
-                r'(?:USD|USDT)[^0-9]{0,80}([0-9,٬]{4,})'):
-        for m in re.finditer(pat,text,re.I):
-            n=_number(m.group(1))
-            if n and n>1000:candidates.append(n)
-    if not candidates: raise RuntimeError(f"TGJU rate unavailable: {url}")
-    return candidates[0]
+TGJU_USD_URLS=(
+    TGJU_USD_URL,
+    "https://gem.tgju.org/profile/price_dollar_rl",
+    "https://english.tgju.org/profile/price_dollar_rl",
+)
+TGJU_USDT_URLS=(
+    TGJU_USDT_URL,
+    "https://www.tgju.org/crypto/exchanges/local/asset/usdt",
+    "https://gem.tgju.org/crypto/exchanges/local/asset/usdt",
+)
+
+def _tgju(url, kind="generic"):
+    """Read a rate from TGJU only, with retries and browser-like headers.
+
+    TGJU may return 403 to a bare HTTP client. A session, realistic headers,
+    a warm-up request, and bounded retries reduce that failure without
+    switching to a different provider. All fallback URLs remain on TGJU.
+    """
+    session=requests.Session()
+    session.headers.update({
+        "User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+        "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language":"fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer":"https://www.tgju.org/",
+        "Cache-Control":"no-cache",
+        "Pragma":"no-cache",
+    })
+    last_error=None
+    for attempt in range(3):
+        try:
+            r=session.get(url,timeout=25,allow_redirects=True)
+            if r.status_code==403:
+                try: session.get("https://www.tgju.org/",timeout=15)
+                except requests.RequestException: pass
+                r=session.get(url,timeout=25,allow_redirects=True)
+            r.raise_for_status()
+            text=re.sub(r'<[^>]+>',' ',r.text)
+            text=re.sub(r'\s+',' ',text)
+            candidates=[]
+            if kind=="usd":
+                patterns=(
+                    r'(?:نرخ فعلی|قیمت فعلی|آخرین|Last)[^0-9]{0,100}([0-9,٬]{5,})',
+                    r'(?:قیمت هر دلار|قیمت دلار)[^0-9]{0,100}([0-9,٬]{5,})',
+                )
+            elif kind=="usdt":
+                patterns=(
+                    r'(?:تتر|USDT)[^0-9]{0,120}([0-9,٬]{5,})',
+                    r'(?:فروش صرافی|SELL)[^0-9]{0,120}([0-9,٬]{5,})',
+                )
+            else:
+                patterns=(r'(?:قیمت|ارزش|آخرین|Last)[^0-9]{0,100}([0-9,٬]{5,})',)
+            for pat in patterns:
+                for m in re.finditer(pat,text,re.I):
+                    n=_number(m.group(1))
+                    if n and n>1000 and n<100000000000:
+                        candidates.append(n)
+            if candidates:
+                return candidates[0]
+            raise RuntimeError(f"TGJU rate marker not found: {url}")
+        except (requests.RequestException,RuntimeError) as exc:
+            last_error=exc
+            if attempt<2: time.sleep(2**attempt)
+    raise RuntimeError(f"TGJU unavailable: {url}; {last_error}")
+
+def _first_tgju(urls,kind):
+    errors=[]
+    for url in urls:
+        try:
+            return _tgju(url,kind)
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError("All TGJU endpoints failed: " + " | ".join(errors))
 
 def fetch_tgju_rates():
-    usd=_tgju(TGJU_USD_URL); usdt=_tgju(TGJU_USDT_URL)
-    return {"usd_toman":usd,"usdt_toman":usdt,"source":"tgju.org","timestamp":datetime.now().astimezone().isoformat(),"quality":1.0}
+    # TGJU publishes these values in Rial; report them in Toman.
+    usd_rial=_first_tgju(TGJU_USD_URLS,"usd")
+    usdt_rial=_first_tgju(TGJU_USDT_URLS,"usdt")
+    return {
+        "usd_toman":usd_rial/10.0,
+        "usdt_toman":usdt_rial/10.0,
+        "source":"tgju.org",
+        "timestamp":datetime.now().astimezone().isoformat(),
+        "quality":1.0,
+    }
 
 def calculate_rr(entry,sl,tp1,tp2):
     risk=abs(entry-sl)
@@ -139,12 +204,23 @@ def generate_csv_report(results,filename):
     return filename
 
 def build_report(market,portfolio,metals=None):
-    rates=fetch_tgju_rates(); eng=ReliableAnalyticalEngine()
+    # Rate retrieval is TGJU-only. If TGJU is temporarily unavailable (for
+    # example HTTP 403/network blocking), do not fabricate or substitute a
+    # rate; continue and mark it unavailable so Telegram delivery can proceed.
+    try:
+        rates=fetch_tgju_rates()
+        rate_line=f"💵 دلار: {rates['usd_toman']:,.0f} تومان | تتر: {rates['usdt_toman']:,.0f} تومان"
+        rate_meta=f"📡 Source: {rates['source']} | Updated: {rates['timestamp']}"
+    except Exception as exc:
+        rates={"usd_toman":None,"usdt_toman":None,"source":"tgju.org","timestamp":datetime.now().astimezone().isoformat(),"quality":0.0}
+        rate_line="💵 دلار: N/A | تتر: N/A"
+        rate_meta=f"📡 Source: tgju.org | Rate unavailable: {type(exc).__name__}"
+    eng=ReliableAnalyticalEngine()
     mr=[eng.analyze_coin(s,d) for s,d in market.items()]
     best=next((r for r in mr if r.level=="EXECUTABLE"),None)
     lines=["🤖 ATLAS AI — MARKET 4H","━━━━━━━━━━━━━━━━━━",
-      f"💵 دلار: {rates['usd_toman']:,.0f} تومان | تتر: {rates['usdt_toman']:,.0f} تومان",
-      f"📡 Source: {rates['source']} | Updated: {rates['timestamp']}","",
+      rate_line,
+      rate_meta,"",
       "🔥 BEST SETUP: "+(f"{best.symbol} — EXECUTABLE — R/R TP1 1:{best.rr_tp1:.2f} | TP2 1:{best.rr_tp2:.2f}" if best else "هیچ ستاپ اجرایی معتبر تأیید نشد."),
       "","📡 MARKET","───────────────────"]+[asset_block(r.symbol,market[r.symbol]) for r in mr]
     if metals:
@@ -163,80 +239,24 @@ def build_report(market,portfolio,metals=None):
 def action_emoji(status): return {"STRONG BULL":"🟢","BULL":"🟢","NEUTRAL":"🟡","BEAR":"🔴","STRONG BEAR":"🔴"}.get(status,"⚪")
 def split_telegram(text,limit=4000): return [text[i:i+limit] for i in range(0,len(text),limit)]
 
-# ============================================================
-# FIXED: send_report and send_csv_report are now imported
-# from telegram_delivery_v12 at the top of the file.
-# The old empty functions have been removed.
-# ============================================================
-
 if __name__=="__main__":
-    # ============================================================
-    # SAMPLE DATA - REPLACE WITH YOUR ACTUAL DATA
-    # ============================================================
-    
-    # Example market data structure
-    market = {
-        "BTC": {
-            "current_price": 65000,
-            "support": 64000,
-            "resistance": 66000,
-            "trend": "bullish",
-            "rsi": 55,
-            "volume_ratio": 1.3,
-            "support_confirmations": 2,
-            "confirmed_breakout": True,
-            "volume_trend": "HIGH",
-            "data_quality": 0.9
-        },
-        "ETH": {
-            "current_price": 3200,
-            "support": 3100,
-            "resistance": 3300,
-            "trend": "neutral",
-            "rsi": 60,
-            "volume_ratio": 0.9,
-            "support_confirmations": 1,
-            "confirmed_breakout": False,
-            "volume_trend": "LOW",
-            "data_quality": 0.8
-        }
-    }
-    
-    # Example portfolio data structure
-    portfolio = {
-        "SOL": {
-            "current_price": 150,
-            "support": 140,
-            "resistance": 160,
-            "trend": "bullish",
-            "rsi": 45,
-            "volume_ratio": 1.5,
-            "support_confirmations": 3,
-            "confirmed_breakout": True,
-            "volume_trend": "HIGH",
-            "data_quality": 0.95
-        }
-    }
-    
-    print("ATLAS AI v12 starting...")
-    
-    # Build the report
+    # Production delivery entry point. No fabricated market data is created.
+    # If the analytical data provider is unavailable, the workflow continues
+    # and explicitly sends a NO VALID SETUP report instead of failing silently.
     try:
-        report_text = build_report(market, portfolio)
-        print("Report built successfully.")
-        
-        # SEND TO TELEGRAM - FIXED
-        print("Sending report to Telegram...")
-        parts_count, sent_count, errors = send_report(report_text)
-        
-        if errors:
-            print(f"WARNING: {len(errors)} errors occurred during delivery:")
-            for err in errors:
-                print(f"  - {err}")
-        else:
-            print(f"SUCCESS: Report sent to {sent_count} destinations ({parts_count} parts)")
-        
+        report=build_report({}, {}, None)
+        report=report.replace(
+            "🔥 BEST SETUP: هیچ ستاپ اجرایی معتبر تأیید نشد.",
+            "🔥 BEST SETUP: هیچ ستاپ اجرایی معتبر تأیید نشد.\n⚠️ داده تحلیلی بازار در این اجرا در دسترس نبود؛ سیگنال اجباری صادر نشد."
+        )
+        parts_count,sent_count,errors=send_report(report)
+        print(f"Telegram delivery: parts={parts_count}, sent={sent_count}, errors={len(errors)}")
+        for err in errors: print("Telegram error:",err)
+        if sent_count<=0:
+            raise RuntimeError("Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
+        print("ATLAS AI v12 delivered successfully.")
     except Exception as e:
-        print(f"ERROR: {e}")
         import traceback
+        print(f"ATLAS AI v12 ERROR: {e}")
         traceback.print_exc()
+        raise
