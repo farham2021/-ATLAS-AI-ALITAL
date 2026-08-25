@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""ATLAS AI v12 - Reliable Analytical Engine. No forced signals."""
+"""
+ATLAS AI v12 - Reliable Analytical Engine
+
+- 4H analytical engine
+- No forced signals
+- Standardized status levels
+- Explicit R/R calculation for TP1 and TP2
+- Confidence / RSI / volume filters
+- TGJU is the primary source for USD and USDT
+- Telegram delivery through telegram_delivery_v12.py
+"""
+
 from __future__ import annotations
 
 import csv
 import json
 import re
-import time
+import traceback
 
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -13,52 +24,23 @@ from typing import Optional, Dict, Any, List
 
 import requests
 
-# ============================================================
-# TELEGRAM DELIVERY
-# ============================================================
-
 from telegram_delivery_v12 import (
     send_report,
     send_csv as send_csv_report,
 )
 
+
 # ============================================================
-# FX SOURCES
-#
-# PRIMARY:
-#   TGJU
-#
-# IMPORTANT:
-#   USD / USDT are NEVER silently relabeled as TGJU when
-#   a fallback source is used.
-#
-#   If TGJU is unavailable and no verified fallback exists,
-#   the value becomes N/A instead of inventing a price.
+# CONFIGURATION
 # ============================================================
 
-TGJU_USD_URLS = [
-    "https://www.tgju.org/profile/price_dollar_rl",
-    "https://www.tgju.org/profile/price_dollar_rl?output=1",
-]
+TGJU_USD_URL = (
+    "https://www.tgju.org/profile/price_dollar_rl"
+)
 
-TGJU_USDT_URLS = [
-    "https://www.tgju.org/profile/price_usdt",
-    "https://www.tgju.org/profile/price_dollar_usdt",
-]
-
-# Optional public fallback.
-#
-# This source is used ONLY after TGJU fails.
-# USD from this endpoint is converted from IRR to Toman.
-#
-# USDT deliberately has no unverified fallback.
-# Therefore USDT becomes N/A if TGJU is unavailable.
-FALLBACK_USD_URLS = [
-    "https://open.er-api.com/v6/latest/USD",
-]
-
-FALLBACK_USDT_URLS = []
-
+TGJU_USDT_URL = (
+    "https://www.tgju.org/profile/price_dollar_usdt"
+)
 
 STATUS_LEVELS = (
     "STRONG BULL",
@@ -74,6 +56,8 @@ SETUP_LEVELS = (
     "NO VALID SETUP",
 )
 
+REQUEST_TIMEOUT = 15
+
 
 # ============================================================
 # DATA MODEL
@@ -81,6 +65,7 @@ SETUP_LEVELS = (
 
 @dataclass
 class SetupResult:
+
     symbol: str
     status: str
     level: str
@@ -103,14 +88,15 @@ class SetupResult:
 
     distance_to_resistance_pct: Optional[float] = None
 
-    required_conditions: List[str] = None
-    missing_conditions: List[str] = None
-    invalid_reasons: List[str] = None
+    required_conditions: Optional[List[str]] = None
+    missing_conditions: Optional[List[str]] = None
+    invalid_reasons: Optional[List[str]] = None
 
     downside_target: Optional[float] = None
     dynamic_stop: Optional[float] = None
 
     def __post_init__(self):
+
         self.required_conditions = (
             self.required_conditions or []
         )
@@ -128,51 +114,36 @@ class SetupResult:
 # NUMBER PARSER
 # ============================================================
 
-def _number(x):
-    if x is None:
+def _number(value):
+
+    if value is None:
         return None
 
-    text = str(x)
+    text = str(value)
 
-    m = re.search(
+    match = re.search(
         r"-?[0-9][0-9,٬]*(?:\.[0-9]+)?",
         text,
     )
 
-    if not m:
+    if not match:
         return None
 
     try:
         return float(
-            m.group()
+            match.group()
             .replace(",", "")
             .replace("٬", "")
         )
-    except (TypeError, ValueError):
+    except ValueError:
         return None
 
 
 # ============================================================
-# HTTP GET
+# TGJU FETCHER
 # ============================================================
 
-def _http_get(url, attempts=3):
-    """
-    Robust HTTP request.
-
-    Handles:
-        403
-        429
-        5xx
-        timeout
-        connection errors
-
-    Returns:
-        requests.Response
-
-    Raises:
-        RuntimeError
-    """
+def _tgju(url):
 
     headers = {
         "User-Agent": (
@@ -180,369 +151,99 @@ def _http_get(url, attempts=3):
             "(X11; Linux x86_64) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
-            "Chrome/126.0 Safari/537.36"
+            "Chrome/131.0 Safari/537.36"
         ),
         "Accept": (
             "text/html,application/xhtml+xml,"
-            "application/json;q=0.9,*/*;q=0.8"
+            "application/xml;q=0.9,*/*;q=0.8"
         ),
         "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
 
-    last_error = None
-
-    for attempt in range(attempts):
-        try:
-            response = requests.get(
-                url,
-                timeout=20,
-                headers=headers,
-                allow_redirects=True,
-            )
-
-            status = response.status_code
-
-            if status == 403:
-                last_error = RuntimeError(
-                    f"HTTP 403 Forbidden: {url}"
-                )
-
-            elif status == 429:
-                last_error = RuntimeError(
-                    f"HTTP 429 Too Many Requests: {url}"
-                )
-
-            elif 500 <= status < 600:
-                last_error = RuntimeError(
-                    f"HTTP {status} Server Error: {url}"
-                )
-
-            else:
-                response.raise_for_status()
-                return response
-
-        except requests.RequestException as exc:
-            last_error = exc
-
-        if attempt < attempts - 1:
-            time.sleep(1.5 * (attempt + 1))
-
-    raise last_error or RuntimeError(
-        f"HTTP request failed: {url}"
+    response = requests.get(
+        url,
+        timeout=REQUEST_TIMEOUT,
+        headers=headers,
     )
 
+    response.raise_for_status()
 
-# ============================================================
-# TGJU HTML PARSER
-# ============================================================
+    text = response.text
 
-def _parse_tgju_rate(text, kind):
-    """
-    Extract a rate from TGJU page content.
-
-    TGJU profile values are normally Rial.
-    Returned value is converted to Toman.
-    """
-
-    clean = re.sub(
+    text = re.sub(
         r"<[^>]+>",
         " ",
         text,
     )
 
-    clean = re.sub(
+    text = re.sub(
         r"\s+",
         " ",
-        clean,
+        text,
     )
 
-    if kind == "usd":
-        patterns = [
-            r"(?:قیمت|ارزش|آخرین)[^0-9]{0,100}"
-            r"([0-9,٬]{4,})",
-
-            r"(?:دلار|USD)[^0-9]{0,100}"
-            r"([0-9,٬]{4,})",
-        ]
-
-    else:
-        patterns = [
-            r"(?:قیمت|ارزش|آخرین)[^0-9]{0,100}"
-            r"([0-9,٬]{4,})",
-
-            r"(?:تتر|USDT)[^0-9]{0,100}"
-            r"([0-9,٬]{4,})",
-        ]
-
     candidates = []
+
+    patterns = (
+        r"(?:قیمت|ارزش|آخرین)"
+        r"[^0-9]{0,80}"
+        r"([0-9,٬]{4,})",
+
+        r"(?:USD|USDT)"
+        r"[^0-9]{0,80}"
+        r"([0-9,٬]{4,})",
+    )
 
     for pattern in patterns:
 
         for match in re.finditer(
             pattern,
-            clean,
+            text,
             re.IGNORECASE,
         ):
 
-            value = _number(
+            number = _number(
                 match.group(1)
             )
 
-            if value is not None and value > 1000:
-                candidates.append(value)
+            if number is not None and number > 1000:
+                candidates.append(number)
 
     if not candidates:
         raise RuntimeError(
-            f"TGJU {kind} rate could not be parsed."
+            f"TGJU rate unavailable: {url}"
         )
 
-    # TGJU price is normally Rial.
-    # ATLAS reports Toman.
-    return candidates[0] / 10.0
+    return candidates[0]
 
 
 # ============================================================
-# TGJU FETCH
-# ============================================================
-
-def _fetch_tgju(url, kind):
-    response = _http_get(url)
-
-    return _parse_tgju_rate(
-        response.text,
-        kind,
-    )
-
-
-# ============================================================
-# FALLBACK USD
-# ============================================================
-
-def _fetch_fallback_usd(url):
-    """
-    Public fallback for USD.
-
-    open.er-api.com:
-        USD -> IRR
-
-    IRR is converted to Toman.
-    """
-
-    response = _http_get(url)
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError(
-            "Fallback USD source returned invalid JSON."
-        ) from exc
-
-    if payload.get("result") != "success":
-        raise RuntimeError(
-            "Fallback USD source did not return success."
-        )
-
-    rates = payload.get("rates") or {}
-
-    irr_rate = rates.get("IRR")
-
-    if irr_rate is None:
-        raise RuntimeError(
-            "Fallback USD source has no IRR rate."
-        )
-
-    irr_rate = float(irr_rate)
-
-    if irr_rate <= 0:
-        raise RuntimeError(
-            "Invalid fallback USD rate."
-        )
-
-    return irr_rate / 10.0
-
-
-# ============================================================
-# GENERIC SOURCE TRY
-# ============================================================
-
-def _try_sources(
-    urls,
-    parser,
-    source_name,
-):
-    errors = []
-
-    for url in urls:
-
-        try:
-            value = parser(url)
-
-            if value is not None and value > 0:
-
-                return (
-                    value,
-                    source_name,
-                    errors,
-                )
-
-        except Exception as exc:
-
-            errors.append(
-                f"{source_name}: {exc}"
-            )
-
-    return (
-        None,
-        None,
-        errors,
-    )
-
-
-# ============================================================
-# FX ENGINE
+# TGJU RATES
 # ============================================================
 
 def fetch_tgju_rates():
-    """
-    Obtain USD and USDT rates.
 
-    Priority:
-
-        TGJU USD
-        ↓
-        fallback USD
-
-        TGJU USDT
-        ↓
-        N/A
-
-    No fabricated substitution is allowed.
-    """
-
-    errors = []
-
-    # --------------------------------------------------------
-    # USD — TGJU FIRST
-    # --------------------------------------------------------
-
-    usd, usd_source, usd_errors = _try_sources(
-        TGJU_USD_URLS,
-        lambda url: _fetch_tgju_rate(
-            url,
-            "usd",
-        ),
-        "TGJU",
+    usd = _tgju(
+        TGJU_USD_URL
     )
 
-    errors.extend(usd_errors)
-
-    # --------------------------------------------------------
-    # USD — FALLBACK
-    # --------------------------------------------------------
-
-    if usd is None:
-
-        usd, usd_source, fallback_errors = _try_sources(
-            FALLBACK_USD_URLS,
-            _fetch_fallback_usd,
-            "FALLBACK",
-        )
-
-        errors.extend(
-            fallback_errors
-        )
-
-    # --------------------------------------------------------
-    # USDT — TGJU ONLY
-    # --------------------------------------------------------
-
-    usdt, usdt_source, usdt_errors = _try_sources(
-        TGJU_USDT_URLS,
-        lambda url: _fetch_tgju_rate(
-            url,
-            "usdt",
-        ),
-        "TGJU",
+    usdt = _tgju(
+        TGJU_USDT_URL
     )
-
-    errors.extend(usdt_errors)
-
-    # --------------------------------------------------------
-    # USDT FALLBACK
-    # --------------------------------------------------------
-
-    if usdt is None and FALLBACK_USDT_URLS:
-
-        usdt, usdt_source, fallback_errors = _try_sources(
-            FALLBACK_USDT_URLS,
-            _fetch_fallback_usd,
-            "FALLBACK",
-        )
-
-        errors.extend(
-            fallback_errors
-        )
-
-    # --------------------------------------------------------
-    # SOURCE LABEL
-    # --------------------------------------------------------
-
-    source_parts = []
-
-    if usd_source:
-        source_parts.append(
-            f"USD={usd_source}"
-        )
-    else:
-        source_parts.append(
-            "USD=UNAVAILABLE"
-        )
-
-    if usdt_source:
-        source_parts.append(
-            f"USDT={usdt_source}"
-        )
-    else:
-        source_parts.append(
-            "USDT=UNAVAILABLE"
-        )
-
-    quality = 1.0
-
-    if usd is None:
-        quality -= 0.25
-
-    if usdt is None:
-        quality -= 0.25
 
     return {
         "usd_toman": usd,
         "usdt_toman": usdt,
-        "source": " | ".join(source_parts),
+        "source": "tgju.org",
         "timestamp": (
             datetime.now()
             .astimezone()
             .isoformat()
         ),
-        "quality": max(
-            0.0,
-            quality,
-        ),
-        "errors": errors,
+        "quality": 1.0,
     }
-
-
-# ============================================================
-# INTERNAL ALIAS
-# ============================================================
-
-def _fetch_tgju_rate(url, kind):
-    return _fetch_tgju(
-        url,
-        kind,
-    )
 
 
 # ============================================================
@@ -551,12 +252,13 @@ def _fetch_tgju_rate(url, kind):
 
 def calculate_rr(
     entry,
-    sl,
+    stop_loss,
     tp1,
     tp2,
 ):
+
     risk = abs(
-        entry - sl
+        entry - stop_loss
     )
 
     if risk <= 0:
@@ -565,12 +267,14 @@ def calculate_rr(
         )
 
     rr_tp1 = (
-        tp1 - entry
-    ) / risk
+        (tp1 - entry)
+        / risk
+    )
 
     rr_tp2 = (
-        tp2 - entry
-    ) / risk
+        (tp2 - entry)
+        / risk
+    )
 
     return (
         rr_tp1,
@@ -588,57 +292,66 @@ def _level(
     price,
     direction,
 ):
-    vals = [
+
+    values = [
         data.get(key)
     ]
 
-    vals += list(
+    values += list(
         data.get(
             key + "s",
-            [],
+            []
         )
         or []
     )
 
-    vals = [
-        float(v)
-        for v in vals
-        if v is not None
-    ]
+    parsed = []
+
+    for value in values:
+
+        try:
+            parsed.append(
+                float(value)
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
 
     if direction == "below":
-        vals = [
-            v for v in vals
-            if v < price
+
+        parsed = [
+            value
+            for value in parsed
+            if value < price
         ]
+
+        if parsed:
+            return max(parsed)
+
     else:
-        vals = [
-            v for v in vals
-            if v > price
+
+        parsed = [
+            value
+            for value in parsed
+            if value > price
         ]
 
-    if direction == "below":
-        return (
-            max(vals)
-            if vals
-            else None
-        )
+        if parsed:
+            return min(parsed)
 
-    return (
-        min(vals)
-        if vals
-        else None
-    )
+    return None
 
 
 # ============================================================
 # STATUS
 # ============================================================
 
-def classify_status(d):
+def classify_status(data):
 
     trend = str(
-        d.get(
+        data.get(
             "trend",
             "neutral",
         )
@@ -647,7 +360,6 @@ def classify_status(d):
     if trend in (
         "strong_bullish",
         "strong bull",
-        "strong bullish",
     ):
         return "STRONG BULL"
 
@@ -660,7 +372,6 @@ def classify_status(d):
     if trend in (
         "strong_bearish",
         "strong bear",
-        "strong bearish",
     ):
         return "STRONG BEAR"
 
@@ -677,11 +388,13 @@ def classify_status(d):
 # CONFIDENCE
 # ============================================================
 
-def confidence_score(d):
+def confidence_score(data):
 
     score = 50
 
-    status = classify_status(d)
+    status = classify_status(
+        data
+    )
 
     score += {
         "STRONG BULL": 20,
@@ -689,48 +402,78 @@ def confidence_score(d):
         "NEUTRAL": 0,
         "BEAR": -10,
         "STRONG BEAR": -20,
-    }[status]
+    }.get(
+        status,
+        0,
+    )
 
-    rsi = d.get("rsi")
-    volume_ratio = d.get(
+    rsi = data.get("rsi")
+    volume_ratio = data.get(
         "volume_ratio"
     )
 
     if rsi is not None:
 
-        score += (
-            10
-            if 45 <= rsi < 68
-            else -15
-            if rsi >= 70
-            else -5
-        )
+        try:
+            rsi = float(rsi)
+
+            if 45 <= rsi < 68:
+                score += 10
+
+            elif rsi >= 70:
+                score -= 15
+
+            else:
+                score -= 5
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            pass
 
     if volume_ratio is not None:
 
-        score += (
-            10
-            if volume_ratio >= 1.2
-            else -5
-            if volume_ratio < 1
-            else 0
-        )
+        try:
+            volume_ratio = float(
+                volume_ratio
+            )
 
-    if d.get(
+            if volume_ratio >= 1.2:
+                score += 10
+
+            elif volume_ratio < 1:
+                score -= 5
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            pass
+
+    if data.get(
         "ma_alignment"
     ) is True:
+
         score += 10
 
-    if d.get(
+    quality = data.get(
         "data_quality"
-    ) is not None:
+    )
 
-        score += (
-            float(
-                d["data_quality"]
-            )
-            - 0.5
-        ) * 20
+    if quality is not None:
+
+        try:
+            score += (
+                float(quality)
+                - 0.5
+            ) * 20
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            pass
 
     return max(
         0,
@@ -753,29 +496,42 @@ class ReliableAnalyticalEngine:
     def analyze_coin(
         self,
         symbol,
-        d,
+        data,
     ):
 
-        price = float(
-            d.get(
-                "current_price"
+        try:
+
+            price = float(
+                data.get(
+                    "current_price"
+                )
+                or 0
             )
-            or 0
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            price = 0
+
+        status = classify_status(
+            data
         )
 
-        status = classify_status(d)
-
-        confidence = confidence_score(d)
+        confidence = confidence_score(
+            data
+        )
 
         support = _level(
-            d,
+            data,
             "support",
             price,
             "below",
         )
 
         resistance = _level(
-            d,
+            data,
             "resistance",
             price,
             "above",
@@ -788,34 +544,73 @@ class ReliableAnalyticalEngine:
         ):
 
             return SetupResult(
-                symbol,
-                status,
-                "NO VALID SETUP",
+                symbol=symbol,
+                status=status,
+                level="NO VALID SETUP",
                 confidence=confidence,
                 invalid_reasons=[
-                    "incomplete price/support/resistance data"
+                    (
+                        "incomplete "
+                        "price/support/"
+                        "resistance data"
+                    )
                 ],
             )
 
-        stop_loss = float(
-            d.get(
-                "stop_loss"
-            )
-            or support
-        )
+        try:
 
-        tp1 = float(
-            d.get(
-                "tp1"
+            stop_loss = float(
+                data.get(
+                    "stop_loss"
+                )
+                or support
             )
-            or resistance
-        )
 
-        tp2 = float(
-            d.get(
-                "tp2"
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            stop_loss = support
+
+        try:
+
+            tp1 = float(
+                data.get(
+                    "tp1"
+                )
+                or resistance
             )
-            or (
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            tp1 = resistance
+
+        try:
+
+            tp2 = float(
+                data.get(
+                    "tp2"
+                )
+                or (
+                    resistance
+                    + 0.30
+                    * (
+                        resistance
+                        - price
+                    )
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            tp2 = (
                 resistance
                 + 0.30
                 * (
@@ -823,19 +618,65 @@ class ReliableAnalyticalEngine:
                     - price
                 )
             )
+
+        try:
+
+            rr_tp1, rr_tp2 = calculate_rr(
+                price,
+                stop_loss,
+                tp1,
+                tp2,
+            )
+
+        except ValueError:
+
+            return SetupResult(
+                symbol=symbol,
+                status=status,
+                level="NO VALID SETUP",
+                entry=price,
+                stop_loss=stop_loss,
+                tp1=tp1,
+                tp2=tp2,
+                confidence=confidence,
+                invalid_reasons=[
+                    "invalid R/R geometry"
+                ],
+            )
+
+        rsi = data.get(
+            "rsi"
         )
 
-        rr_tp1, rr_tp2 = calculate_rr(
-            price,
-            stop_loss,
-            tp1,
-            tp2,
-        )
-
-        rsi = d.get("rsi")
-        volume_ratio = d.get(
+        volume_ratio = data.get(
             "volume_ratio"
         )
+
+        try:
+
+            if rsi is not None:
+                rsi = float(rsi)
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            rsi = None
+
+        try:
+
+            if volume_ratio is not None:
+                volume_ratio = float(
+                    volume_ratio
+                )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            volume_ratio = None
 
         conditions = {
 
@@ -844,9 +685,12 @@ class ReliableAnalyticalEngine:
                 or rr_tp2 >= 1.5
             ),
 
-            "trend": status in (
-                "STRONG BULL",
-                "BULL",
+            "trend": (
+                status
+                in (
+                    "STRONG BULL",
+                    "BULL",
+                )
             ),
 
             "rsi": (
@@ -861,16 +705,17 @@ class ReliableAnalyticalEngine:
 
             "support_confirmation": (
                 int(
-                    d.get(
+                    data.get(
                         "support_confirmations",
                         0,
                     )
+                    or 0
                 )
                 >= 2
             ),
 
             "breakout_confirmation": bool(
-                d.get(
+                data.get(
                     "confirmed_breakout",
                     False,
                 )
@@ -889,20 +734,29 @@ class ReliableAnalyticalEngine:
                 "RSI below 70",
 
             "volume":
-                "volume >= 120% of 20-period average",
+                (
+                    "volume >= 120% "
+                    "of 20-period average"
+                ),
 
             "support_confirmation":
-                "at least 2 support confirmations",
+                (
+                    "at least 2 "
+                    "support confirmations"
+                ),
 
             "breakout_confirmation":
-                "2 consecutive H4 closes above resistance",
+                (
+                    "2 consecutive H4 "
+                    "closes above resistance"
+                ),
         }
 
-        missing = [
+        missing_conditions = [
             labels[key]
-            for key, value
+            for key, valid
             in conditions.items()
-            if not value
+            if not valid
         ]
 
         if all(
@@ -926,71 +780,105 @@ class ReliableAnalyticalEngine:
 
             level = "NO VALID SETUP"
 
+        downside_target = data.get(
+            "downside_target"
+        )
+
+        if downside_target is None:
+
+            downside_target = (
+                support
+                - 0.5
+                * (
+                    price
+                    - support
+                )
+            )
+
+        dynamic_stop = data.get(
+            "dynamic_stop"
+        )
+
+        if dynamic_stop is None:
+
+            dynamic_stop = (
+                support
+                * 0.995
+            )
+
         return SetupResult(
 
-            symbol,
-            status,
-            level,
+            symbol=symbol,
 
-            price,
-            stop_loss,
-            tp1,
-            tp2,
+            status=status,
 
-            rr_tp1,
-            rr_tp2,
+            level=level,
 
-            confidence,
+            entry=price,
 
-            rsi,
+            stop_loss=stop_loss,
 
-            str(
-                d.get(
+            tp1=tp1,
+
+            tp2=tp2,
+
+            rr_tp1=rr_tp1,
+
+            rr_tp2=rr_tp2,
+
+            confidence=confidence,
+
+            rsi=rsi,
+
+            volume_trend=str(
+                data.get(
                     "volume_trend",
                     "UNKNOWN",
                 )
             ),
 
-            volume_ratio,
+            volume_ratio=volume_ratio,
 
-            (
-                resistance - price
-            )
-            / price
-            * 100,
+            distance_to_resistance_pct=(
+                (
+                    resistance
+                    - price
+                )
+                / price
+                * 100
+            ),
 
-            (
+            required_conditions=(
                 [
-                    "2 consecutive H4 closes above resistance",
-                    "volume >= 120% of 20-period average",
+                    (
+                        "2 consecutive H4 "
+                        "closes above resistance"
+                    ),
+                    (
+                        "volume >= 120% "
+                        "of 20-period average"
+                    ),
                 ]
                 if level == "BEST WATCH"
                 else []
             ),
 
-            missing,
+            missing_conditions=(
+                missing_conditions
+            ),
 
-            [],
+            invalid_reasons=[],
 
-            float(
-                d.get(
-                    "downside_target"
-                )
-                or (
-                    support
-                    - 0.5
-                    * (
-                        price
-                        - support
-                    )
+            downside_target=(
+                float(
+                    downside_target
                 )
             ),
 
-            float(
-                d.get(
-                    "dynamic_stop"
+            dynamic_stop=(
+                float(
+                    dynamic_stop
                 )
-                or support * 0.995
             ),
         )
 
@@ -1001,12 +889,15 @@ class ReliableAnalyticalEngine:
 
 def asset_block(
     symbol,
-    d,
+    data,
 ):
 
-    result = ReliableAnalyticalEngine().analyze_coin(
-        symbol,
-        d,
+    result = (
+        ReliableAnalyticalEngine()
+        .analyze_coin(
+            symbol,
+            data,
+        )
     )
 
     if result.entry is None:
@@ -1017,6 +908,58 @@ def asset_block(
             f"NO VALID SETUP"
         )
 
+    rsi_text = (
+        f"{result.rsi:.2f}"
+        if result.rsi is not None
+        else "N/A"
+    )
+
+    distance_text = (
+        f"{result.distance_to_resistance_pct:.2f}%"
+        if result.distance_to_resistance_pct is not None
+        else "N/A"
+    )
+
+    rr_tp1_text = (
+        f"1:{result.rr_tp1:.2f}"
+        if result.rr_tp1 is not None
+        else "N/A"
+    )
+
+    rr_tp2_text = (
+        f"1:{result.rr_tp2:.2f}"
+        if result.rr_tp2 is not None
+        else "N/A"
+    )
+
+    support = data.get(
+        "support",
+        0,
+    )
+
+    resistance = data.get(
+        "resistance",
+        0,
+    )
+
+    try:
+        support = float(support)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        support = 0
+
+    try:
+        resistance = float(
+            resistance
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        resistance = 0
+
     return (
         f"🔹 {symbol} | "
         f"{result.status} | "
@@ -1026,26 +969,23 @@ def asset_block(
 
         f"   Price "
         f"${result.entry:,.6f} | "
+
         f"Support "
-        f"${d.get('support', 0):,.6f} | "
+        f"${support:,.6f} | "
+
         f"Resistance "
-        f"${d.get('resistance', 0):,.6f}\n"
+        f"${resistance:,.6f}\n"
 
-        f"   RSI "
-        f"{result.rsi "
-        f"if result.rsi is not None else 'N/A'} | "
-
+        f"   RSI {rsi_text} | "
         f"Volume "
         f"{result.volume_trend} | "
-
         f"Distance "
-        f"{result.distance_to_resistance_pct:.2f}%\n"
+        f"{distance_text}\n"
 
         f"   R/R TP1 "
-        f"1:{result.rr_tp1:.2f} | "
-
+        f"{rr_tp1_text} | "
         f"TP2 "
-        f"1:{result.rr_tp2:.2f}"
+        f"{rr_tp2_text}"
     )
 
 
@@ -1058,7 +998,9 @@ def personal_report(
     rates=None,
 ):
 
-    engine = ReliableAnalyticalEngine()
+    engine = (
+        ReliableAnalyticalEngine()
+    )
 
     results = [
         engine.analyze_coin(
@@ -1069,31 +1011,52 @@ def personal_report(
         in portfolio.items()
     ]
 
-    best = next(
-        (
-            result
-            for result in results
-            if result.level == "EXECUTABLE"
-        ),
-        None,
-    )
+    executable = [
+        result
+        for result in results
+        if result.level
+        == "EXECUTABLE"
+    ]
 
-    out = [
+    best = None
 
-        "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
+    if executable:
+
+        best = max(
+            executable,
+            key=lambda x: (
+                x.confidence,
+                x.rr_tp2 or 0,
+            ),
+        )
+
+    if best:
+
+        best_text = (
+            f"{best.symbol} — "
+            f"EXECUTABLE — "
+            f"R/R TP1 "
+            f"1:{best.rr_tp1:.2f} | "
+            f"TP2 "
+            f"1:{best.rr_tp2:.2f}"
+        )
+
+    else:
+
+        best_text = (
+            "هیچ ستاپ اجرایی "
+            "معتبر تأیید نشد."
+        )
+
+    lines = [
+
+        "🤖 ATLAS AI — "
+        "PERSONAL PORTFOLIO 4H",
 
         "━━━━━━━━━━━━━━━━━━",
 
-        (
-            "🔥 BEST PERSONAL SETUP: "
-            f"{best.symbol} — EXECUTABLE — "
-            f"R/R TP1 1:{best.rr_tp1:.2f} | "
-            f"TP2 1:{best.rr_tp2:.2f}"
-            if best
-            else
-            "🔥 BEST PERSONAL SETUP: "
-            "هیچ ستاپ اجرایی معتبر تأیید نشد."
-        ),
+        "🔥 BEST PERSONAL SETUP: "
+        + best_text,
 
         "",
 
@@ -1102,15 +1065,19 @@ def personal_report(
         "───────────────────",
     ]
 
-    out += [
+    lines.extend(
         asset_block(
             result.symbol,
-            portfolio[result.symbol],
+            portfolio[
+                result.symbol
+            ],
         )
         for result in results
-    ]
+    )
 
-    return "\n".join(out)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -1122,6 +1089,19 @@ def generate_csv_report(
     filename,
 ):
 
+    fieldnames = (
+        list(
+            asdict(
+                results[0]
+            ).keys()
+        )
+        if results
+        else [
+            "symbol",
+            "level",
+        ]
+    )
+
     with open(
         filename,
         "w",
@@ -1129,29 +1109,18 @@ def generate_csv_report(
         encoding="utf-8-sig",
     ) as file:
 
-        fields = (
-            list(
-                asdict(
-                    results[0]
-                ).keys()
-            )
-            if results
-            else [
-                "symbol",
-                "level",
-            ]
-        )
-
         writer = csv.DictWriter(
             file,
-            fieldnames=fields,
+            fieldnames=fieldnames,
         )
 
         writer.writeheader()
 
         for result in results:
 
-            row = asdict(result)
+            row = asdict(
+                result
+            )
 
             for key in (
                 "required_conditions",
@@ -1164,13 +1133,15 @@ def generate_csv_report(
                     ensure_ascii=False,
                 )
 
-            writer.writerow(row)
+            writer.writerow(
+                row
+            )
 
     return filename
 
 
 # ============================================================
-# REPORT BUILDER
+# FULL REPORT
 # ============================================================
 
 def build_report(
@@ -1181,7 +1152,9 @@ def build_report(
 
     rates = fetch_tgju_rates()
 
-    engine = ReliableAnalyticalEngine()
+    engine = (
+        ReliableAnalyticalEngine()
+    )
 
     market_results = [
         engine.analyze_coin(
@@ -1192,14 +1165,44 @@ def build_report(
         in market.items()
     ]
 
-    best = next(
-        (
-            result
-            for result in market_results
-            if result.level == "EXECUTABLE"
-        ),
-        None,
-    )
+    executable = [
+        result
+        for result in market_results
+        if result.level
+        == "EXECUTABLE"
+    ]
+
+    best = None
+
+    if executable:
+
+        best = max(
+            executable,
+            key=lambda x: (
+                x.confidence,
+                x.rr_tp2 or 0,
+            ),
+        )
+
+    if best:
+
+        best_text = (
+            f"{best.symbol} — "
+            f"EXECUTABLE — "
+            f"R/R TP1 "
+            f"1:{best.rr_tp1:.2f} | "
+            f"TP2 "
+            f"1:{best.rr_tp2:.2f} | "
+            f"Confidence "
+            f"{best.confidence:.0f}%"
+        )
+
+    else:
+
+        best_text = (
+            "هیچ ستاپ اجرایی "
+            "معتبر تأیید نشد."
+        )
 
     lines = [
 
@@ -1210,54 +1213,22 @@ def build_report(
         (
             f"💵 دلار: "
             f"{rates['usd_toman']:,.0f} تومان"
-            if rates["usd_toman"] is not None
-            else
-            "💵 دلار: N/A"
-        ),
-
-        (
-            f"💵 تتر: "
+            f" | "
+            f"تتر: "
             f"{rates['usdt_toman']:,.0f} تومان"
-            if rates["usdt_toman"] is not None
-            else
-            "💵 تتر: N/A"
         ),
 
         (
-            f"📡 FX Source: "
-            f"{rates['source']}"
-        ),
-
-        (
-            f"⏰ Updated: "
+            f"📡 Source: "
+            f"{rates['source']} | "
+            f"Updated: "
             f"{rates['timestamp']}"
         ),
-    ]
-
-    # Report source errors without stopping the report.
-    if rates.get("errors"):
-
-        lines.append(
-            "⚠️ FX source notes: "
-            + "; ".join(
-                rates["errors"][-3:]
-            )
-        )
-
-    lines += [
 
         "",
 
-        (
-            "🔥 BEST SETUP: "
-            f"{best.symbol} — EXECUTABLE — "
-            f"R/R TP1 1:{best.rr_tp1:.2f} | "
-            f"TP2 1:{best.rr_tp2:.2f}"
-            if best
-            else
-            "🔥 BEST SETUP: "
-            "هیچ ستاپ اجرایی معتبر تأیید نشد."
-        ),
+        "🔥 BEST SETUP: "
+        + best_text,
 
         "",
 
@@ -1266,84 +1237,116 @@ def build_report(
         "───────────────────",
     ]
 
-    lines += [
+    lines.extend(
         asset_block(
             result.symbol,
-            market[result.symbol],
+            market[
+                result.symbol
+            ],
         )
         for result in market_results
-    ]
+    )
 
     if metals:
 
-        lines += [
+        lines.extend(
+            [
+                "",
+                "🪙 ATLAS METALS",
+                "───────────────────",
+            ]
+        )
 
-            "",
-
-            "🪙 ATLAS METALS",
-
-            "───────────────────",
-        ]
-
-        lines += [
+        lines.extend(
             asset_block(
                 symbol,
                 data,
             )
             for symbol, data
             in metals.items()
+        )
+
+    lines.extend(
+        [
+            "",
+            personal_report(
+                portfolio,
+                rates,
+            ),
+
+            "",
+
+            "📐 V12 RULES",
+
+            "───────────────────",
+
+            (
+                "• وضعیت‌ها: "
+                "STRONG BULL / BULL / "
+                "NEUTRAL / BEAR / "
+                "STRONG BEAR"
+            ),
+
+            (
+                "• تثبیت شکست = "
+                "حداقل ۲ کلوز متوالی "
+                "H4 بالای مقاومت"
+            ),
+
+            (
+                "• تأیید حجم = "
+                "حداقل ۲۰٪ بالاتر "
+                "از میانگین ۲۰ دوره"
+            ),
+
+            (
+                "• RSI >= 70 برای "
+                "لانگ EXECUTABLE مانع است"
+            ),
+
+            (
+                "• R/R برای TP1 و TP2 "
+                "جداگانه محاسبه می‌شود"
+            ),
+
+            (
+                "• Confidence هرگز "
+                "جای R/R را نمی‌گیرد"
+            ),
+
+            (
+                "• BEST WATCH معامله نیست؛ "
+                "فقط وضعیت تحت نظر است"
+            ),
+
+            (
+                "• داده ناکافی = "
+                "NO VALID SETUP"
+            ),
+
+            (
+                "• هیچ سیگنال اجباری وجود ندارد"
+            ),
+
+            (
+                "• دلار و تتر فقط "
+                "از TGJU دریافت می‌شوند"
+            ),
         ]
+    )
 
-    lines += [
-
-        "",
-
-        personal_report(
-            portfolio,
-            rates,
-        ),
-
-        "",
-
-        "📐 V12 RULES",
-
-        "───────────────────",
-
-        "• وضعیت‌ها: STRONG BULL / BULL / NEUTRAL / BEAR / STRONG BEAR",
-
-        "• تثبیت شکست = حداقل ۲ کلوز متوالی H4 بالای مقاومت",
-
-        "• تأیید حجم = حداقل ۲۰٪ بالاتر از میانگین ۲۰ دوره",
-
-        "• RSI >= 70 برای لانگ EXECUTABLE مانع است",
-
-        "• R/R برای TP1 و TP2 جداگانه محاسبه می‌شود",
-
-        "• Confidence هرگز جای R/R را نمی‌گیرد",
-
-        "• BEST WATCH معامله نیست؛ فقط وضعیت تحت نظر است",
-
-        "• داده ناکافی = NO VALID SETUP",
-
-        "• هیچ سیگنال اجباری تولید نمی‌شود",
-
-        "• نرخ اصلی USD و USDT فقط از TGJU",
-
-        "• در خطای TGJU، فقط USD مجاز به استفاده از fallback معتبر است",
-
-        "• اگر نرخ معتبر در دسترس نباشد، مقدار N/A نمایش داده می‌شود",
-
-        "• منبع fallback هرگز به‌عنوان TGJU گزارش نمی‌شود",
-    ]
-
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
-# HELPERS
+# ACTION EMOJI
 # ============================================================
 
-def action_emoji(status):
+def action_emoji(
+    status,
+):
 
     return {
         "STRONG BULL": "🟢",
@@ -1357,14 +1360,21 @@ def action_emoji(status):
     )
 
 
+# ============================================================
+# TELEGRAM SPLITTER
+# ============================================================
+
 def split_telegram(
     text,
     limit=4000,
 ):
 
+    if not text:
+        return []
+
     return [
-        text[i:i + limit]
-        for i in range(
+        text[index:index + limit]
+        for index in range(
             0,
             len(text),
             limit,
@@ -1373,25 +1383,17 @@ def split_telegram(
 
 
 # ============================================================
-# MAIN
+# SAMPLE / RUNTIME DATA
 # ============================================================
 
-if __name__ == "__main__":
+def get_runtime_market():
 
-    # ========================================================
-    # SAMPLE DATA
-    # Replace this section with your actual market engine
-    # data provider when integrated.
-    # ========================================================
-
-    market = {
+    return {
 
         "BTC": {
 
             "current_price": 65000,
-
             "support": 64000,
-
             "resistance": 66000,
 
             "trend": "bullish",
@@ -1412,9 +1414,7 @@ if __name__ == "__main__":
         "ETH": {
 
             "current_price": 3200,
-
             "support": 3100,
-
             "resistance": 3300,
 
             "trend": "neutral",
@@ -1433,46 +1433,200 @@ if __name__ == "__main__":
         },
     }
 
-    portfolio = {
 
-        "SOL": {
+def get_runtime_portfolio():
 
-            "current_price": 150,
+    return {
 
-            "support": 140,
+        "BTC": {
 
-            "resistance": 160,
+            "current_price": 65000,
+            "support": 64000,
+            "resistance": 66000,
 
             "trend": "bullish",
 
-            "rsi": 45,
+            "rsi": 55,
 
-            "volume_ratio": 1.5,
+            "volume_ratio": 1.3,
 
-            "support_confirmations": 3,
+            "support_confirmations": 2,
 
             "confirmed_breakout": True,
 
             "volume_trend": "HIGH",
 
-            "data_quality": 0.95,
+            "data_quality": 0.9,
+        },
+
+        "ETH": {
+
+            "current_price": 3200,
+            "support": 3100,
+            "resistance": 3300,
+
+            "trend": "neutral",
+
+            "rsi": 60,
+
+            "volume_ratio": 0.9,
+
+            "support_confirmations": 1,
+
+            "confirmed_breakout": False,
+
+            "volume_trend": "LOW",
+
+            "data_quality": 0.8,
         },
     }
+
+
+# ============================================================
+# TELEGRAM DELIVERY
+# ============================================================
+
+def deliver_report(
+    report_text,
+):
+
+    if not report_text:
+        raise RuntimeError(
+            "Generated report is empty."
+        )
+
+    print(
+        "Sending ATLAS v12 report "
+        "to Telegram..."
+    )
+
+    result = send_report(
+        report_text
+    )
+
+    if not isinstance(
+        result,
+        tuple,
+    ):
+
+        raise RuntimeError(
+            "telegram_delivery_v12.send_report "
+            "returned an invalid result."
+        )
+
+    if len(result) != 3:
+
+        raise RuntimeError(
+            "Unexpected Telegram delivery "
+            "result format."
+        )
+
+    parts_count, sent_count, errors = result
+
+    errors = errors or []
+
+    print(
+        f"Telegram parts: "
+        f"{parts_count}"
+    )
+
+    print(
+        f"Telegram sent: "
+        f"{sent_count}"
+    )
+
+    if errors:
+
+        print(
+            "Telegram delivery errors:"
+        )
+
+        for error in errors:
+
+            print(
+                f"  - {error}"
+            )
+
+    if sent_count == 0:
+
+        raise RuntimeError(
+            "Telegram delivery failed: "
+            "zero messages were sent."
+        )
+
+    return (
+        parts_count,
+        sent_count,
+        errors,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print(
+        "=================================================="
+    )
 
     print(
         "ATLAS AI v12 starting..."
     )
 
+    print(
+        "=================================================="
+    )
+
+    market = (
+        get_runtime_market()
+    )
+
+    portfolio = (
+        get_runtime_portfolio()
+    )
+
     try:
 
-        # ----------------------------------------------------
-        # BUILD REPORT
-        # ----------------------------------------------------
+        print(
+            "Fetching TGJU USD/USDT..."
+        )
+
+        rates = (
+            fetch_tgju_rates()
+        )
+
+        print(
+            "TGJU USD:",
+            rates[
+                "usd_toman"
+            ],
+        )
+
+        print(
+            "TGJU USDT:",
+            rates[
+                "usdt_toman"
+            ],
+        )
+
+        print(
+            "Building report..."
+        )
 
         report_text = build_report(
-            market,
-            portfolio,
+            market=market,
+            portfolio=portfolio,
+            metals=None,
         )
+
+        if not report_text:
+
+            raise RuntimeError(
+                "Report generation "
+                "returned empty text."
+            )
 
         print(
             "Report built successfully."
@@ -1483,91 +1637,68 @@ if __name__ == "__main__":
             len(report_text),
         )
 
-        # ----------------------------------------------------
-        # TELEGRAM DELIVERY
-        # ----------------------------------------------------
-
-        print(
-            "Sending report to Telegram..."
-        )
-
-        result = send_report(
-            report_text
-        )
-
-        # ----------------------------------------------------
-        # DELIVERY RESULT
-        # ----------------------------------------------------
-
-        if not isinstance(
-            result,
-            tuple,
-        ):
-
-            raise RuntimeError(
-                "telegram_delivery_v12.send_report "
-                "returned an invalid result."
+        parts_count, sent_count, errors = (
+            deliver_report(
+                report_text
             )
-
-        if len(result) != 3:
-
-            raise RuntimeError(
-                "send_report() must return "
-                "(parts_count, sent_count, errors)."
-            )
-
-        parts_count, sent_count, errors = result
-
-        errors = errors or []
-
-        print(
-            "Telegram parts:",
-            parts_count,
         )
 
         print(
-            "Telegram successful destinations:",
-            sent_count,
+            "=================================================="
         )
 
-        # ----------------------------------------------------
-        # REAL DELIVERY VALIDATION
-        # ----------------------------------------------------
+        print(
+            "ATLAS AI v12 completed."
+        )
+
+        print(
+            f"Telegram delivery: "
+            f"{sent_count} messages "
+            f"in {parts_count} parts."
+        )
 
         if errors:
 
             print(
-                "Telegram delivery errors:"
-            )
-
-            for error in errors:
-
-                print(
-                    " -",
-                    error,
-                )
-
-        if sent_count == 0:
-
-            raise RuntimeError(
-                "Telegram delivery failed: "
-                "0 destinations received the report."
+                "Completed with Telegram "
+                "warnings."
             )
 
         print(
-            "SUCCESS: ATLAS v12 report "
-            "delivered to Telegram."
+            "=================================================="
         )
 
-    except Exception as exc:
+        return 0
+
+    except Exception as error:
 
         print(
-            "ERROR:",
-            str(exc),
+            "=================================================="
         )
 
-        import traceback
+        print(
+            "ATLAS AI v12 ERROR"
+        )
+
+        print(
+            str(error)
+        )
+
+        print(
+            "=================================================="
+        )
 
         traceback.print_exc()
 
-        raise
+        return 1
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    raise SystemExit(
+        main()
+    )
