@@ -40,7 +40,7 @@ jobs:
 
       # ============================================================
       # TGJU
-      # USD and USDT must come ONLY from TGJU
+      # USD and USDT MUST come ONLY from TGJU
       # ============================================================
 
       TGJU_USD_URL: "https://www.tgju.org/profile/price_dollar_rl"
@@ -51,9 +51,7 @@ jobs:
       # ============================================================
 
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
       TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
       # ============================================================
@@ -80,31 +78,44 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       # ============================================================
       # 3. INSTALL DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
+        shell: bash
         run: |
           set -euo pipefail
 
           python -m pip install --upgrade pip setuptools wheel
 
-          if [ -f requirements-v12.txt ]; then
+          if [ -f "requirements-v12.txt" ]; then
+            echo "Installing requirements-v12.txt"
             python -m pip install -r requirements-v12.txt
-          elif [ -f requirements.txt ]; then
+
+          elif [ -f "requirements.txt" ]; then
+            echo "Installing requirements.txt"
             python -m pip install -r requirements.txt
+
+          elif [ -f "pyproject.toml" ]; then
+            echo "Installing project from pyproject.toml"
+            python -m pip install .
+
           else
+            echo "No dependency file found."
+            echo "Installing required runtime packages."
             python -m pip install requests pandas numpy
           fi
+
+          echo "Dependency installation completed."
 
       # ============================================================
       # 4. CHECK REQUIRED FILES
       # ============================================================
 
       - name: Validate project structure
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -125,11 +136,14 @@ jobs:
             echo "OK: $file"
           done
 
+          echo "Project structure validation PASSED."
+
       # ============================================================
       # 5. PYTHON SYNTAX
       # ============================================================
 
       - name: Validate Python syntax
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -142,30 +156,73 @@ jobs:
           echo "Python syntax validation PASSED."
 
       # ============================================================
-      # 6. SMOKE TEST
+      # 6. LEGACY REFERENCE CHECK
+      # ============================================================
+
+      - name: Check for obsolete v11 imports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          files=(
+            "bot12.py"
+            "atlas_v12_upgrade.py"
+            "telegram_delivery_v12.py"
+            "smoke_atlas.py"
+            "test_v12.py"
+          )
+
+          forbidden=(
+            "ATLAS_v12_bot"
+            "from bot import"
+            "import bot "
+          )
+
+          for file in "${files[@]}"; do
+            for pattern in "${forbidden[@]}"; do
+
+              if grep -Fq "$pattern" "$file"; then
+                echo "ERROR: Obsolete reference found."
+                echo "File: $file"
+                echo "Pattern: $pattern"
+                exit 1
+              fi
+
+            done
+          done
+
+          echo "No obsolete v11 import references detected."
+
+      # ============================================================
+      # 7. SMOKE TEST
       # ============================================================
 
       - name: Run smoke test
+        shell: bash
         run: |
           set -euo pipefail
+
+          chmod +x smoke_atlas.py
 
           python smoke_atlas.py
 
       # ============================================================
-      # 7. V12 TEST SUITE
+      # 8. V12 TEST SUITE
       # ============================================================
 
       - name: Run v12 tests
+        shell: bash
         run: |
           set -euo pipefail
 
           python test_v12.py
 
       # ============================================================
-      # 8. TELEGRAM CONFIGURATION
+      # 9. TELEGRAM CONFIGURATION
       # ============================================================
 
       - name: Validate Telegram configuration
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -176,6 +233,7 @@ jobs:
 
           if [ -z "${TELEGRAM_CHAT_ID:-}" ] && \
              [ -z "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
+
             echo "ERROR: No Telegram destination configured."
             echo "Set TELEGRAM_CHAT_ID and/or TELEGRAM_GROUP_CHAT_ID."
             exit 1
@@ -184,25 +242,41 @@ jobs:
           echo "Telegram configuration detected."
 
       # ============================================================
-      # 9. TELEGRAM PREFLIGHT
+      # 10. TELEGRAM PREFLIGHT
       # ============================================================
 
       - name: Telegram preflight
+        shell: bash
         run: |
           set -euo pipefail
 
           python - <<'PY'
+          import json
           import os
           import urllib.request
-          import json
+          import urllib.error
 
-          token = os.environ["TELEGRAM_TOKEN"]
+          token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+
+          if not token:
+              raise SystemExit(
+                  "TELEGRAM_TOKEN is empty."
+              )
 
           url = f"https://api.telegram.org/bot{token}/getMe"
 
-          with urllib.request.urlopen(url, timeout=30) as response:
-              data = json.loads(
-                  response.read().decode("utf-8")
+          try:
+              with urllib.request.urlopen(
+                  url,
+                  timeout=30
+              ) as response:
+
+                  raw = response.read().decode("utf-8")
+                  data = json.loads(raw)
+
+          except Exception as exc:
+              raise SystemExit(
+                  f"Telegram preflight failed: {exc}"
               )
 
           if not data.get("ok"):
@@ -220,25 +294,27 @@ jobs:
           PY
 
       # ============================================================
-      # 10. RUN ATLAS V12
+      # 11. RUN ATLAS AI v12
       # ============================================================
 
       - name: Run ATLAS AI v12
+        shell: bash
         run: |
           set -euo pipefail
 
           python bot12.py
 
       # ============================================================
-      # 11. FINAL STATUS
+      # 12. FINAL STATUS
       # ============================================================
 
       - name: Final status
         if: success()
+        shell: bash
         run: |
           echo "=================================================="
           echo "ATLAS AI v12 COMPLETED SUCCESSFULLY"
           echo "=================================================="
-          echo "Telegram delivery completed."
-          echo "TGJU USD/USDT source configured."
           echo "4H engine completed."
+          echo "TGJU USD/USDT source configured."
+          echo "Telegram delivery completed."
