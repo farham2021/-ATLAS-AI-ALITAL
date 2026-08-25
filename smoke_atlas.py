@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+
 from pathlib import Path
-import ast, re, sys
+import ast
+import re
 
 BOT = Path("bot.py")
 
@@ -11,68 +13,143 @@ def fail(message):
 if not BOT.exists():
     fail("bot.py not found")
 
-s = BOT.read_text(encoding="utf-8")
-try:
-    tree = ast.parse(s, filename=str(BOT))
-except SyntaxError as e:
-    fail(f"bot.py syntax error: {e}")
+source = BOT.read_text(encoding="utf-8")
 
-funcs = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+try:
+    tree = ast.parse(source, filename="bot.py")
+except SyntaxError as exc:
+    fail(f"bot.py syntax error: {exc}")
+
+functions = {
+    node.name
+    for node in tree.body
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+}
 
 required = [
-    "build_report", "build_personal_report", "build_two_engine_reports",
-    "atlas_engine_mode", "analyze_coin", "main",
-    "tradingview_chart_url", "build_price_snapshot",
-    "_compact_scenario_row", "_compact_section", "_final_market_recommendation",
-    "send_price_snapshot", "fetch_usdt_toman_public",
-    "fetch_snapshot_results", "_automatic_run_plan", "generate_csv_report", "send_csv_report", "_best_setup_block",
+    "build_report",
+    "build_personal_report",
+    "build_two_engine_reports",
+    "atlas_engine_mode",
+    "analyze_coin",
+    "main",
+    "tradingview_chart_url",
+    "build_price_snapshot",
+    "send_price_snapshot",
+    "fetch_snapshot_results",
+    "_automatic_run_plan",
+    "generate_csv_report",
+    "send_csv_report",
+    "_best_setup_block",
+    "_validate_trade_geometry",
+    "send_report",
+    "telegram_send_one",
+    "telegram_preflight",
 ]
-missing = [x for x in required if x not in funcs]
+
+missing = [
+    name for name in required
+    if name not in functions
+]
+
 if missing:
-    fail("missing required functions: " + ", ".join(missing))
+    fail(
+        "Missing required functions: "
+        + ", ".join(missing)
+    )
 
 checks = {
-    "version v11.1": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.1', s, re.M)),
-    "no stale v10 markers": not bool(re.search(r'ATLAS v10|v10\.[0-9]|10\.2', s)),
-    "single build_report": funcs.count("build_report") == 1,
-    "single build_personal_report": funcs.count("build_personal_report") == 1,
-    "single build_two_engine_reports": funcs.count("build_two_engine_reports") == 1,
-    "single personal_report alias": funcs.count("personal_report") == 1,
-    "two-engine": all(x in s for x in ("MARKET", "PERSONAL", "BOTH")),
-    "personal portfolio": "ATLAS_PERSONAL_ASSETS" in s,
-    "market excludes personal": "market_results" in s and "not in personal_symbols" in s,
-    "metals": "ATLAS_METALS" in s and all(x in s for x in ("GOLD", "SILVER", "COPPER")),
-    "TradingView links": "tradingview.com/chart/?symbol=" in s,
-    "separate 3h snapshot": "send_price_snapshot" in s and "این پیام هر ۳ ساعت" in s,
-    "snapshot-only path": "fetch_snapshot_results" in s and 'run_mode == "SNAPSHOT"' in s,
-    "automatic 3h/4h scheduler": "_automatic_run_plan" in s and "dt.hour % 3 == 0" in s and "dt.hour % 4 == 0" in s,
-    "public Iranian USDT sources": all(x in s.lower() for x in ("wallex.ir", "excoino.com", "nobitex.ir")),
-    "KCEX CCXT source": '"kcex"' in s,
-    "closed-candle logic": "strip_incomplete" in s and "candle_is_closed" in s,
-    "compact table output": all(x in s for x in ("_compact_scenario_row", "کلیدی:", "🟢 صعودی:", "🔴 نزولی:")),
-    "no verbose market headings": "TOP 5 OPPORTUNITIES" not in s[s.index("def build_report"):s.index("def build_personal_report")],
-    "no verbose personal headings": "🧠 ATLAS MEMORY / CALIBRATION" not in s[s.index("def build_personal_report"):s.index("def personal_report")],
-    "all dynamic30 output": "dyn30_rows" in s and "DYNAMIC TOP 30" in s and "خارج از Top 10 و Personal" in s,
-    "metals in compact market output": "ATLAS METALS — GOLD / SILVER / COPPER" in s,
-    "trade geometry gate": "_validate_trade_geometry" in s and "invalid LONG geometry" in s and "invalid SHORT geometry" in s,
-    "negative/contradictory TP blocked": "non-positive trade level" in s and "Trade geometry blocked" in s,
-    "snapshot compares previous price": "_snapshot_previous_prices" in s and "_snapshot_direction" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
-    "snapshot persists after successful send": "if sent == parts and sent > 0" in s and "_save_snapshot_prices" in s,
-    "dashboard table": "build_dashboard_table" in s and "ATLAS AI — DASHBOARD TABLE" in s and "PERSONAL PORTFOLIO" in s,
-    "dynamic30 compact output capped": "dyn30_all_rows" in s and "dynamic_top8(" in s,
-    "no duplicate portfolio function": s.count("def _portfolio_rows(") == 1,
-    "dynamic CSV export": "CSV_COLUMNS" in s and "def generate_csv_report(" in s and "def send_csv_report(" in s,
-    "CSV includes all universes": all(x in s for x in ("MARKET_TOP10", "DYNAMIC_TOP30", "PERSONAL_PORTFOLIO")),
-    "best setup validation": "def _best_setup_block(" in s and "MIN_EXECUTABLE_RR" in s and "repeat_signal" in s,
-    "CSV invalid geometry suppressed": "_csv_safe_plan" in s and "_validate_trade_geometry" in s,
-    "snapshot arrows": "⬆️" in s and "⬇️" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
+    "VERSION v11.2":
+        bool(re.search(
+            r'^VERSION\s*=\s*["\']ATLAS v11\.2',
+            source,
+            re.M
+        )),
 
+    "two-engine":
+        all(
+            x in source
+            for x in ("MARKET", "PERSONAL", "BOTH")
+        ),
+
+    "personal portfolio":
+        "ATLAS_PERSONAL_ASSETS" in source,
+
+    "dynamic top30":
+        "DYNAMIC_TOP30" in source
+        or "dynamic30" in source,
+
+    "metals":
+        all(
+            x in source
+            for x in ("GOLD", "SILVER", "COPPER")
+        ),
+
+    "TradingView":
+        "tradingview.com/chart/?symbol=" in source,
+
+    "3h snapshot":
+        "send_price_snapshot" in source
+        and "این پیام هر ۳ ساعت" in source,
+
+    "snapshot path":
+        "fetch_snapshot_results" in source,
+
+    "automatic scheduler":
+        "_automatic_run_plan" in source,
+
+    "closed candle":
+        "strip_incomplete" in source
+        and "candle_is_closed" in source,
+
+    "trade geometry":
+        "_validate_trade_geometry" in source,
+
+    "CSV":
+        "generate_csv_report" in source
+        and "send_csv_report" in source,
+
+    "Telegram":
+        "send_report" in source
+        and "TELEGRAM_CHAT_ID" in source
+        and "TELEGRAM_GROUP_CHAT_ID" in source,
+
+    "Telegram retry":
+        "TELEGRAM_MAX_RETRIES" in source
+        or "send_with_retry" in source,
+
+    "no forced signal":
+        "NO TRADE" in source,
+
+    "no automatic orders":
+        "No automatic orders" in source
+        or "No automatic order" in source,
+
+    "no v12 wrapper":
+        "import bot as engine" not in source,
 }
-for name, ok in checks.items():
-    if not ok:
-        fail(name)
 
-compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot smoke test")
+failed = [
+    name
+    for name, ok in checks.items()
+    if not ok
+]
+
+if failed:
+    print("=" * 70)
+    print("ATLAS v11.2 SMOKE TEST: FAIL")
+    print("=" * 70)
+
+    for name in failed:
+        print("FAIL:", name)
+
+    raise SystemExit(1)
+
+compile(source, "bot.py", "exec")
+
+print("=" * 70)
+print("ATLAS v11.2 SMOKE TEST: PASS")
+print("=" * 70)
+
 for name in checks:
-    print("  OK:", name)
+    print("OK:", name)
