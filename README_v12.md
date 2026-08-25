@@ -1,12 +1,18 @@
-# ATLAS AI v12 FINAL
-- No forced signals.
-- Three levels: EXECUTABLE / BEST WATCH / NO VALID SETUP.
-- Standard statuses: STRONG BULL / BULL / NEUTRAL / BEAR / STRONG BEAR.
-- Breakout confirmation: 2 consecutive H4 closes above resistance.
-- Volume confirmation: >=20% above 20-period average.
-- RSI >=70 blocks an executable long.
-- Confidence is separate from R/R.
-- TP1 and TP2 R/R are always independently calculated from Entry/SL/TP.
-- Missing geometry/data => NO VALID SETUP.
-- USD and USDT are sourced only from tgju.org and the report fails closed if either rate cannot be obtained.
-- Dynamic stop and downside invalidation are shown where geometry permits
+# ATLAS AI v12 — Final Telegram Delivery Fix
+
+Entry point: `bot12.py`
+
+Telegram destinations:
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_GROUP_CHAT_ID`
+
+Required GitHub Actions secrets:
+- `TELEGRAM_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_GROUP_CHAT_ID`
+
+USD and USDT sources remain TGJU only through:
+- `TGJU_USD_URL`
+- `TGJU_USDT_URL`
+
+No Data Analysis dependency is used.
