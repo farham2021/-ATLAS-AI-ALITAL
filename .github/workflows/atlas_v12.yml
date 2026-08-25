@@ -2,6 +2,7 @@ name: ATLAS AI v12
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
@@ -17,24 +18,19 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
       # 1. Checkout
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. Python
-      # --------------------------------------------------
+      # 2. Python 3.12
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: "pip"
+          cache: pip
+          cache-dependency-path: requirements-v12.txt
 
-      # --------------------------------------------------
-      # 3. Verify repository structure
-      # --------------------------------------------------
+      # 3. Verify project files
       - name: Verify required files
         shell: bash
         run: |
@@ -42,14 +38,14 @@ jobs:
 
           required_files=(
             "README_v12.md"
-            "ATLAS_v12_bot.py"
+            "bot12.py"
             "atlas_v12_upgrade.py"
             "requirements-v12.txt"
             "smoke_atlas.py"
             "test_v12.py"
           )
 
-          echo "Checking required ATLAS v12 files..."
+          echo "Checking ATLAS v12 project structure..."
 
           for file in "${required_files[@]}"; do
             if [[ ! -f "$file" ]]; then
@@ -60,82 +56,77 @@ jobs:
             echo "OK: $file"
           done
 
-          echo "Repository structure validation passed."
+          echo "Project structure validation passed."
 
-      # --------------------------------------------------
       # 4. Install dependencies
-      # --------------------------------------------------
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
 
           python -m pip install --upgrade pip
+          python -m pip install -r requirements-v12.txt
 
-          if [[ -f "requirements-v12.txt" ]]; then
-            python -m pip install -r requirements-v12.txt
-          else
-            echo "ERROR: requirements-v12.txt not found."
-            exit 1
-          fi
-
-      # --------------------------------------------------
       # 5. Validate Python syntax
-      # --------------------------------------------------
       - name: Validate Python syntax
         shell: bash
         run: |
           set -euo pipefail
 
-          python -m py_compile ATLAS_v12_bot.py
+          python -m py_compile bot12.py
           python -m py_compile atlas_v12_upgrade.py
           python -m py_compile smoke_atlas.py
           python -m py_compile test_v12.py
 
           echo "Python syntax validation passed."
 
-      # --------------------------------------------------
-      # 6. Run v12 unit test
-      # --------------------------------------------------
-      - name: Run ATLAS v12 unit test
+      # 6. Check smoke test shebang
+      - name: Validate smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          first_line="$(head -n 1 smoke_atlas.py)"
+
+          if [[ "$first_line" != "#!/usr/bin/env python3" ]]; then
+            echo "ERROR: smoke_atlas.py must start with:"
+            echo "#!/usr/bin/env python3"
+            exit 1
+          fi
+
+          chmod +x smoke_atlas.py
+
+          echo "Smoke test header validated."
+
+      # 7. Run unit tests
+      - name: Run v12 unit tests
         shell: bash
         run: |
           set -euo pipefail
 
           python test_v12.py
 
-      # --------------------------------------------------
-      # 7. Run smoke test
-      # --------------------------------------------------
-      - name: Run ATLAS v12 smoke test
+      # 8. Run smoke test
+      - name: Run v12 smoke test
         shell: bash
         run: |
           set -euo pipefail
 
-          python smoke_atlas.py
+          ./smoke_atlas.py
 
-      # --------------------------------------------------
-      # 8. Final validation
-      # --------------------------------------------------
+      # 9. Final status
       - name: Final validation
         shell: bash
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo " ATLAS AI v12 VALIDATION"
+          echo "       ATLAS AI v12 VALIDATION"
           echo "=========================================="
-          echo "Python version:"
-          python --version
-          echo ""
-          echo "Engine:"
-          echo "ATLAS_v12_bot.py"
-          echo ""
-          echo "Unit test:"
-          echo "PASS"
-          echo ""
-          echo "Smoke test:"
-          echo "PASS"
+          echo "Python: $(python --version)"
+          echo "Engine: bot12.py"
+          echo "Unit tests: PASSED"
+          echo "Smoke test: PASSED"
           echo "=========================================="
           echo "ATLAS AI v12 validation completed."
           echo "=========================================="
