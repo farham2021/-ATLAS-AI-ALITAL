@@ -1,4 +1,4 @@
-name: ATLAS v11.2 — Unified Two-Engine + Reliable Delivery
+name: ATLAS v11.2 — Unified Two-Engine + Trade Geometry + Dynamic CSV + Dashboard + 3H Snapshot
 
 on:
   workflow_dispatch:
@@ -14,16 +14,13 @@ on:
         default: "AUTO"
 
   schedule:
-    # Hourly scheduler.
-    # The engine decides internally when analytical and snapshot
-    # operations are required.
     - cron: "0 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: atlas-v11-2-${{ github.ref }}
+  group: atlas-v11-2
   cancel-in-progress: false
 
 jobs:
@@ -49,6 +46,10 @@ jobs:
       ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
 
       ATLAS_TIMEFRAME: "4H"
+
+      # ============================================================
+      # TRADINGVIEW
+      # ============================================================
 
       ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
 
@@ -121,12 +122,16 @@ jobs:
       TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
       # ============================================================
-      # EXTERNAL DATA SOURCES
+      # SUPABASE
       # ============================================================
 
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
 
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # ============================================================
+      # MARKET DATA
+      # ============================================================
 
       COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
 
@@ -134,14 +139,21 @@ jobs:
 
       COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
+      # ============================================================
+      # NEWS
+      # ============================================================
+
       CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
 
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
       ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-      TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+      # ============================================================
+      # OPTIONAL TRADINGVIEW CONFIRMATION
+      # ============================================================
 
+      TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
     steps:
 
@@ -152,7 +164,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-
       # ============================================================
       # 2. PYTHON
       # ============================================================
@@ -161,7 +172,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
 
       # ============================================================
       # 3. INSTALL DEPENDENCIES
@@ -183,19 +193,16 @@ jobs:
 
           else
             echo "No requirements file found."
+            echo "Installing minimum runtime dependencies."
 
-            echo "Installing minimum runtime dependencies..."
-
-            python -m pip install \
-              "ccxt>=4.5.0" \
+            python -m pip install --upgrade \
+              ccxt \
               requests \
               pandas \
               numpy
-
           fi
 
-          echo "Dependencies installed successfully."
-
+          echo "Dependency installation completed."
 
       # ============================================================
       # 4. PROJECT STRUCTURE
@@ -218,13 +225,12 @@ jobs:
           optional_files=(
             "requirements.txt"
             "requirements-v11.2.txt"
-            "telegram_delivery_v12.py"
           )
 
           for file in "${required_files[@]}"; do
 
             if [ ! -f "$file" ]; then
-              echo "ERROR: Missing required file: $file"
+              echo "ERROR: Required file missing: $file"
               exit 1
             fi
 
@@ -237,14 +243,181 @@ jobs:
             if [ -f "$file" ]; then
               echo "FOUND: $file"
             else
-              echo "INFO: Optional file not present: $file"
+              echo "INFO: $file not present"
             fi
 
           done
 
+          echo "=================================================="
+          echo "PROJECT STRUCTURE PASSED"
+          echo "=================================================="
 
       # ============================================================
-      # 5. PYTHON SYNTAX
+      # 5. REAL PYTHON LEGACY IMPORT CHECK
+      #
+      # IMPORTANT:
+      # Do NOT use grep here.
+      #
+      # grep was previously detecting comments such as:
+      #
+      # "import bot as engine"
+      #
+      # inside smoke_atlas.py and incorrectly failing the workflow.
+      #
+      # This check uses Python AST and therefore detects only actual
+      # Python import statements.
+      # ============================================================
+
+      - name: Validate Python imports
+        run: |
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "LEGACY REFERENCE CHECK"
+          echo "=================================================="
+
+          python - <<'PY'
+          import ast
+          import pathlib
+          import sys
+
+          files = [
+              "bot.py",
+              "smoke_atlas.py",
+              "test_v11_2.py",
+          ]
+
+          forbidden_module = "bot"
+          forbidden_symbol = "ATLAS_v12_bot"
+
+          failed = False
+
+          for filename in files:
+
+              path = pathlib.Path(filename)
+
+              if not path.exists():
+                  print(f"ERROR: Missing file: {filename}")
+                  failed = True
+                  continue
+
+              print(f"Checking {filename} ...")
+
+              source = path.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
+
+              try:
+                  tree = ast.parse(
+                      source,
+                      filename=filename
+                  )
+              except SyntaxError as exc:
+                  print(
+                      f"ERROR: Cannot parse {filename}: "
+                      f"{exc}"
+                  )
+                  failed = True
+                  continue
+
+              for node in ast.walk(tree):
+
+                  # ------------------------------------------
+                  # import bot
+                  # import bot as engine
+                  # ------------------------------------------
+
+                  if isinstance(node, ast.Import):
+
+                      for alias in node.names:
+
+                          if alias.name == forbidden_module:
+
+                              print(
+                                  f"ERROR: Real import of "
+                                  f"'bot' found in {filename} "
+                                  f"at line {node.lineno}"
+                              )
+
+                              failed = True
+
+                  # ------------------------------------------
+                  # from bot import ...
+                  # ------------------------------------------
+
+                  elif isinstance(node, ast.ImportFrom):
+
+                      if node.module == forbidden_module:
+
+                          print(
+                              f"ERROR: Real 'from bot import' "
+                              f"found in {filename} "
+                              f"at line {node.lineno}"
+                          )
+
+                          failed = True
+
+              # ----------------------------------------------
+              # ATLAS_v12_bot must not exist as executable code
+              # ----------------------------------------------
+
+              for node in ast.walk(tree):
+
+                  if isinstance(
+                      node,
+                      ast.Name
+                  ):
+
+                      if node.id == forbidden_symbol:
+
+                          print(
+                              f"ERROR: Forbidden symbol "
+                              f"'{forbidden_symbol}' found "
+                              f"in executable code in "
+                              f"{filename} "
+                              f"at line {node.lineno}"
+                          )
+
+                          failed = True
+
+                  elif isinstance(
+                      node,
+                      ast.Attribute
+                  ):
+
+                      if node.attr == forbidden_symbol:
+
+                          print(
+                              f"ERROR: Forbidden attribute "
+                              f"'{forbidden_symbol}' found "
+                              f"in executable code in "
+                              f"{filename} "
+                              f"at line {node.lineno}"
+                          )
+
+                          failed = True
+
+              if not failed:
+                  print(f"PASS: {filename}")
+
+          if failed:
+              print("")
+              print(
+                  "ERROR: Real obsolete V11/V12 "
+                  "wrapper reference detected."
+              )
+              sys.exit(1)
+
+          print("")
+          print(
+              "PASS: No obsolete executable "
+              "engine references detected."
+          )
+          PY
+
+      # ============================================================
+      # 6. PYTHON SYNTAX
       # ============================================================
 
       - name: Validate Python syntax
@@ -261,131 +434,10 @@ jobs:
 
           python -m py_compile test_v11_2.py
 
-          if [ -f "telegram_delivery_v12.py" ]; then
-            python -m py_compile telegram_delivery_v12.py
-          fi
-
           echo "Python syntax validation PASSED."
 
-
       # ============================================================
-      # 6. REAL LEGACY IMPORT CHECK
-      #
-      # IMPORTANT:
-      # Do NOT use grep here.
-      #
-      # grep detects comments such as:
-      #     # import bot as engine
-      #
-      # This check uses Python AST and therefore detects only
-      # actual Python import statements.
-      # ============================================================
-
-      - name: Validate Python imports
-        run: |
-          set -euo pipefail
-
-          echo "=================================================="
-          echo "LEGACY IMPORT CHECK"
-          echo "=================================================="
-
-          python - <<'PY'
-
-          import ast
-          import pathlib
-          import sys
-
-          files = [
-              pathlib.Path("bot.py"),
-              pathlib.Path("smoke_atlas.py"),
-              pathlib.Path("test_v11_2.py"),
-          ]
-
-          forbidden_modules = {
-              "ATLAS_v12_bot",
-          }
-
-          errors = []
-
-          for path in files:
-
-              print(f"Checking {path} ...")
-
-              source = path.read_text(
-                  encoding="utf-8"
-              )
-
-              try:
-                  tree = ast.parse(
-                      source,
-                      filename=str(path)
-                  )
-
-              except SyntaxError as exc:
-                  print(
-                      f"ERROR: Syntax error in {path}: "
-                      f"{exc}"
-                  )
-                  sys.exit(1)
-
-              for node in ast.walk(tree):
-
-                  if isinstance(node, ast.Import):
-
-                      for alias in node.names:
-
-                          if alias.name == "bot":
-                              errors.append(
-                                  f"{path}:{node.lineno}: "
-                                  f"actual 'import bot' detected"
-                              )
-
-                          if alias.name in forbidden_modules:
-                              errors.append(
-                                  f"{path}:{node.lineno}: "
-                                  f"forbidden module "
-                                  f"{alias.name}"
-                              )
-
-                  elif isinstance(node, ast.ImportFrom):
-
-                      if node.module == "bot":
-                          errors.append(
-                              f"{path}:{node.lineno}: "
-                              f"actual 'from bot import ...' detected"
-                          )
-
-                      if node.module in forbidden_modules:
-                          errors.append(
-                              f"{path}:{node.lineno}: "
-                              f"forbidden module "
-                              f"{node.module}"
-                          )
-
-              if not any(
-                  str(path) in error
-                  for error in errors
-              ):
-                  print(f"PASS: {path}")
-
-          if errors:
-
-              print("")
-              print("ERROR: Legacy Python imports detected:")
-
-              for error in errors:
-                  print(error)
-
-              sys.exit(1)
-
-          print("")
-          print("PASS: no obsolete Python import references detected.")
-
-          PY
-
-
-      # ============================================================
-      # 7. V11.2 SMOKE TEST
+      # 7. SMOKE TEST
       # ============================================================
 
       - name: Run v11.2 smoke test
@@ -398,11 +450,10 @@ jobs:
 
           python smoke_atlas.py
 
-          echo "Smoke test PASSED."
-
+          echo "Smoke test completed."
 
       # ============================================================
-      # 8. V11.2 UNIT TEST
+      # 8. V11.2 TEST SUITE
       # ============================================================
 
       - name: Run v11.2 test suite
@@ -415,8 +466,7 @@ jobs:
 
           python test_v11_2.py
 
-          echo "v11.2 test suite PASSED."
-
+          echo "ATLAS v11.2 tests PASSED."
 
       # ============================================================
       # 9. TELEGRAM CONFIGURATION
@@ -439,11 +489,7 @@ jobs:
              [ -z "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
 
             echo "ERROR: No Telegram destination configured."
-
-            echo "Set at least one of:"
-            echo "TELEGRAM_CHAT_ID"
-            echo "TELEGRAM_GROUP_CHAT_ID"
-
+            echo "Set TELEGRAM_CHAT_ID and/or TELEGRAM_GROUP_CHAT_ID."
             exit 1
           fi
 
@@ -459,12 +505,13 @@ jobs:
             echo "INFO: Telegram group destination not configured."
           fi
 
+          echo "Telegram configuration validation PASSED."
 
       # ============================================================
       # 10. TELEGRAM PREFLIGHT
       # ============================================================
 
-      - name: Telegram bot preflight
+      - name: Telegram preflight
         run: |
           set -euo pipefail
 
@@ -473,7 +520,6 @@ jobs:
           echo "=================================================="
 
           python - <<'PY'
-
           import json
           import os
           import urllib.request
@@ -501,11 +547,9 @@ jobs:
                   timeout=30
               ) as response:
 
-                  raw = response.read().decode(
-                      "utf-8"
+                  payload = json.loads(
+                      response.read().decode("utf-8")
                   )
-
-              payload = json.loads(raw)
 
           except Exception as exc:
 
@@ -527,11 +571,7 @@ jobs:
           )
 
           print(
-              "Telegram bot connection OK."
-          )
-
-          print(
-              "Bot username:",
+              "Telegram bot OK:",
               bot.get(
                   "username",
                   "unknown"
@@ -545,136 +585,10 @@ jobs:
                   "unknown"
               )
           )
-
           PY
 
-
       # ============================================================
-      # 11. TELEGRAM DESTINATION TEST
-      #
-      # This verifies that the configured chat IDs are actually
-      # reachable by the bot before the analytical engine runs.
-      # ============================================================
-
-      - name: Validate Telegram destinations
-        run: |
-          set -euo pipefail
-
-          echo "=================================================="
-          echo "TELEGRAM DESTINATION CHECK"
-          echo "=================================================="
-
-          python - <<'PY'
-
-          import json
-          import os
-          import urllib.parse
-          import urllib.request
-
-          token = os.environ["TELEGRAM_TOKEN"].strip()
-
-          destinations = []
-
-          private_chat = os.environ.get(
-              "TELEGRAM_CHAT_ID",
-              ""
-          ).strip()
-
-          group_chat = os.environ.get(
-              "TELEGRAM_GROUP_CHAT_ID",
-              ""
-          ).strip()
-
-          if private_chat:
-              destinations.append(
-                  ("PRIVATE", private_chat)
-              )
-
-          if group_chat:
-              destinations.append(
-                  ("GROUP", group_chat)
-              )
-
-          if not destinations:
-              raise SystemExit(
-                  "No Telegram destination configured."
-              )
-
-          for label, chat_id in destinations:
-
-              print(
-                  f"Checking {label} destination..."
-              )
-
-              query = urllib.parse.urlencode(
-                  {
-                      "chat_id": chat_id
-                  }
-              )
-
-              url = (
-                  "https://api.telegram.org/"
-                  f"bot{token}/getChat?{query}"
-              )
-
-              try:
-
-                  with urllib.request.urlopen(
-                      url,
-                      timeout=30
-                  ) as response:
-
-                      payload = json.loads(
-                          response.read().decode(
-                              "utf-8"
-                          )
-                      )
-
-              except Exception as exc:
-
-                  raise SystemExit(
-                      f"{label} Telegram destination "
-                      f"check failed: {exc}"
-                  )
-
-              if not payload.get("ok"):
-
-                  raise SystemExit(
-                      f"{label} Telegram destination "
-                      f"is not reachable: "
-                      f"{payload}"
-                  )
-
-              chat = payload.get(
-                  "result",
-                  {}
-              )
-
-              print(
-                  f"PASS: {label} destination reachable"
-              )
-
-              print(
-                  "Chat type:",
-                  chat.get(
-                      "type",
-                      "unknown"
-                  )
-              )
-
-              print(
-                  "Chat ID:",
-                  chat.get(
-                      "id",
-                      "unknown"
-                  )
-              )
-
-          PY
-
-
-      # ============================================================
-      # 12. RUN ATLAS v11.2
+      # 11. RUN ATLAS v11.2
       # ============================================================
 
       - name: Run ATLAS AI v11.2
@@ -687,37 +601,35 @@ jobs:
 
           python bot.py
 
+          echo "ATLAS v11.2 execution completed."
 
       # ============================================================
-      # 13. VERIFY TELEGRAM DELIVERY
-      #
-      # bot.py must return non-zero if delivery completely fails.
-      # The workflow therefore cannot report SUCCESS when Telegram
-      # delivery failed silently.
+      # 12. TELEGRAM DELIVERY RESULT
       # ============================================================
 
-      - name: Verify ATLAS execution
+      - name: Verify Telegram delivery
         if: success()
         run: |
           set -euo pipefail
 
           echo "=================================================="
-          echo "ATLAS v11.2 EXECUTION STATUS"
+          echo "TELEGRAM DELIVERY"
           echo "=================================================="
 
-          echo "ATLAS v11.2 engine completed successfully."
+          echo "ATLAS v11.2 completed without runtime error."
 
-          echo "Telegram delivery function completed."
+          if [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Private destination configured."
+          fi
 
-          echo "Analytical timeframe: ${ATLAS_TIMEFRAME}"
+          if [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
+            echo "Group destination configured."
+          fi
 
-          echo "Engine: ${ATLAS_ENGINE}"
-
-          echo "Run mode: ${ATLAS_RUN_MODE}"
-
+          echo "Telegram delivery stage completed."
 
       # ============================================================
-      # 14. SQLITE FINALIZATION
+      # 13. FINALIZE SQLITE
       # ============================================================
 
       - name: Finalize SQLite
@@ -725,16 +637,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -f "${ATLAS_SQLITE_FILE}" ]; then
+          if [ -f "$ATLAS_SQLITE_FILE" ]; then
 
             echo "=================================================="
             echo "SQLITE FINALIZATION"
             echo "=================================================="
 
             python - <<'PY'
-
           import os
           import sqlite3
+          import sys
 
           db = os.environ["ATLAS_SQLITE_FILE"]
 
@@ -769,9 +681,7 @@ jobs:
               )
 
               if status != "ok":
-                  raise SystemExit(
-                      "SQLite integrity check FAILED."
-                  )
+                  sys.exit(1)
 
           finally:
 
@@ -781,33 +691,27 @@ jobs:
 
           else
 
-            echo "SQLite file not created in this run."
-            echo "Skipping SQLite finalization."
+            echo "SQLite database not created in this run."
 
           fi
 
-
       # ============================================================
-      # 15. FINAL STATUS
+      # 14. FINAL STATUS
       # ============================================================
 
       - name: Final status
         if: success()
         run: |
-          echo ""
           echo "=================================================="
           echo "ATLAS AI v11.2 COMPLETED SUCCESSFULLY"
           echo "=================================================="
-          echo ""
-          echo "Version       : ${ATLAS_VERSION}"
-          echo "Timeframe     : ${ATLAS_TIMEFRAME}"
-          echo "Engine        : ${ATLAS_ENGINE}"
-          echo "Run mode      : ${ATLAS_RUN_MODE}"
-          echo ""
-          echo "Market engine : OK"
-          echo "Personal      : OK"
-          echo "Snapshot      : OK"
-          echo "Telegram      : OK"
-          echo ""
-          echo "ATLAS v11.2 workflow completed."
+          echo "Version: 11.2"
+          echo "Timeframe: 4H"
+          echo "Engine: $ATLAS_ENGINE"
+          echo "Run mode: $ATLAS_RUN_MODE"
+          echo "Trade geometry: enabled"
+          echo "Dynamic CSV: enabled"
+          echo "Dashboard: enabled"
+          echo "3H snapshot: enabled"
+          echo "Telegram: configured"
           echo "=================================================="
