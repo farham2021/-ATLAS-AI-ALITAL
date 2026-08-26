@@ -1,5 +1,5 @@
 # ============================================================
-# ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE
+# ATLAS AI v11.2 — UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
 # v11.0 architecture:
@@ -58,7 +58,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.1 UNIFIED TWO-ENGINE"
+VERSION = "ATLAS v11.2 UNIFIED TWO-ENGINE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -135,8 +135,6 @@ REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.5
 
 MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
-TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
-SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
 BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
@@ -375,11 +373,6 @@ def init_sqlite():
             destination text not null,
             sent_at text not null,
             primary key(report_hash, destination)
-        );
-        create table if not exists snapshot_prices(
-            symbol text primary key,
-            price real not null,
-            captured_at text not null
         );
         create table if not exists backtest_gate_cache(
             id integer primary key check(id=1),
@@ -1620,29 +1613,6 @@ def weekly_pivot(rows):
         return None
     return (max(highs) + min(lows) + closes_[-1]) / 3.0
 
-
-def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
-    """Deterministic safety gate: reject impossible/contradictory trade geometry."""
-    direction = str(direction or "").upper()
-    entry, sl, tp1, tp2 = map(f, (entry, sl, tp1, tp2))
-    if direction not in ("LONG", "SHORT") or None in (entry, sl, tp1, tp2):
-        return False, "missing trade levels"
-    if min(x <= 0 for x in (entry, sl, tp1, tp2)):
-        return False, "non-positive trade level"
-    if direction == "LONG":
-        if not (sl < entry < tp1 < tp2):
-            return False, "invalid LONG geometry"
-    else:
-        if not (sl > entry > tp1 > tp2):
-            return False, "invalid SHORT geometry"
-    rr = _rr_from_values(entry, sl, tp2)
-    if rr is None or rr <= 0:
-        return False, "invalid R/R"
-    required_rr = MIN_EXECUTABLE_RR if min_rr is None else float(min_rr)
-    if rr < required_rr:
-        return False, f"R/R below {required_rr:.2f}"
-    return True, None
-
 def calculate_levels(rows, direction, daily_levels=None):
     """
     Build structural levels from CLOSED candles.
@@ -1720,9 +1690,10 @@ def calculate_levels(rows, direction, daily_levels=None):
         if tp4 is not None and (tp3 is None or tp4 >= tp3):
             tp4 = None
 
-    # Structural sanity + deterministic trade geometry gate.
-    valid, _reason = _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None)
-    if not valid:
+    # Structural sanity.
+    if direction == "LONG" and not (sl < entry < tp1 <= tp2):
+        return None
+    if direction == "SHORT" and not (sl > entry > tp1 >= tp2):
         return None
 
     return {
@@ -2930,7 +2901,7 @@ def telegram_api_get_me():
         raise RuntimeError("TELEGRAM_TOKEN missing")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
-        headers={"User-Agent": "ATLAS-AI/11.0"},
+        headers={"User-Agent": "ATLAS-AI/11.2"},
     )
     with urllib.request.urlopen(req, timeout=20) as r:
         raw = r.read().decode("utf-8", errors="replace")
@@ -2953,6 +2924,17 @@ def telegram_preflight():
     return me
 
 def split_telegram(text, max_chars=3900):
+    text = str(text or "").strip()
+    if not text:
+        return []
+    if len(text) > V11_2_MAX_REPORT_CHARS:
+        append_changelog(
+            "REPORT_SIZE",
+            None,
+            None,
+            f"Report exceeded v11.2 safety limit ({len(text)} chars); truncating safely."
+        )
+        text = text[:V11_2_MAX_REPORT_CHARS] + "\n\n⚠️ ATLAS v11.2: report truncated by safety limit."
     if len(text) <= max_chars:
         return [text]
     parts = []
@@ -3040,166 +3022,6 @@ def send_report(text):
             print(f"❌ Failed to send all parts to {dest_name}")
     return len(parts), sent, errors
 
-
-
-# ============================================================
-# DATA EXPORT — DYNAMIC CSV FROM THE SAME RESULTS OBJECT
-# ============================================================
-
-CSV_COLUMNS = (
-    "Group", "Symbol", "Status", "DecisionState", "Price", "Change24H",
-    "Support", "Resistance", "Entry", "SL", "TP1", "TP2", "TP3", "TP4",
-    "R/R", "Confidence", "H4Trend", "D1Trend", "W1Trend", "RSI", "MACD",
-    "Volume", "VolumeRatio", "ATR_pct", "Liquidity", "Gate", "GateReason",
-    "Direction", "RepeatSignal", "Reason", "ModelVersion",
-)
-
-def _csv_group(symbol, top10, dynamic30, personal_symbols):
-    s = str(symbol or "").upper()
-    if s in personal_symbols:
-        return "PERSONAL_PORTFOLIO"
-    if s in {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}:
-        return "MARKET_TOP10"
-    if s in {str(x).upper() for x in (dynamic30 or [])}:
-        return "DYNAMIC_TOP30"
-    return "ATLAS_RADAR"
-
-def _csv_status(r):
-    state = str(r.get("decision_state") or r.get("action") or "WAIT").upper()
-    if state in ("BUY", "BUY CONFIRMATION"):
-        return "BUY"
-    if state in ("SELL", "SELL CONFIRMATION", "SELL / REDUCE"):
-        return "SELL"
-    if state in ("BULLISH WATCH", "BEARISH WATCH", "WATCH"):
-        return "WATCH"
-    if state == "NO DATA":
-        return "NO DATA"
-    return "HOLD"
-
-def _csv_number(value, digits=8):
-    v = f(value)
-    if v is None:
-        return ""
-    return round(v, digits)
-
-def _csv_safe_plan(r):
-    """Return only geometrically valid executable/conditional levels."""
-    direction = r.get("direction")
-    entry, sl, tp1, tp2 = (f(r.get(k)) for k in ("entry", "sl", "tp1", "tp2"))
-    if None in (entry, sl, tp1, tp2):
-        return None
-    valid, _ = _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None)
-    if not valid:
-        return None
-    return entry, sl, tp1, tp2
-
-def generate_csv_report(results, top10, dynamic30):
-    """Generate a complete, dynamic export from current engine results.
-
-    No values are hard-coded. The CSV contains every current Dynamic Top-30
-    candidate, every personal asset, every priority Top-10 asset and all three
-    metals, with invalid trade geometry suppressed rather than exported.
-    """
-    import csv, io
-    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    top10_set = {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}
-    dynamic_set = {str(x).upper() for x in (dynamic30 or [])}
-    result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
-
-    ordered = []
-    for sym in list(top10 or ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS):
-        s = str(sym).upper()
-        if s and s not in ordered:
-            ordered.append(s)
-    for metal in ATLAS_METALS:
-        if metal not in ordered:
-            ordered.append(metal)
-
-    rows = []
-    for sym in ordered:
-        r = result_map.get(sym)
-        if r is None and sym in ATLAS_METALS:
-            r = _metal_analysis(sym)
-        if not r:
-            continue
-        plan = _csv_safe_plan(r)
-        entry = sl = tp1 = tp2 = tp3 = tp4 = rr = ""
-        if plan:
-            entry, sl, tp1, tp2 = plan
-            tp3, tp4 = f(r.get("tp3")), f(r.get("tp4"))
-            rr = _rr_from_values(entry, sl, tp2)
-        rows.append([
-            _csv_group(sym, top10, dynamic30, personal_symbols),
-            sym,
-            _csv_status(r),
-            str(r.get("decision_state") or r.get("action") or "WAIT"),
-            _csv_number(r.get("price")), _csv_number(r.get("change"), 4),
-            _csv_number(r.get("support")), _csv_number(r.get("resistance")),
-            _csv_number(entry), _csv_number(sl), _csv_number(tp1), _csv_number(tp2),
-            _csv_number(tp3), _csv_number(tp4),
-            _csv_number(rr, 3), _csv_number(r.get("confidence"), 2),
-            r.get("h4_trend", "UNKNOWN"), r.get("d1_trend", "UNKNOWN"),
-            r.get("w1_trend", "UNKNOWN"), _csv_number(r.get("rsi"), 2),
-            r.get("macd", ""), r.get("volume", ""), _csv_number(r.get("volume_ratio"), 3),
-            _csv_number(r.get("atr_pct"), 3), r.get("liquidity", ""),
-            r.get("gate", ""), r.get("gate_reason", ""), r.get("direction", ""),
-            bool(r.get("repeat_signal")), r.get("reason", ""), VERSION,
-        ])
-
-    out = io.StringIO(newline="")
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(CSV_COLUMNS)
-    writer.writerows(rows)
-    return out.getvalue()
-
-def _telegram_send_document(chat_id, content, filename, caption=None):
-    """Send a UTF-8 CSV as a real Telegram document using stdlib only."""
-    import uuid
-    if not TELEGRAM_TOKEN or not chat_id:
-        raise RuntimeError("Telegram secrets missing")
-    boundary = "----ATLAS" + uuid.uuid4().hex
-    body = bytearray()
-    def field(name, value):
-        body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode())
-    field("chat_id", str(chat_id))
-    if caption:
-        field("caption", caption)
-    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\nContent-Type: text/csv; charset=utf-8\r\n\r\n").encode())
-    body.extend(content.encode("utf-8-sig"))
-    body.extend(f"\r\n--{boundary}--\r\n".encode())
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-        data=bytes(body),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data=json.loads(resp.read().decode("utf-8", errors="replace"))
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram sendDocument failed: {data}")
-    return data
-
-def send_csv_report(results, top10, dynamic30):
-    """Send one dynamically generated CSV to every configured destination."""
-    content = generate_csv_report(results, top10, dynamic30)
-    if not content.strip():
-        return 0, ["CSV is empty"]
-    dt = now_tehran()
-    filename = f"atlas_report_{shamsi(dt).replace('/','')}_{dt.strftime('%H%M%S')}.csv"
-    caption = f"📎 ATLAS AI — CSV کامل | {VERSION} | {shamsi(dt)} {dt.strftime('%H:%M:%S')} تهران"
-    destinations=[]
-    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-        if chat_id and chat_id not in destinations:
-            destinations.append(chat_id)
-    sent=0; errors=[]
-    for chat_id in destinations:
-        try:
-            _telegram_send_document(chat_id, content, filename, caption)
-            sent += 1
-        except Exception as e:
-            errors.append(f"CSV {chat_id}: {e}")
-            append_changelog("CSV_EXPORT", None, None, str(e), {"traceback": traceback.format_exc()})
-    return sent, errors
 
 # ============================================================
 # REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
@@ -3305,9 +3127,7 @@ def _ensure_candidate_plan(r):
     for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4"):
         r[k] = levels.get(k)
     r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
-    valid, reason = _validate_trade_geometry(r.get("direction"), r.get("entry"), r.get("sl"), r.get("tp1"), r.get("tp2"), min_rr=None)
-    if not valid:
-        r["gate_reason"] = f"Trade geometry blocked: {reason}"
+    if r.get("rr") is None:
         return _clear_trade_plan(r)
     return r
 
@@ -3377,6 +3197,15 @@ def asset_block(r, metal=False, detail=False):
         lines.append(f"📊 Chart: {tv}")
     return "\n".join(lines)
 
+def _portfolio_rows(results):
+    by = {str(r.get("coin")).upper(): r for r in (results or []) if r.get("coin")}
+    rows=[]
+    for sym in ATLAS_PERSONAL_ASSETS:
+        if sym in by:
+            rows.append(_ensure_candidate_plan(by[sym]))
+        else:
+            rows.append({"coin":sym,"action":"NO DATA","confidence":0,"h4_trend":"N/A","d1_trend":"N/A","w1_trend":"N/A","reason":"داده در دسترس نیست"})
+    return rows
 
 
 def _opportunity_score(r):
@@ -3591,57 +3420,6 @@ def _compact_section(title, rows, metal=False):
     return "\n".join(lines)
 
 
-
-def _table_status(r):
-    h4 = str(r.get("h4_trend") or "").upper()
-    d1 = str(r.get("d1_trend") or "").upper()
-    if h4 == "BULLISH" and d1 == "BULLISH":
-        return "BULL"
-    if h4 == "BEARISH" and d1 == "BEARISH":
-        return "BEAR"
-    if h4 == "BULLISH":
-        return "BULL?"
-    if h4 == "BEARISH":
-        return "BEAR?"
-    return "WAIT"
-
-def _compact_dashboard_table(title, rows):
-    """Telegram-safe monospace table; no HTML/Markdown dependency."""
-    cols = ("ASSET", "STATUS", "PRICE", "SUPPORT", "RESIST")
-    data=[]
-    for r in rows or []:
-        sym=str(r.get("coin") or r.get("symbol") or "?").upper()
-        data.append((sym, _table_status(r), fmt(r.get("price")), fmt(r.get("support")), fmt(r.get("resistance"))))
-    if not data:
-        return f"{title}\n───────────────────\nداده‌ای برای جدول موجود نیست."
-    widths=[len(x) for x in cols]
-    for row in data:
-        widths=[max(w,len(str(v))) for w,v in zip(widths,row)]
-    header="  ".join(str(v).ljust(widths[i]) for i,v in enumerate(cols))
-    sep="  ".join("-"*w for w in widths)
-    lines=[title,"───────────────────",header,sep]
-    for row in data:
-        lines.append("  ".join(str(v).ljust(widths[i]) for i,v in enumerate(row)))
-    return "\n".join(lines)
-
-def build_dashboard_table(results, top10, dynamic30):
-    """Separate table message covering all requested universes + metals."""
-    personal_symbols={str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    by={str(r.get("coin") or "").upper():r for r in (results or []) if r.get("coin")}
-    top10_rows=[by[s] for s in (top10 or ATLAS_PRIORITY_TOP10) if str(s).upper() not in personal_symbols and str(s).upper() in by]
-    dynamic_rows=[by[str(s).upper()] for s in (dynamic30 or []) if str(s).upper() in by and str(s).upper() not in personal_symbols and str(s).upper() not in {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}]
-    personal_rows=_portfolio_rows(results)
-    metals=[_metal_analysis(x) for x in ATLAS_METALS]
-    blocks=[
-        "📊 ATLAS AI — DASHBOARD TABLE",
-        "━━━━━━━━━━━━━━━━━━",
-        _compact_dashboard_table("📡 MARKET TOP 10 (EX-PERSONAL)", top10_rows),
-        _compact_dashboard_table("📡 DYNAMIC TOP 30 (ALL CANDIDATES)", dynamic_rows),
-        _compact_dashboard_table("💼 PERSONAL PORTFOLIO", personal_rows),
-        _compact_dashboard_table("🪙 ATLAS METALS", metals),
-    ]
-    return "\n\n".join(blocks)
-
 def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
     """Short final recommendation, derived from current engine state."""
     rows = [r for r in (results or []) if isinstance(r, dict)]
@@ -3677,37 +3455,6 @@ def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regi
     )
 
 
-
-def _best_setup_block(results, universe_filter=None, title="🔥 BEST SETUP"):
-    """Choose only a real, geometrically valid setup; overbought is a risk modifier, not a buy signal."""
-    allowed={str(x).upper() for x in universe_filter} if universe_filter is not None else None
-    candidates=[]
-    for raw in results or []:
-        r=_ensure_candidate_plan(dict(raw or {}))
-        sym=str(r.get("coin") or "").upper()
-        if allowed is not None and sym not in allowed: continue
-        state=str(r.get("decision_state") or r.get("action") or "").upper()
-        if state not in ("BUY CONFIRMATION","SELL CONFIRMATION","BUY","SELL"): continue
-        if r.get("repeat_signal"): continue
-        plan=_csv_safe_plan(r)
-        if not plan: continue
-        rr=_rr_from_values(*plan[:2], plan[3])
-        if rr is None or rr < MIN_EXECUTABLE_RR: continue
-        conf=float(r.get("confidence") or 0)
-        rsi_v=f(r.get("rsi"))
-        penalty=12 if rsi_v is not None and rsi_v>=80 else 7 if rsi_v is not None and rsi_v>=75 else 0
-        score=conf + min(rr,5)*5 + float(r.get("liquidity_score") or 0)*0.05 - penalty
-        candidates.append((score,r,rr,rsi_v))
-    if not candidates:
-        return title + ": هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد."
-    _,r,rr,rsi_v=max(candidates,key=lambda x:x[0])
-    direction="BUY" if str(r.get("direction"))=="LONG" else "SELL"
-    entry,sl,tp1,tp2=_csv_safe_plan(r)
-    risk_note=" | RSI اشباع خرید" if rsi_v is not None and rsi_v>=75 else ""
-    return (f"{title}: {r.get('coin')} — {direction} — R/R 1:{rr:.2f}\n"
-            f"   Entry: {fmt(entry)} | SL: {fmt(sl)} | TP1: {fmt(tp1)} | TP2: {fmt(tp2)}\n"
-            f"   Confidence: {float(r.get('confidence') or 0):.0f}% | H4/D1: {r.get('h4_trend','UNKNOWN')}/{r.get('d1_trend','UNKNOWN')}{risk_note}")
-
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     """MARKET engine: only the compact table-style dashboard is exposed."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
@@ -3722,14 +3469,13 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     result_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
     top10_rows = [result_map[s] for s in top10_order if s in result_map]
     top10_names = set(top10_order)
-    dyn30_all_rows = [
+    dyn30_rows = [
         result_map[str(x).upper()]
         for x in (dynamic30 or [])
         if str(x).upper() in result_map
         and str(x).upper() not in top10_names
         and str(x).upper() not in personal_symbols
     ]
-    dyn30_rows = dynamic_top8(market_results, [r.get("coin") for r in dyn30_all_rows], exclude_symbols=personal_symbols)
 
     metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
     dt = now_tehran()
@@ -3737,7 +3483,6 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "🤖 ATLAS AI — MARKET 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
-        _best_setup_block(market_results),
         _compact_section("📡 ATLAS TOP 10", top10_rows),
         _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
         _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
@@ -3754,7 +3499,6 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
-        _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP"),
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
         _final_market_recommendation(rows, [], [], macro, btc_regime),
     ])
@@ -4206,7 +3950,7 @@ def _conditional_trade_plan(result):
             if result.get(k) is not None}
 
 # ============================================================
-# ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT
+# ATLAS v11.2 — SEPARATE 3H PRICE SNAPSHOT
 # ============================================================
 SNAPSHOT_SYMBOLS = ("BTC","ETH","XRP","SOL","BNB","DOGE","ADA","TRX","LINK","XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR")
 PUBLIC_USDT_PAGES = (
@@ -4327,51 +4071,9 @@ def fetch_snapshot_results():
     return rows
 
 
-
-def _snapshot_previous_prices():
-    try:
-        con=sqlite3.connect(DB_FILE, timeout=10)
-        try:
-            rows=con.execute("select symbol, price from snapshot_prices").fetchall()
-            return {str(sym).upper(): float(price) for sym,price in rows if price is not None}
-        finally:
-            con.close()
-    except Exception:
-        return {}
-
-def _snapshot_direction(current, previous):
-    current=f(current); previous=f(previous)
-    if current is None or previous is None or previous <= 0:
-        return "➡️"
-    delta_pct=(current-previous)/previous*100.0
-    if abs(delta_pct) < SNAPSHOT_FLAT_THRESHOLD_PCT:
-        return "➡️"
-    return "⬆️" if delta_pct > 0 else "⬇️"
-
-def _save_snapshot_prices(results, captured_at):
-    try:
-        con=sqlite3.connect(DB_FILE, timeout=10)
-        try:
-            con.execute("create table if not exists snapshot_prices(symbol text primary key, price real not null, captured_at text not null)")
-            for r in results or []:
-                sym=str(r.get("coin") or "").upper()
-                price=f(r.get("price"))
-                if sym and price is not None and price > 0:
-                    con.execute(
-                        "insert into snapshot_prices(symbol,price,captured_at) values(?,?,?) "
-                        "on conflict(symbol) do update set price=excluded.price,captured_at=excluded.captured_at",
-                        (sym, price, captured_at),
-                    )
-            con.commit()
-        finally:
-            con.close()
-    except Exception as e:
-        append_changelog("SNAPSHOT_STATE", None, None, f"save failed: {e}")
-
-def build_price_snapshot(results, updated_at=None, previous_prices=None):
+def build_price_snapshot(results, updated_at=None):
     by_coin={str(r.get("coin") or "").upper():r for r in (results or [])}
     dt=updated_at or now_tehran()
-    previous_prices = previous_prices if previous_prices is not None else _snapshot_previous_prices()
     weekdays=("دوشنبه","سه‌شنبه","چهارشنبه","پنجشنبه","جمعه","شنبه","یکشنبه")
     lines=[
         f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
@@ -4390,7 +4092,8 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         if price is None:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
-        arrow=_snapshot_direction(price, previous_prices.get(sym))
+        ch=f(r.get("change24"))
+        arrow="⬆️" if ch is not None and ch>0 else "⬇️" if ch is not None and ch<0 else "➡️"
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
     lines.append("───────────────────")
     usdt=fetch_usdt_toman_public()
@@ -4403,13 +4106,9 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
 
 
 def send_price_snapshot(results):
-    """Send snapshot separately; persist comparison state only after successful delivery."""
-    captured_at=now_tehran().isoformat()
-    previous=_snapshot_previous_prices()
-    payload=build_price_snapshot(results, previous_prices=previous)
+    """Send the snapshot as a separate Telegram message, never merged into reports."""
+    payload=build_price_snapshot(results)
     parts,sent,errors=send_report(payload)
-    if sent == parts and sent > 0:
-        _save_snapshot_prices(results, captured_at)
     return sent,errors
 
 def _automatic_run_plan(now=None):
@@ -4448,17 +4147,12 @@ def main():
                 results, top10, dynamic30, macro, news, market_info,
                 unavailable, btc_regime, breadth
             )
-            outputs.append(build_dashboard_table(results, top10, dynamic30))
             for payload in outputs:
                 parts,sent,errors=send_report(payload)
                 total_sent += sent
                 all_errors.extend(errors)
                 print(payload)
             analysis_results = results
-            csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
-            total_sent += csv_sent
-            all_errors.extend(csv_errors)
-            print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
             save_context(macro,news,market_liquidity_index(results),market_info)
             save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
 
@@ -4469,7 +4163,21 @@ def main():
             all_errors.extend(snapshot_errors)
 
         if not do_analysis and not do_snapshot:
-            print(f"{VERSION}: AUTO schedule has no task at this hour.")
+            msg = (
+                f"{VERSION}: AUTO schedule idle at {now_tehran().strftime('%Y-%m-%d %H:%M:%S %Z')}. "
+                "Next analysis/snapshot window will be selected automatically."
+            )
+            print(msg)
+            append_changelog("AUTO_IDLE", None, None, msg)
+            if V11_2_HEARTBEAT_ON_IDLE:
+                hb = (
+                    f"🟦 {VERSION}\n"
+                    f"AUTO scheduler active — no analytical/snapshot task at this hour.\n"
+                    f"Tehran: {now_tehran().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                hparts, hsent, herrs = send_report(hb)
+                total_sent += hsent
+                all_errors.extend(herrs)
             return 0
 
         if all_errors or total_sent==0:
@@ -4481,7 +4189,7 @@ def main():
         print(f"{VERSION} ERROR: {e}")
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert=f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
+                alert=f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt.\nTelegram delivery is not considered successful unless at least one message is confirmed by the API."
                 for destination in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
                     if destination:
                         try: telegram_send_one(destination,alert)
