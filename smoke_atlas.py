@@ -55,7 +55,7 @@ def validate_python(source: str, filename: str) -> ast.AST:
 
 def validate_no_obsolete_imports(source: str, filename: str) -> None:
     forbidden = (
-        "import bot as engine",
+        "import_bot_as_engine",
         "from bot import",
         "import bot ",
         "ATLAS_v12_bot",
