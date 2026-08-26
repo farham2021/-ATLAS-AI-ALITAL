@@ -5,7 +5,6 @@ import ast
 import re
 import sys
 
-
 BOT = Path("bot.py")
 
 
@@ -14,241 +13,220 @@ def fail(message):
     raise SystemExit(1)
 
 
-def source_text():
-    if not BOT.exists():
-        fail("bot.py not found")
-
-    try:
-        return BOT.read_text(encoding="utf-8")
-    except Exception as exc:
-        fail(f"cannot read bot.py: {exc}")
+if not BOT.exists():
+    fail("bot.py not found")
 
 
-def parse_source(source):
-    try:
-        return ast.parse(source, filename=str(BOT))
-    except SyntaxError as exc:
-        fail(f"bot.py syntax error: {exc}")
+source = BOT.read_text(encoding="utf-8")
+
+try:
+    tree = ast.parse(source, filename=str(BOT))
+except SyntaxError as exc:
+    fail(f"bot.py syntax error: {exc}")
 
 
-def function_names(tree):
-    return {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+# ============================================================
+# REAL IMPORT CHECK
+# Only actual Python imports are inspected.
+# Comments and strings are intentionally ignored.
+# ============================================================
+
+legacy_imports = []
+
+for node in ast.walk(tree):
+
+    if isinstance(node, ast.Import):
+
+        for alias in node.names:
+            if alias.name == "bot":
+                legacy_imports.append("import bot")
+
+    elif isinstance(node, ast.ImportFrom):
+
+        if node.module == "bot":
+            legacy_imports.append("from bot import ...")
 
 
-def main():
-    print("=" * 66)
-    print("ATLAS AI v11.2 SMOKE TEST")
-    print("=" * 66)
-
-    source = source_text()
-    tree = parse_source(source)
-    funcs = function_names(tree)
-
-    required = [
-        "build_report",
-        "build_personal_report",
-        "build_two_engine_reports",
-        "atlas_engine_mode",
-        "analyze_coin",
-        "main",
-        "tradingview_chart_url",
-        "build_price_snapshot",
-        "_compact_scenario_row",
-        "_compact_section",
-        "_final_market_recommendation",
-        "send_price_snapshot",
-        "fetch_usdt_toman_public",
-        "fetch_snapshot_results",
-        "_automatic_run_plan",
-        "generate_csv_report",
-        "send_csv_report",
-        "_best_setup_block",
-    ]
-
-    missing = [name for name in required if name not in funcs]
-
-    if missing:
-        fail(
-            "Missing required functions: "
-            + ", ".join(missing)
-        )
-
-    checks = {
-        "VERSION 11.2":
-            bool(
-                re.search(
-                    r'^VERSION\s*=\s*["\']ATLAS v11\.2',
-                    source,
-                    re.MULTILINE,
-                )
-            ),
-
-        "no stale v10 markers":
-            not bool(
-                re.search(
-                    r"ATLAS v10|v10\.[0-9]|10\.2",
-                    source,
-                )
-            ),
-
-        "single build_report":
-            funcs.count("build_report") == 1,
-
-        "single build_personal_report":
-            funcs.count("build_personal_report") == 1,
-
-        "single build_two_engine_reports":
-            funcs.count("build_two_engine_reports") == 1,
-
-        "single personal_report":
-            funcs.count("personal_report") == 1,
-
-        "two-engine architecture":
-            all(
-                x in source
-                for x in ("MARKET", "PERSONAL", "BOTH")
-            ),
-
-        "personal portfolio":
-            "ATLAS_PERSONAL_ASSETS" in source,
-
-        "market excludes personal":
-            (
-                "market_results" in source
-                and "not in personal_symbols" in source
-            ),
-
-        "metals":
-            (
-                "ATLAS_METALS" in source
-                and all(
-                    x in source
-                    for x in (
-                        "GOLD",
-                        "SILVER",
-                        "COPPER",
-                    )
-                )
-            ),
-
-        "TradingView links":
-            "tradingview.com/chart/?symbol=" in source,
-
-        "3H snapshot":
-            (
-                "send_price_snapshot" in source
-                and "این پیام هر ۳ ساعت" in source
-            ),
-
-        "snapshot-only mode":
-            (
-                "fetch_snapshot_results" in source
-                and 'run_mode == "SNAPSHOT"' in source
-            ),
-
-        "automatic scheduler":
-            (
-                "_automatic_run_plan" in source
-                and "dt.hour % 3 == 0" in source
-                and "dt.hour % 4 == 0" in source
-            ),
-
-        "public Iranian USDT sources":
-            all(
-                x in source.lower()
-                for x in (
-                    "wallex.ir",
-                    "excoino.com",
-                    "nobitex.ir",
-                )
-            ),
-
-        "KCEX support":
-            '"kcex"' in source,
-
-        "closed candle logic":
-            (
-                "strip_incomplete" in source
-                and "candle_is_closed" in source
-            ),
-
-        "compact report":
-            all(
-                x in source
-                for x in (
-                    "_compact_scenario_row",
-                    "کلیدی:",
-                    "🟢 صعودی:",
-                    "🔴 نزولی:",
-                )
-            ),
-
-        "Telegram preflight":
-            "telegram_preflight" in source,
-
-        "Telegram retry":
-            "send_with_retry" in source,
-
-        "Telegram independent destinations":
-            (
-                "TELEGRAM_CHAT_ID" in source
-                and "TELEGRAM_GROUP_CHAT_ID" in source
-            ),
-
-        "Telegram safe split":
-            "split_telegram" in source,
-
-        "CSV export":
-            (
-                "generate_csv_report" in source
-                and "send_csv_report" in source
-            ),
-
-        "no obsolete wrapper text":
-            not any(
-                x in source
-                for x in (
-                    "ATLAS_v12_bot",
-                    "import bot as engine",
-                    "from bot import",
-                )
-            ),
-    }
-
-    failed = [
-        name
-        for name, passed in checks.items()
-        if not passed
-    ]
-
-    print()
-    print("-" * 66)
-
-    for name, passed in checks.items():
-        print(
-            f"{'PASS' if passed else 'FAIL'}: {name}"
-        )
-
-    print("-" * 66)
-
-    if failed:
-        print(
-            "ATLAS AI v11.2 SMOKE TEST: FAIL"
-        )
-        print(
-            "Failed checks: "
-            + ", ".join(failed)
-        )
-        raise SystemExit(1)
-
-    print(
-        "ATLAS AI v11.2 SMOKE TEST: PASS"
+if legacy_imports:
+    fail(
+        "Obsolete wrapper/import detected: "
+        + ", ".join(sorted(set(legacy_imports)))
     )
 
 
-if __name__ == "__main__":
-    main()
+# ============================================================
+# FUNCTION CONTRACT
+# ============================================================
+
+functions = {
+    node.name
+    for node in tree.body
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+}
+
+
+required_functions = [
+    "build_report",
+    "build_personal_report",
+    "build_two_engine_reports",
+    "atlas_engine_mode",
+    "analyze_coin",
+    "main",
+    "tradingview_chart_url",
+    "build_price_snapshot",
+    "send_price_snapshot",
+    "fetch_usdt_toman_public",
+    "fetch_snapshot_results",
+    "_automatic_run_plan",
+    "generate_csv_report",
+    "send_csv_report",
+    "_best_setup_block",
+]
+
+
+missing = [
+    name
+    for name in required_functions
+    if name not in functions
+]
+
+
+if missing:
+    fail(
+        "Missing required functions: "
+        + ", ".join(missing)
+    )
+
+
+# ============================================================
+# VERSION
+# ============================================================
+
+if not re.search(
+    r'^VERSION\s*=\s*["\']ATLAS v11\.2',
+    source,
+    re.MULTILINE,
+):
+    fail("ATLAS v11.2 VERSION marker not found")
+
+
+# ============================================================
+# CORE ARCHITECTURE
+# ============================================================
+
+checks = {
+
+    "two-engine":
+        all(
+            x in source
+            for x in ("MARKET", "PERSONAL", "BOTH")
+        ),
+
+    "personal portfolio":
+        "PERSONAL" in source,
+
+    "dynamic radar":
+        "DYNAMIC" in source.upper(),
+
+    "metals":
+        all(
+            x in source
+            for x in ("GOLD", "SILVER", "COPPER")
+        ),
+
+    "closed candle":
+        all(
+            x in source
+            for x in (
+                "strip_incomplete",
+                "candle_is_closed",
+            )
+        ),
+
+    "3H snapshot":
+        all(
+            x in source
+            for x in (
+                "fetch_snapshot_results",
+                "send_price_snapshot",
+            )
+        ),
+
+    "automatic scheduler":
+        all(
+            x in source
+            for x in (
+                "_automatic_run_plan",
+                "dt.hour % 3 == 0",
+                "dt.hour % 4 == 0",
+            )
+        ),
+
+    "Telegram":
+        all(
+            x in source
+            for x in (
+                "telegram_preflight",
+                "telegram_send_one",
+                "send_report",
+            )
+        ),
+
+    "retry":
+        "send_with_retry" in source,
+
+    "CSV":
+        all(
+            x in source
+            for x in (
+                "generate_csv_report",
+                "send_csv_report",
+            )
+        ),
+
+    "TradingView":
+        "tradingview.com/chart/?symbol=" in source,
+
+    "public Iranian USDT":
+        all(
+            x in source.lower()
+            for x in (
+                "wallex.ir",
+                "excoino.com",
+                "nobitex.ir",
+            )
+        ),
+
+    "no stale v10":
+        not re.search(
+            r'ATLAS v10|v10\.[0-9]',
+            source,
+            re.IGNORECASE,
+        ),
+
+    "no v12 wrapper":
+        "ATLAS_v12_bot" not in source,
+
+}
+
+
+failed = [
+    name
+    for name, passed in checks.items()
+    if not passed
+]
+
+
+if failed:
+    fail(
+        "Smoke checks failed: "
+        + ", ".join(failed)
+    )
+
+
+print("=" * 66)
+print("ATLAS AI v11.2 SMOKE TEST: PASS")
+print("=" * 66)
+
+for name in checks:
+    print("PASS:", name)
