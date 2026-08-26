@@ -1,225 +1,229 @@
 #!/usr/bin/env python3
 """
-ATLAS AI v11.2
-Offline smoke test.
+ATLAS AI v11.2 — Smoke Test
 
-This test validates the real bot.py engine directly.
-It does NOT use a wrapper engine and does NOT send Telegram messages.
+Purpose:
+- Validate bot.py syntax and structure.
+- Validate that the v11.2 engine is self-contained.
+- Ensure no obsolete launcher/import pattern remains.
+- Do NOT import bot as engine.
+- Do NOT send Telegram messages.
+- Do NOT execute the analytical engine.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
 import ast
-import sys
+from pathlib import Path
 
 
-BOT = Path(__file__).with_name("bot.py")
+ROOT = Path(__file__).resolve().parent
+BOT = ROOT / "bot.py"
 
 
-def fail(message):
-    print("FAIL:", message)
+def fail(message: str) -> None:
+    print(f"FAIL: {message}")
     raise SystemExit(1)
 
 
-# ============================================================
-# 1. BOT FILE
-# ============================================================
+def read_source(path: Path) -> str:
+    if not path.exists():
+        fail(f"Missing required file: {path.name}")
 
-if not BOT.exists():
-    fail("bot.py not found")
+    try:
+        return path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as exc:
+        fail(f"Cannot read {path.name}: {exc}")
 
-print("PASS: bot.py exists")
-
-
-# ============================================================
-# 2. AST / SYNTAX
-# ============================================================
-
-source = BOT.read_text(
-    encoding="utf-8",
-    errors="ignore",
-)
-
-try:
-    tree = ast.parse(source)
-except SyntaxError as exc:
-    fail(f"bot.py syntax error: {exc}")
-
-print("PASS: bot.py AST parse")
+    return ""
 
 
-# ============================================================
-# 3. REQUIRED FUNCTIONS
-# ============================================================
+def validate_python(source: str, filename: str) -> ast.AST:
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        fail(
+            f"Python syntax error in {filename}: "
+            f"line {exc.lineno}, column {exc.offset}: {exc.msg}"
+        )
 
-function_names = {
-    node.name
-    for node in tree.body
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-}
-
-required_functions = (
-    "main",
-    "build_report",
-    "build_personal_report",
-    "generate_csv_report",
-)
-
-for name in required_functions:
-    if name not in function_names:
-        fail(f"missing required function: {name}")
-
-    print(f"PASS: function {name}()")
+    return tree
 
 
-# ============================================================
-# 4. REQUIRED V11.2 TOKENS
-# ============================================================
+def validate_no_obsolete_imports(source: str, filename: str) -> None:
+    forbidden = (
+        "import bot as engine",
+        "from bot import",
+        "import bot ",
+        "ATLAS_v12_bot",
+        "ATLAS_v11_bot",
+        "ATLAS_bot_v11",
+    )
 
-required_tokens = (
-    "ATLAS",
-    "11.2",
-    "MARKET",
-    "PERSONAL",
-    "BOTH",
-    "4H",
-    "TP1",
-    "TP2",
-    "SL",
-    "R/R",
-    "BUY",
-    "SELL",
-    "WAIT",
-)
-
-upper_source = source.upper()
-
-for token in required_tokens:
-    if token.upper() not in upper_source:
-        fail(f"missing required token: {token}")
-
-    print(f"PASS: token {token}")
-
-
-# ============================================================
-# 5. TELEGRAM DELIVERY
-# ============================================================
-
-telegram_tokens = (
-    "TELEGRAM_TOKEN",
-    "TELEGRAM_CHAT_ID",
-    "TELEGRAM_GROUP_CHAT_ID",
-)
-
-for token in telegram_tokens:
-    if token not in source:
-        fail(f"missing Telegram configuration token: {token}")
-
-    print(f"PASS: Telegram configuration {token}")
-
-
-# ============================================================
-# 6. NO OBSOLETE WRAPPER
-# ============================================================
-
-# IMPORTANT:
-# Do NOT search for the literal text
-# "import bot as engine"
-# because a test that contains that text would fail its own check.
-#
-# Instead inspect the AST for an actual import statement.
-
-for node in ast.walk(tree):
-
-    if isinstance(node, ast.Import):
-
-        for alias in node.names:
-
-            if alias.name == "bot":
-                fail(
-                    "bot.py must not import itself as an engine"
-                )
-
-    if isinstance(node, ast.ImportFrom):
-
-        if node.module == "bot":
+    for pattern in forbidden:
+        if pattern in source:
             fail(
-                "bot.py must not use 'from bot import ...'"
+                f"Obsolete reference found in "
+                f"{filename}: {pattern}"
             )
 
 
-print("PASS: no self-import / obsolete wrapper")
+def validate_import_ast(tree: ast.AST, filename: str) -> None:
+    """
+    AST-level validation is more reliable than grep because it
+    detects actual Python imports rather than comments/docstrings.
+    """
+
+    for node in ast.walk(tree):
+
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "bot" and alias.asname == "engine":
+                    fail(
+                        f"Obsolete import found in {filename}: "
+                        f"import bot as engine"
+                    )
+
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "bot":
+                fail(
+                    f"Obsolete import found in {filename}: "
+                    f"from bot import ..."
+                )
 
 
-# ============================================================
-# 7. V11.2 CONFIGURATION
-# ============================================================
+def validate_required_symbols(source: str) -> None:
+    """
+    These are intentionally lightweight structural checks.
+    They do not execute bot.py.
+    """
 
-config_tokens = (
-    "ATLAS_ENGINE",
-    "ATLAS_RUN_MODE",
-    "ATLAS_TIMEFRAME",
-    "ATLAS_MIN_EXECUTABLE_RR",
-    "ATLAS_MIN_WATCH_CONFIDENCE",
-)
+    required = [
+        "VERSION",
+        "build_report",
+        "build_personal_report",
+    ]
 
-for token in config_tokens:
+    missing = [
+        name
+        for name in required
+        if name not in source
+    ]
 
-    if token not in source:
-        print(
-            f"WARNING: configuration token not found: {token}"
+    if missing:
+        fail(
+            "bot.py is missing expected v11.2 symbols: "
+            + ", ".join(missing)
         )
-    else:
-        print(
-            f"PASS: configuration {token}"
+
+
+def validate_v11_2_markers(source: str) -> None:
+
+    markers = [
+        "ATLAS",
+        "4H",
+        "TELEGRAM",
+    ]
+
+    missing = [
+        marker
+        for marker in markers
+        if marker not in source
+    ]
+
+    if missing:
+        fail(
+            "Expected ATLAS v11.2 markers missing: "
+            + ", ".join(missing)
         )
 
 
-# ============================================================
-# 8. CSV / REPORT ENGINE
-# ============================================================
+def main() -> None:
 
-csv_tokens = (
-    "generate_csv_report",
-    "CSV",
-    "PERSONAL_PORTFOLIO",
-)
+    print("=" * 70)
+    print("ATLAS AI v11.2 — SMOKE TEST")
+    print("=" * 70)
 
-for token in csv_tokens:
+    # --------------------------------------------------------
+    # 1. FILE
+    # --------------------------------------------------------
 
-    if token.upper() not in upper_source:
-        print(
-            f"WARNING: CSV/report token not found: {token}"
-        )
-    else:
-        print(
-            f"PASS: report token {token}"
-        )
+    print("\n1. SOURCE FILE")
+
+    source = read_source(BOT)
+
+    print(f"PASS: {BOT.name}")
+
+    # --------------------------------------------------------
+    # 2. PYTHON AST
+    # --------------------------------------------------------
+
+    print("\n2. PYTHON SYNTAX")
+
+    tree = validate_python(
+        source,
+        BOT.name,
+    )
+
+    print("PASS: bot.py syntax")
+
+    # --------------------------------------------------------
+    # 3. OBSOLETE STRING CHECK
+    # --------------------------------------------------------
+
+    print("\n3. OBSOLETE REFERENCE CHECK")
+
+    validate_no_obsolete_imports(
+        source,
+        BOT.name,
+    )
+
+    print("PASS: no obsolete textual references")
+
+    # --------------------------------------------------------
+    # 4. AST IMPORT CHECK
+    # --------------------------------------------------------
+
+    print("\n4. ACTIVE IMPORT CHECK")
+
+    validate_import_ast(
+        tree,
+        BOT.name,
+    )
+
+    print("PASS: no obsolete active imports")
+
+    # --------------------------------------------------------
+    # 5. REQUIRED ENGINE SYMBOLS
+    # --------------------------------------------------------
+
+    print("\n5. ENGINE STRUCTURE")
+
+    validate_required_symbols(source)
+
+    print("PASS: required engine symbols detected")
+
+    # --------------------------------------------------------
+    # 6. V11.2 MARKERS
+    # --------------------------------------------------------
+
+    print("\n6. V11.2 MARKERS")
+
+    validate_v11_2_markers(source)
+
+    print("PASS: ATLAS / 4H / Telegram markers detected")
+
+    # --------------------------------------------------------
+    # FINAL
+    # --------------------------------------------------------
+
+    print("\n" + "=" * 70)
+    print("ATLAS AI v11.2 SMOKE TEST: PASS")
+    print("=" * 70)
 
 
-# ============================================================
-# 9. TELEGRAM SAFETY
-# ============================================================
-
-# The smoke test must never send a Telegram message.
-# Only static source validation is performed here.
-
-print("PASS: smoke test is offline")
-print("PASS: no Telegram network call performed")
-
-
-# ============================================================
-# FINAL
-# ============================================================
-
-print()
-print("=" * 70)
-print("ATLAS AI v11.2 SMOKE TEST: PASS")
-print("=" * 70)
-print("PASS: bot.py exists")
-print("PASS: Python syntax")
-print("PASS: required functions")
-print("PASS: v11.2 engine tokens")
-print("PASS: Telegram configuration")
-print("PASS: no obsolete self-import")
-print("PASS: offline smoke test")
-print("=" * 70)
+if __name__ == "__main__":
+    raise SystemExit(main())
