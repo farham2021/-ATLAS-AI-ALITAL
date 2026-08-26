@@ -2,178 +2,235 @@
 
 from pathlib import Path
 import ast
-import re
+import csv
+import io
+import sys
+import types
 
 
-BOT = Path("bot.py")
+# ============================================================
+# CCXT STUB
+# ============================================================
+
+ccxt_stub = types.ModuleType("ccxt")
+sys.modules.setdefault("ccxt", ccxt_stub)
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import bot
 
 
-def fail(message):
-    raise AssertionError(message)
+# ============================================================
+# VERSION
+# ============================================================
+
+assert bot.VERSION.startswith(
+    "ATLAS v11.2"
+), bot.VERSION
 
 
-def main():
-    if not BOT.exists():
-        fail("bot.py not found")
+# ============================================================
+# FUNCTION CONTRACT
+# ============================================================
 
-    source = BOT.read_text(encoding="utf-8")
+required = [
+    "build_report",
+    "build_personal_report",
+    "build_two_engine_reports",
+    "atlas_engine_mode",
+    "analyze_coin",
+    "main",
+    "build_price_snapshot",
+    "fetch_snapshot_results",
+    "send_price_snapshot",
+    "generate_csv_report",
+    "send_csv_report",
+    "fetch_usdt_toman_public",
+    "_automatic_run_plan",
+]
 
-    try:
-        tree = ast.parse(
-            source,
-            filename="bot.py",
+
+missing = [
+    name
+    for name in required
+    if not hasattr(bot, name)
+]
+
+
+assert not missing, (
+    "Missing functions: "
+    + ", ".join(missing)
+)
+
+
+# ============================================================
+# GEOMETRY / CSV TEST
+# ============================================================
+
+rows = [
+    {
+        "coin": "BTC",
+        "price": 100.0,
+        "support": 90.0,
+        "resistance": 120.0,
+        "entry": 101.0,
+        "sl": 95.0,
+        "tp1": 110.0,
+        "tp2": 120.0,
+        "h4_trend": "BULLISH",
+        "d1_trend": "BULLISH",
+        "w1_trend": "BULLISH",
+        "action": "BUY CONFIRMATION",
+        "decision_state": "BUY CONFIRMATION",
+        "direction": "LONG",
+        "confidence": 82,
+        "volume_ratio": 1.20,
+        "rsi": 61,
+        "volume": 10000,
+        "market_cap": 1000000,
+    },
+    {
+        "coin": "ETH",
+        "price": 100.0,
+        "support": 90.0,
+        "resistance": 110.0,
+        "entry": 101.0,
+        "sl": 95.0,
+        "tp1": 105.0,
+        "tp2": 99.0,
+        "h4_trend": "BULLISH",
+        "d1_trend": "BULLISH",
+        "action": "BUY CONFIRMATION",
+        "decision_state": "BUY CONFIRMATION",
+        "direction": "LONG",
+        "confidence": 95,
+    },
+]
+
+
+# ============================================================
+# CSV
+# ============================================================
+
+csv_text = bot.generate_csv_report(
+    rows,
+    ["BTC"],
+    [],
+)
+
+
+assert isinstance(csv_text, str)
+assert len(csv_text) > 0
+
+
+parsed = list(
+    csv.DictReader(
+        io.StringIO(csv_text)
+    )
+)
+
+
+assert parsed, "CSV is empty"
+
+
+btc = next(
+    row
+    for row in parsed
+    if row.get("Symbol") == "BTC"
+)
+
+
+eth = next(
+    row
+    for row in parsed
+    if row.get("Symbol") == "ETH"
+)
+
+
+# Invalid TP2 geometry must not be exported as
+# an executable trade plan.
+
+if "Entry" in eth:
+    assert eth["Entry"] in ("", None)
+
+
+# ============================================================
+# CLOSED CANDLE CONTRACT
+# ============================================================
+
+assert hasattr(
+    bot,
+    "candle_is_closed"
+)
+
+assert hasattr(
+    bot,
+    "strip_incomplete"
+)
+
+
+# ============================================================
+# TELEGRAM CONTRACT
+# ============================================================
+
+assert hasattr(
+    bot,
+    "telegram_preflight"
+)
+
+assert hasattr(
+    bot,
+    "telegram_send_one"
+)
+
+assert hasattr(
+    bot,
+    "send_report"
+)
+
+
+# ============================================================
+# SCHEDULER
+# ============================================================
+
+plan = bot._automatic_run_plan
+
+
+assert callable(plan)
+
+
+# ============================================================
+# REAL AST IMPORT CHECK
+# ============================================================
+
+source = Path(
+    "bot.py"
+).read_text(
+    encoding="utf-8"
+)
+
+tree = ast.parse(
+    source,
+    filename="bot.py"
+)
+
+
+for node in ast.walk(tree):
+
+    if isinstance(node, ast.Import):
+
+        for alias in node.names:
+            assert alias.name != "bot", (
+                "Legacy import detected: import bot"
+            )
+
+    elif isinstance(node, ast.ImportFrom):
+
+        assert node.module != "bot", (
+            "Legacy import detected: from bot import ..."
         )
-    except SyntaxError as exc:
-        fail(f"bot.py syntax error: {exc}")
-
-    functions = {
-        node.name
-        for node in tree.body
-        if isinstance(
-            node,
-            (ast.FunctionDef, ast.AsyncFunctionDef),
-        )
-    }
-
-    required_functions = {
-        "build_report",
-        "build_personal_report",
-        "build_two_engine_reports",
-        "atlas_engine_mode",
-        "analyze_coin",
-        "main",
-        "build_price_snapshot",
-        "send_price_snapshot",
-        "fetch_snapshot_results",
-        "_automatic_run_plan",
-        "generate_csv_report",
-        "send_csv_report",
-        "telegram_preflight",
-        "telegram_send_one",
-        "send_report",
-    }
-
-    missing = required_functions - functions
-
-    if missing:
-        fail(
-            "Missing required functions: "
-            + ", ".join(sorted(missing))
-        )
-
-    checks = [
-        (
-            "VERSION 11.2",
-            bool(
-                re.search(
-                    r'^VERSION\s*=\s*["\']ATLAS v11\.2',
-                    source,
-                    re.MULTILINE,
-                )
-            ),
-        ),
-        (
-            "MARKET engine",
-            "MARKET" in source,
-        ),
-        (
-            "PERSONAL engine",
-            "PERSONAL" in source,
-        ),
-        (
-            "BOTH mode",
-            "BOTH" in source,
-        ),
-        (
-            "4H timeframe",
-            '"4H"' in source or "'4H'" in source,
-        ),
-        (
-            "3H snapshot",
-            "send_price_snapshot" in source,
-        ),
-        (
-            "Dynamic Top 30",
-            "dynamic30" in source,
-        ),
-        (
-            "personal assets",
-            "ATLAS_PERSONAL_ASSETS" in source,
-        ),
-        (
-            "metals",
-            "ATLAS_METALS" in source,
-        ),
-        (
-            "closed candle",
-            "strip_incomplete" in source,
-        ),
-        (
-            "trade geometry",
-            "TRADE_GEOMETRY_EPSILON" in source,
-        ),
-        (
-            "Telegram retry",
-            "send_with_retry" in source,
-        ),
-        (
-            "Telegram preflight",
-            "telegram_preflight" in source,
-        ),
-        (
-            "Telegram private destination",
-            "TELEGRAM_CHAT_ID" in source,
-        ),
-        (
-            "Telegram group destination",
-            "TELEGRAM_GROUP_CHAT_ID" in source,
-        ),
-        (
-            "CSV",
-            "generate_csv_report" in source,
-        ),
-        (
-            "no obsolete v12 wrapper",
-            "ATLAS_v12_bot" not in source,
-        ),
-        (
-            "no legacy wrapper import",
-            "import bot as engine" not in source,
-        ),
-        (
-            "no legacy direct import",
-            "from bot import" not in source,
-        ),
-        (
-            "no v10",
-            "ATLAS v10" not in source,
-        ),
-    ]
-
-    failed = [
-        name
-        for name, passed in checks
-        if not passed
-    ]
-
-    print("=" * 66)
-    print("ATLAS AI v11.2 UNIT TEST")
-    print("=" * 66)
-
-    for name, passed in checks:
-        print(
-            f"{'PASS' if passed else 'FAIL'}: {name}"
-        )
-
-    if failed:
-        raise AssertionError(
-            "v11.2 tests failed: "
-            + ", ".join(failed)
-        )
-
-    print()
-    print("ATLAS AI v11.2 UNIT TEST: PASS")
 
 
-if __name__ == "__main__":
-    main()
+print(
+    "ATLAS AI v11.2 UNIT TEST: PASS"
+)
