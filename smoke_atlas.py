@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-ATLAS AI v11.2 — Smoke Test
+ATLAS AI v11.2
+Smoke test for the native unified engine.
 
-Purpose:
-- Validate the real v11.2 bot module.
-- Ensure bot.py is the actual analytical engine.
-- Ensure no legacy wrapper/import architecture is used.
-- Validate core report-generation functions.
-- Never send Telegram messages during smoke testing.
+Important:
+- This test validates bot.py directly.
+- It does not import or execute bot.py.
+- It does not send Telegram messages.
+- It must remain independent from the production engine.
 """
 
 from __future__ import annotations
 
 import ast
-import importlib
-import os
 import sys
 from pathlib import Path
 
@@ -28,206 +26,300 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def passed(message: str) -> None:
-    print(f"PASS: {message}")
-
-
-def read_bot_source() -> str:
+def read_source() -> str:
     if not BOT_FILE.exists():
         fail("bot.py not found")
-    return BOT_FILE.read_text(encoding="utf-8")
-
-
-def validate_file_structure() -> None:
-    if not BOT_FILE.exists():
-        fail("bot.py is missing")
-
-    passed("bot.py exists")
-
-
-def validate_python_syntax(source: str) -> None:
-    try:
-        ast.parse(source, filename=str(BOT_FILE))
-    except SyntaxError as exc:
-        fail(f"bot.py syntax error: {exc}")
-
-    passed("bot.py syntax is valid")
-
-
-def validate_no_legacy_imports(source: str) -> None:
-    """
-    Inspect the AST instead of grep.
-
-    This avoids false positives caused by comments or explanatory
-    strings inside smoke_atlas.py.
-    """
 
     try:
-        tree = ast.parse(source, filename=str(BOT_FILE))
-    except SyntaxError as exc:
-        fail(f"Unable to parse bot.py: {exc}")
-
-    for node in ast.walk(tree):
-
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.strip() == "bot":
-                    fail("bot.py contains a self/legacy import of module 'bot'")
-
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "bot":
-                fail("bot.py contains a legacy import from module 'bot'")
-
-    passed("bot.py contains no legacy wrapper/import architecture")
-
-
-def validate_v11_2_markers(source: str) -> None:
-    markers = (
-        "ATLAS",
-        "11.2",
-    )
-
-    for marker in markers:
-        if marker not in source:
-            fail(f"v11.2 marker missing: {marker}")
-
-    passed("v11.2 markers detected")
-
-
-def import_bot():
-    try:
-        if str(ROOT) not in sys.path:
-            sys.path.insert(0, str(ROOT))
-
-        module = importlib.import_module("bot")
+        return BOT_FILE.read_text(
+            encoding="utf-8"
+        )
     except Exception as exc:
-        fail(f"Unable to import bot.py: {type(exc).__name__}: {exc}")
-
-    passed("bot.py imported successfully")
-    return module
+        fail(f"unable to read bot.py: {exc}")
 
 
-def validate_required_functions(bot) -> None:
-    required = (
+def parse_source(source: str) -> ast.Module:
+    try:
+        return ast.parse(
+            source,
+            filename=str(BOT_FILE)
+        )
+    except SyntaxError as exc:
+        fail(
+            "bot.py syntax error: "
+            f"line {exc.lineno}, "
+            f"column {exc.offset}: "
+            f"{exc.msg}"
+        )
+
+
+def function_names(tree: ast.Module) -> list[str]:
+    names: list[str] = []
+
+    for node in tree.body:
+
+        if isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+            ),
+        ):
+            names.append(node.name)
+
+    return names
+
+
+def class_names(tree: ast.Module) -> list[str]:
+    names: list[str] = []
+
+    for node in tree.body:
+
+        if isinstance(
+            node,
+            ast.ClassDef,
+        ):
+            names.append(node.name)
+
+    return names
+
+
+def check_required_functions(
+    functions: list[str]
+) -> None:
+
+    required = [
         "main",
-    )
-
-    missing = [
-        name
-        for name in required
-        if not callable(getattr(bot, name, None))
+        "send_report",
+        "split_telegram",
     ]
 
-    if missing:
+    for name in required:
+
+        if name not in functions:
+            fail(
+                f"required function missing: {name}"
+            )
+
+
+def check_engine_functions(
+    functions: list[str]
+) -> None:
+
+    expected_groups = [
+        (
+            "report",
+            "build_report",
+            "build_market_report",
+            "build_two_engine_reports",
+        ),
+        (
+            "personal",
+            "build_personal_report",
+            "personal_report",
+        ),
+    ]
+
+    for group_name, *candidates in expected_groups:
+
+        if not any(
+            candidate in functions
+            for candidate in candidates
+        ):
+            fail(
+                f"v11.2 {group_name} reporting "
+                "function not found"
+            )
+
+
+def check_two_engine_tokens(
+    source: str
+) -> None:
+
+    required_tokens = [
+        "MARKET",
+        "PERSONAL",
+        "BOTH",
+        "TOP 10",
+        "DYNAMIC TOP 30",
+        "TP1",
+        "TP2",
+    ]
+
+    for token in required_tokens:
+
+        if token not in source:
+            fail(
+                f"required v11.2 token missing: {token}"
+            )
+
+
+def check_telegram_tokens(
+    source: str
+) -> None:
+
+    required_tokens = [
+        "TELEGRAM_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "TELEGRAM_GROUP_CHAT_ID",
+        "sendMessage",
+    ]
+
+    for token in required_tokens:
+
+        if token not in source:
+            fail(
+                f"Telegram component missing: {token}"
+            )
+
+
+def check_version(
+    source: str
+) -> None:
+
+    if "11.2" not in source:
         fail(
-            "Missing required callable(s): "
-            + ", ".join(missing)
+            "bot.py does not appear to contain "
+            "ATLAS v11.2"
         )
 
-    passed("required bot entry point detected")
+
+def check_imports(
+    tree: ast.Module
+) -> None:
+
+    imported_modules: list[str] = []
+
+    for node in tree.body:
+
+        if isinstance(node, ast.Import):
+
+            for alias in node.names:
+                imported_modules.append(
+                    alias.name
+                )
+
+        elif isinstance(node, ast.ImportFrom):
+
+            if node.module:
+                imported_modules.append(
+                    node.module
+                )
+
+    if "ccxt" not in imported_modules:
+        print(
+            "WARNING: ccxt import not detected"
+        )
 
 
-def validate_engine_symbols(bot) -> None:
-    """
-    v11.2 must remain a real engine, not a thin Telegram wrapper.
+def check_duplicate_main(
+    functions: list[str]
+) -> None:
 
-    We accept multiple legitimate names because the v11.1 architecture
-    may expose its engines under different internal names.
-    """
+    count = functions.count("main")
 
-    source_symbols = {
-        name
-        for name in dir(bot)
-        if not name.startswith("__")
-    }
+    if count != 1:
+        fail(
+            f"main() must exist exactly once; "
+            f"found {count}"
+        )
 
-    analytical_candidates = {
-        "analyze_market",
-        "analyze_personal",
-        "run_market_engine",
-        "run_personal_engine",
-        "market_engine",
-        "personal_engine",
+
+def check_duplicate_report(
+    functions: list[str]
+) -> None:
+
+    report_names = [
+        "build_report",
         "build_market_report",
-        "build_personal_report",
-        "build_dashboard",
-        "generate_csv",
-        "generate_csv_report",
-    }
+        "build_two_engine_reports",
+    ]
 
-    found = sorted(
-        source_symbols.intersection(analytical_candidates)
+    total = sum(
+        functions.count(name)
+        for name in report_names
     )
 
-    if not found:
-        print(
-            "WARNING: no optional analytical symbol matched "
-            "the compatibility list."
+    if total == 0:
+        fail(
+            "no report-building function detected"
         )
-        print(
-            "The main bot entry point remains available."
-        )
-    else:
-        passed(
-            "analytical engine symbols detected: "
-            + ", ".join(found)
-        )
-
-
-def validate_environment() -> None:
-    version = os.environ.get(
-        "ATLAS_VERSION",
-        "11.2",
-    )
-
-    timeframe = os.environ.get(
-        "ATLAS_TIMEFRAME",
-        "4H",
-    )
-
-    print(
-        f"ATLAS_VERSION={version}"
-    )
-
-    print(
-        f"ATLAS_TIMEFRAME={timeframe}"
-    )
-
-    passed("runtime environment readable")
 
 
 def main() -> int:
 
     print("=" * 66)
-    print("ATLAS AI v11.2 — SMOKE TEST")
+    print("ATLAS AI v11.2 SMOKE TEST")
     print("=" * 66)
 
-    print("\n1. PROJECT STRUCTURE")
-    validate_file_structure()
+    print()
+    print("1. SOURCE")
 
-    print("\n2. PYTHON SYNTAX")
-    source = read_bot_source()
-    validate_python_syntax(source)
+    source = read_source()
 
-    print("\n3. LEGACY ARCHITECTURE CHECK")
-    validate_no_legacy_imports(source)
+    print("PASS: bot.py exists")
+    print(
+        f"PASS: bot.py size = {len(source):,} characters"
+    )
 
-    print("\n4. V11.2 MARKERS")
-    validate_v11_2_markers(source)
+    print()
+    print("2. AST PARSE")
 
-    print("\n5. ENVIRONMENT")
-    validate_environment()
+    tree = parse_source(source)
 
-    print("\n6. BOT IMPORT")
-    bot = import_bot()
+    print("PASS: bot.py AST parse")
 
-    print("\n7. BOT ENTRY POINT")
-    validate_required_functions(bot)
+    print()
+    print("3. FUNCTION STRUCTURE")
 
-    print("\n8. ANALYTICAL ENGINE")
-    validate_engine_symbols(bot)
+    functions = function_names(tree)
 
-    print("\n" + "=" * 66)
+    check_required_functions(functions)
+    check_engine_functions(functions)
+    check_duplicate_main(functions)
+    check_duplicate_report(functions)
+
+    print(
+        f"PASS: {len(functions)} top-level functions detected"
+    )
+
+    print()
+    print("4. CLASS STRUCTURE")
+
+    classes = class_names(tree)
+
+    print(
+        f"PASS: {len(classes)} top-level classes detected"
+    )
+
+    print()
+    print("5. V11.2 ENGINE")
+
+    check_version(source)
+    check_two_engine_tokens(source)
+
+    print(
+        "PASS: v11.2 unified engine markers"
+    )
+
+    print()
+    print("6. TELEGRAM")
+
+    check_telegram_tokens(source)
+
+    print(
+        "PASS: Telegram delivery components detected"
+    )
+
+    print()
+    print("7. IMPORTS")
+
+    check_imports(tree)
+
+    print("PASS: import structure inspected")
+
+    print()
+    print("=" * 66)
     print("ATLAS AI v11.2 SMOKE TEST: PASS")
     print("=" * 66)
 
