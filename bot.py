@@ -2231,7 +2231,8 @@ def risk_quality_score(r, rr=None):
     liq = f(r.get("liquidity_score")) or 0
     score += 15 if liq >= 70 else 8 if liq >= 45 else -8
     q = r.get("quality")
-    score += 15 if q == "HIGH" else 8 if q == "MEDIUM" else -10    spread = f(r.get("spread"))
+    score += 15 if q == "HIGH" else 8 if q == "MEDIUM" else -10
+    spread = f(r.get("spread"))
     score += 10 if spread is not None and spread <= 1 else 5 if spread is not None and spread <= 3 else -20
     if _near_opposing_level(r):
         score -= 20
