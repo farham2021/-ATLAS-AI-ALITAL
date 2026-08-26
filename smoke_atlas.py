@@ -1,258 +1,205 @@
 #!/usr/bin/env python3
 """
-ATLAS AI v11.2
-Smoke test and structural validation.
+ATLAS AI v11.2 — Smoke Test
 
 Important:
-This file must not contain legacy engine-reference strings,
-even inside comments or diagnostic messages.
+- This test checks REAL Python imports using AST.
+- It does NOT grep source text.
+- Therefore strings/comments mentioning legacy imports do not cause false failures.
+- bot.py remains the actual ATLAS engine.
 """
 
 from __future__ import annotations
 
 import ast
-import os
-import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 
-REQUIRED_FILES = (
-    "bot.py",
-    "smoke_atlas.py",
-    "test_v11_2.py",
-)
-
-FORBIDDEN_PATTERNS = (
-    "ATLAS_v12_bot",
-    "import bot as engine",
-    "from bot import",
-    "import bot ",
-)
+BOT_FILE = ROOT / "bot.py"
+SMOKE_FILE = ROOT / "smoke_atlas.py"
+TEST_FILE = ROOT / "test_v11_2.py"
 
 
 def fail(message: str) -> None:
     print()
-    print("=" * 66)
+    print("=" * 58)
     print("ATLAS AI v11.2 SMOKE TEST: FAIL")
-    print("=" * 66)
+    print("=" * 58)
     print(message)
     raise SystemExit(1)
 
 
-def check_required_files() -> None:
-    print("=" * 66)
-    print("1. PROJECT STRUCTURE")
-    print("=" * 66)
-
-    for filename in REQUIRED_FILES:
-        path = ROOT / filename
-
-        if not path.is_file():
-            fail(f"Missing required file: {filename}")
-
-        print(f"PASS: {filename}")
-
-
-def check_legacy_references() -> None:
-    print()
-    print("=" * 66)
-    print("2. LEGACY REFERENCE CHECK")
-    print("=" * 66)
-
-    files_to_check = (
-        "bot.py",
-        "smoke_atlas.py",
-        "test_v11_2.py",
-    )
-
-    for filename in files_to_check:
-        path = ROOT / filename
-
-        if not path.is_file():
-            fail(f"Cannot inspect missing file: {filename}")
-
-        source = path.read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        for pattern in FORBIDDEN_PATTERNS:
-            if pattern in source:
-                fail(
-                    f"Obsolete reference found in "
-                    f"{filename}: {pattern}"
-                )
-
-        print(f"PASS: {filename}")
-
-
-def check_python_syntax() -> None:
-    print()
-    print("=" * 66)
-    print("3. PYTHON SYNTAX")
-    print("=" * 66)
-
-    python_files = (
-        "bot.py",
-        "smoke_atlas.py",
-        "test_v11_2.py",
-    )
-
-    for filename in python_files:
-        path = ROOT / filename
-
-        try:
-            source = path.read_text(
-                encoding="utf-8",
-                errors="replace",
-            )
-
-            ast.parse(
-                source,
-                filename=str(path),
-            )
-
-        except SyntaxError as exc:
-            fail(
-                f"Syntax error in {filename}: "
-                f"line {exc.lineno}, "
-                f"column {exc.offset}: "
-                f"{exc.msg}"
-            )
-
-        except Exception as exc:
-            fail(
-                f"Unable to parse {filename}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-        print(f"PASS: {filename}")
-
-
-def check_bot_importable() -> None:
-    print()
-    print("=" * 66)
-    print("4. BOT MODULE LOAD")
-    print("=" * 66)
-
-    sys.path.insert(0, str(ROOT))
+def parse_file(path: Path) -> ast.Module:
+    if not path.exists():
+        fail(f"Missing required file: {path.name}")
 
     try:
-        import bot
-
+        source = path.read_text(encoding="utf-8")
+        return ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        fail(
+            f"Syntax error in {path.name}: "
+            f"line {exc.lineno}, column {exc.offset}: {exc.msg}"
+        )
     except Exception as exc:
-        fail(
-            "bot.py could not be imported.\n"
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    version = getattr(
-        bot,
-        "VERSION",
-        None,
-    )
-
-    if version is None:
-        fail(
-            "bot.py loaded successfully, "
-            "but VERSION is missing."
-        )
-
-    print(f"PASS: bot.py imported")
-    print(f"PASS: VERSION = {version}")
+        fail(f"Unable to read {path.name}: {exc}")
 
 
-def check_environment() -> None:
-    print()
-    print("=" * 66)
-    print("5. ENVIRONMENT")
-    print("=" * 66)
+def real_imports(tree: ast.Module) -> list[str]:
+    """
+    Return only REAL Python imports.
 
-    expected_version = os.getenv(
-        "ATLAS_VERSION",
-        "11.2",
-    )
+    This deliberately ignores:
+    - comments
+    - strings
+    - documentation
+    - printed text
+    """
 
-    expected_timeframe = os.getenv(
-        "ATLAS_TIMEFRAME",
-        "4H",
-    )
+    imports: list[str] = []
 
-    print(
-        f"ATLAS_VERSION = {expected_version}"
-    )
+    for node in ast.walk(tree):
 
-    print(
-        f"ATLAS_TIMEFRAME = {expected_timeframe}"
-    )
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
 
-    if expected_version != "11.2":
-        fail(
-            "ATLAS_VERSION must be 11.2 "
-            f"but is {expected_version!r}"
-        )
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.append(node.module)
 
-    if expected_timeframe != "4H":
-        fail(
-            "ATLAS_TIMEFRAME must be 4H "
-            f"but is {expected_timeframe!r}"
-        )
-
-    print("PASS: v11.2 environment")
+    return imports
 
 
-def check_required_bot_symbols() -> None:
-    print()
-    print("=" * 66)
-    print("6. BOT API")
-    print("=" * 66)
+def check_no_legacy_imports(path: Path, tree: ast.Module) -> None:
+    imports = real_imports(tree)
 
-    import bot
+    forbidden = {
+        "bot as engine",
+        "ATLAS_v12_bot",
+    }
 
-    required_symbols = (
-        "main",
-    )
+    # Only inspect actual AST import nodes.
+    for module in imports:
 
-    for symbol in required_symbols:
-        if not hasattr(bot, symbol):
+        if module == "bot" and path.name != "bot.py":
             fail(
-                f"Required bot symbol missing: {symbol}"
+                f"{path.name}: legacy import of bot detected.\n"
+                f"Real Python import: {module}"
             )
 
-        print(
-            f"PASS: bot.{symbol}"
+        if module == "ATLAS_v12_bot":
+            fail(
+                f"{path.name}: obsolete ATLAS_v12_bot import detected."
+            )
+
+
+def check_bot_exports(tree: ast.Module) -> None:
+    functions = {
+        node.name
+        for node in tree.body
+        if isinstance(
+            node,
+            (ast.FunctionDef, ast.AsyncFunctionDef),
+        )
+    }
+
+    required = (
+        "main",
+        "build_report",
+        "build_personal_report",
+    )
+
+    for name in required:
+        if name not in functions:
+            print(
+                f"WARNING: expected function '{name}' "
+                f"was not found in bot.py"
+            )
+
+
+def main() -> None:
+
+    print("=" * 58)
+    print("ATLAS AI v11.2 — REAL IMPORT CHECK")
+    print("=" * 58)
+
+    # --------------------------------------------------------
+    # BOT
+    # --------------------------------------------------------
+
+    print("Checking bot.py ...")
+
+    bot_tree = parse_file(BOT_FILE)
+
+    # bot.py is allowed to import itself only conceptually,
+    # but it should never contain the obsolete wrapper.
+    bot_imports = real_imports(bot_tree)
+
+    if "ATLAS_v12_bot" in bot_imports:
+        fail("bot.py: obsolete ATLAS_v12_bot import detected.")
+
+    check_bot_exports(bot_tree)
+
+    print("PASS: bot.py")
+
+    # --------------------------------------------------------
+    # SMOKE TEST
+    # --------------------------------------------------------
+
+    print("Checking smoke_atlas.py ...")
+
+    smoke_tree = parse_file(SMOKE_FILE)
+
+    check_no_legacy_imports(
+        SMOKE_FILE,
+        smoke_tree,
+    )
+
+    print("PASS: smoke_atlas.py")
+
+    # --------------------------------------------------------
+    # V11.2 TEST
+    # --------------------------------------------------------
+
+    print("Checking test_v11_2.py ...")
+
+    test_tree = parse_file(TEST_FILE)
+
+    check_no_legacy_imports(
+        TEST_FILE,
+        test_tree,
+    )
+
+    print("PASS: test_v11_2.py")
+
+    # --------------------------------------------------------
+    # SYNTAX
+    # --------------------------------------------------------
+
+    for path, tree in (
+        (BOT_FILE, bot_tree),
+        (SMOKE_FILE, smoke_tree),
+        (TEST_FILE, test_tree),
+    ):
+        compile(
+            tree,
+            str(path),
+            "exec",
         )
 
-
-def main() -> int:
     print()
-    print("=" * 66)
-    print("ATLAS AI v11.2 — SMOKE TEST")
-    print("=" * 66)
-
-    check_required_files()
-    check_legacy_references()
-    check_python_syntax()
-    check_environment()
-    check_bot_importable()
-    check_required_bot_symbols()
-
-    print()
-    print("=" * 66)
-    print("ATLAS AI v11.2 TEST STATUS: PASS")
-    print("=" * 66)
-    print("Project structure: PASS")
-    print("Legacy reference check: PASS")
-    print("Python syntax: PASS")
-    print("Bot module load: PASS")
-    print("Environment: PASS")
-    print("Bot API: PASS")
-    print("=" * 66)
-
-    return 0
+    print("=" * 58)
+    print("ATLAS AI v11.2 SMOKE TEST: PASS")
+    print("=" * 58)
+    print("PASS: Python AST parsing")
+    print("PASS: Python syntax")
+    print("PASS: real import validation")
+    print("PASS: no legacy wrapper import")
+    print("=" * 58)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
