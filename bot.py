@@ -93,6 +93,13 @@ CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
 
 
 # ============================================================
+# V11.2 SAFETY CONFIG — ADDED FOR COMPATIBILITY
+# ============================================================
+V11_2_MAX_REPORT_CHARS = 9000
+V11_2_HEARTBEAT_ON_IDLE = False
+
+
+# ============================================================
 # MULTI-SOURCE VALIDATION LAYER
 # ============================================================
 # Exchange OHLCV/tickers are the execution-grade market layer.
@@ -4098,7 +4105,7 @@ def build_price_snapshot(results, updated_at=None):
     lines.append("───────────────────")
     usdt=fetch_usdt_toman_public()
     if usdt is None:
-        lines.append("💵 🟡 نرخ تتر  :   در دسترس نیست")
+        lines.append("💵 🟡نرخ تتر  :   در دسترس نیست")
     else:
         lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
     lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
