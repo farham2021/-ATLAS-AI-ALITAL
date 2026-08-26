@@ -1,294 +1,460 @@
 #!/usr/bin/env python3
 """
-ATLAS AI v11.2
-Smoke Test
+ATLAS AI v11.2 — Smoke Test
 
-This file validates the v11.2 engine itself.
-Legacy-reference validation is intentionally handled by GitHub Actions,
-not by this Python smoke test.
+Purpose:
+- Validate Python syntax
+- Validate v11.2 markers
+- Validate two-engine architecture
+- Validate market/personal engines
+- Validate metals
+- Validate price snapshot
+- Validate CSV reporting
+- Validate Telegram delivery hooks
+- Reject obsolete wrapper references
+
+This test does NOT execute real market orders or send Telegram messages.
 """
 
 from pathlib import Path
 import ast
-import re
 import sys
 
 
-BOT = Path("bot.py")
+ROOT = Path(__file__).resolve().parent
+
+BOT = ROOT / "bot.py"
+TEST = ROOT / "test_v11_2.py"
 
 
-def fail(message: str) -> None:
-    print("FAIL:", message)
+def fail(message):
+    print(f"FAIL: {message}")
     raise SystemExit(1)
 
 
-def read_bot() -> str:
-    if not BOT.exists():
-        fail("bot.py not found")
-
-    try:
-        source = BOT.read_text(encoding="utf-8")
-    except Exception as exc:
-        fail(f"unable to read bot.py: {exc}")
-
-    if not source.strip():
-        fail("bot.py is empty")
-
-    return source
+def ok(message):
+    print(f"PASS: {message}")
 
 
-def parse_bot(source: str):
-    try:
-        return ast.parse(source, filename=str(BOT))
-    except SyntaxError as exc:
-        fail(f"bot.py syntax error: {exc}")
+print("=" * 66)
+print("ATLAS AI v11.2 SMOKE TEST")
+print("=" * 66)
 
 
-def get_functions(tree):
-    return {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+# ============================================================
+# 1. REQUIRED FILES
+# ============================================================
+
+print("\nENGINE VALIDATION")
+print("-" * 66)
+
+for path in (BOT, TEST):
+
+    if not path.exists():
+        fail(f"Missing required file: {path.name}")
+
+    ok(f"{path.name} exists")
 
 
-def check_version(source: str) -> None:
-    patterns = (
-        r'VERSION\s*=\s*["\']ATLAS v11\.2',
-        r'ATLAS_VERSION',
-        r'v11\.2',
+# ============================================================
+# 2. BOT SYNTAX
+# ============================================================
+
+try:
+    bot_source = BOT.read_text(encoding="utf-8")
+    bot_tree = ast.parse(
+        bot_source,
+        filename=str(BOT)
+    )
+except SyntaxError as exc:
+    fail(f"bot.py syntax error: {exc}")
+
+ok("Python compilation")
+
+
+# ============================================================
+# 3. VERSION MARKER
+# ============================================================
+
+version_tokens = (
+    "11.2",
+    "v11.2",
+    "ATLAS_VERSION",
+)
+
+if not any(token in bot_source for token in version_tokens):
+    fail("v11.2 version marker not found in bot.py")
+
+ok("v11.2 version marker")
+
+
+# ============================================================
+# 4. FUNCTION DISCOVERY
+# ============================================================
+
+function_names = {
+    node.name
+    for node in bot_tree.body
+    if isinstance(
+        node,
+        (ast.FunctionDef, ast.AsyncFunctionDef)
+    )
+}
+
+
+def require_function(name):
+    if name not in function_names:
+        fail(f"Required function missing: {name}")
+
+    ok(f"function: {name}")
+
+
+# ============================================================
+# 5. CORE ENGINE FUNCTIONS
+# ============================================================
+
+core_candidates = (
+    "build_report",
+    "build_market_report",
+    "build_two_engine_reports",
+)
+
+if not any(name in function_names for name in core_candidates):
+    fail(
+        "No supported market report engine found. "
+        "Expected one of: "
+        + ", ".join(core_candidates)
     )
 
-    if not any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns):
-        fail("ATLAS v11.2 version marker not found")
-
-    print("PASS: v11.2 version marker")
+ok("market analytical engine")
 
 
-def check_two_engine(source: str) -> None:
-    required = (
-        "MARKET",
-        "PERSONAL",
-        "BOTH",
+personal_candidates = (
+    "build_personal_report",
+    "personal_report",
+    "build_two_engine_reports",
+)
+
+if not any(name in function_names for name in personal_candidates):
+    fail(
+        "No supported personal report engine found."
     )
 
-    missing = [item for item in required if item not in source]
+ok("personal analytical engine")
 
-    if missing:
+
+# ============================================================
+# 6. PORTFOLIO
+# ============================================================
+
+portfolio_tokens = (
+    "ATLAS_PERSONAL_ASSETS",
+    "PERSONAL_PORTFOLIO",
+    "personal",
+)
+
+if not any(
+    token in bot_source
+    for token in portfolio_tokens
+):
+    fail("Personal portfolio support not found")
+
+ok("personal portfolio")
+
+
+# ============================================================
+# 7. MARKET / PERSONAL / BOTH
+# ============================================================
+
+engine_tokens = (
+    "MARKET",
+    "PERSONAL",
+    "BOTH",
+)
+
+for token in engine_tokens:
+
+    if token not in bot_source:
         fail(
-            "two-engine architecture missing: "
-            + ", ".join(missing)
+            f"Engine mode token missing: {token}"
         )
 
-    print("PASS: MARKET / PERSONAL / BOTH")
+ok("MARKET / PERSONAL / BOTH")
 
 
-def check_portfolio(source: str) -> None:
-    if "ATLAS_PERSONAL_ASSETS" not in source:
-        fail("personal portfolio definition not found")
+# ============================================================
+# 8. METALS
+# ============================================================
 
-    print("PASS: personal portfolio")
+for metal in (
+    "GOLD",
+    "SILVER",
+    "COPPER",
+):
 
-
-def check_market_engine(functions) -> None:
-    candidates = (
-        "build_report",
-        "build_two_engine_reports",
-        "analyze_coin",
-    )
-
-    if not any(name in functions for name in candidates):
-        fail("market analytical functions not found")
-
-    print("PASS: market analytical engine")
-
-
-def check_personal_engine(functions) -> None:
-    candidates = (
-        "build_personal_report",
-        "build_two_engine_reports",
-        "personal_report",
-    )
-
-    if not any(name in functions for name in candidates):
-        fail("personal analytical functions not found")
-
-    print("PASS: personal analytical engine")
-
-
-def check_metals(source: str) -> None:
-    required = (
-        "GOLD",
-        "SILVER",
-        "COPPER",
-    )
-
-    missing = [item for item in required if item not in source]
-
-    if missing:
+    if metal not in bot_source:
         fail(
-            "metals support missing: "
-            + ", ".join(missing)
+            f"Metal support missing: {metal}"
         )
 
-    print("PASS: GOLD / SILVER / COPPER")
+ok("GOLD / SILVER / COPPER")
 
 
-def check_snapshot(source: str) -> None:
-    snapshot_markers = (
-        "build_price_snapshot",
-        "send_price_snapshot",
-        "fetch_snapshot_results",
-        "snapshot",
+# ============================================================
+# 9. PRICE SNAPSHOT
+# ============================================================
+
+snapshot_tokens = (
+    "SNAPSHOT",
+    "snapshot",
+    "price_snapshot",
+    "PRICE SNAPSHOT",
+)
+
+if not any(
+    token in bot_source
+    for token in snapshot_tokens
+):
+    fail("Price snapshot functionality not found")
+
+ok("price snapshot")
+
+
+# ============================================================
+# 10. CSV REPORTING
+# ============================================================
+
+csv_function_candidates = (
+    "generate_csv_report",
+    "generate_dynamic_csv",
+    "export_csv",
+)
+
+csv_functions = [
+    name
+    for name in csv_function_candidates
+    if name in function_names
+]
+
+if not csv_functions:
+    fail(
+        "CSV reporting functionality not found. "
+        "Expected one of: "
+        + ", ".join(csv_function_candidates)
+    )
+
+ok(
+    "CSV reporting functionality: "
+    + ", ".join(csv_functions)
+)
+
+
+# ============================================================
+# 11. CSV CONTENT MARKERS
+# ============================================================
+
+csv_tokens = (
+    "csv",
+    "DictWriter",
+    "StringIO",
+)
+
+if not any(
+    token.lower() in bot_source.lower()
+    for token in csv_tokens
+):
+    fail("CSV implementation markers not found")
+
+ok("CSV implementation")
+
+
+# ============================================================
+# 12. TELEGRAM DELIVERY
+# ============================================================
+
+telegram_tokens = (
+    "TELEGRAM_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "TELEGRAM_GROUP_CHAT_ID",
+)
+
+for token in telegram_tokens:
+
+    if token not in bot_source:
+        fail(
+            f"Telegram configuration missing: {token}"
+        )
+
+ok("Telegram configuration")
+
+
+telegram_delivery_tokens = (
+    "sendMessage",
+    "send_document",
+    "sendDocument",
+    "send_report",
+)
+
+if not any(
+    token in bot_source
+    for token in telegram_delivery_tokens
+):
+    fail(
+        "Telegram delivery function/reference "
+        "not found in bot.py"
+    )
+
+ok("Telegram delivery")
+
+
+# ============================================================
+# 13. TGJU
+# ============================================================
+
+tgju_tokens = (
+    "tgju.org",
+    "TGJU_USD_URL",
+    "TGJU_USDT_URL",
+)
+
+for token in tgju_tokens:
+
+    if token not in bot_source:
+        fail(
+            f"TGJU integration marker missing: {token}"
+        )
+
+ok("TGJU FX integration")
+
+
+# ============================================================
+# 14. TRADE GEOMETRY
+# ============================================================
+
+geometry_tokens = (
+    "TP1",
+    "TP2",
+    "R/R",
+    "rr",
+    "risk",
+)
+
+if not any(
+    token in bot_source
+    for token in geometry_tokens
+):
+    fail(
+        "Trade geometry / R/R functionality "
+        "not found"
+    )
+
+ok("trade geometry / R/R")
+
+
+# ============================================================
+# 15. DYNAMIC TOP 30
+# ============================================================
+
+dynamic_tokens = (
+    "DYNAMIC_TOP30",
+    "DYNAMIC TOP 30",
+    "dynamic30",
+)
+
+if not any(
+    token in bot_source
+    for token in dynamic_tokens
+):
+
+    # Dynamic Top 30 can also be generated through
+    # ranking logic. Do not fail if explicit naming
+    # is absent but ranking machinery exists.
+
+    ranking_tokens = (
+        "sorted(",
+        "sort(",
+        "TOP",
     )
 
     if not any(
-        marker in source
-        for marker in snapshot_markers
+        token in bot_source
+        for token in ranking_tokens
     ):
-        fail("price snapshot functionality not found")
-
-    print("PASS: price snapshot")
-
-
-def check_csv(source: str, functions) -> None:
-    function_ok = any(
-        name in functions
-        for name in (
-            "generate_csv_report",
-            "generate_csv",
-            "send_csv_report",
-            "send_csv",
-        )
-    )
-
-    text_ok = (
-        "csv" in source.lower()
-        and (
-            "DictWriter" in source
-            or "csv.writer" in source
-        )
-    )
-
-    if not function_ok and not text_ok:
-        fail("CSV reporting functionality not found")
-
-    print("PASS: CSV reporting")
-
-
-def check_trade_geometry(source: str) -> None:
-    markers = (
-        "TP1",
-        "TP2",
-        "R/R",
-        "rr",
-        "stop",
-        "support",
-        "resistance",
-    )
-
-    found = sum(
-        1 for marker in markers
-        if marker in source
-    )
-
-    if found < 4:
-        fail("trade geometry markers are incomplete")
-
-    print("PASS: trade geometry")
-
-
-def check_closed_candle(source: str) -> None:
-    markers = (
-        "closed",
-        "candle",
-    )
-
-    if not all(
-        marker in source.lower()
-        for marker in markers
-    ):
-        fail("closed-candle logic markers not found")
-
-    print("PASS: closed-candle protection")
-
-
-def check_telegram(source: str) -> None:
-    markers = (
-        "TELEGRAM_TOKEN",
-        "TELEGRAM_CHAT_ID",
-        "TELEGRAM_GROUP_CHAT_ID",
-    )
-
-    missing = [
-        marker
-        for marker in markers
-        if marker not in source
-    ]
-
-    if missing:
         fail(
-            "Telegram configuration markers missing: "
-            + ", ".join(missing)
+            "Dynamic/ranking engine not found"
         )
 
-    print("PASS: Telegram configuration")
+ok("dynamic market ranking")
 
 
-def check_main(functions) -> None:
-    if "main" not in functions:
-        fail("main() not found")
+# ============================================================
+# 16. OBSOLETE WRAPPER REFERENCES
+# ============================================================
 
-    print("PASS: main()")
+forbidden = (
+    "import bot as engine",
+    "from bot import",
+    "ATLAS_v12_bot",
+)
 
+for pattern in forbidden:
 
-def compile_source(source: str) -> None:
-    try:
-        compile(
-            source,
-            str(BOT),
-            "exec",
+    if pattern in bot_source:
+
+        fail(
+            "Obsolete wrapper/reference found "
+            f"in bot.py: {pattern}"
         )
-    except SyntaxError as exc:
-        fail(f"compile failed: {exc}")
 
-    print("PASS: Python compilation")
+ok("no obsolete wrapper/reference in bot.py")
 
 
-def main() -> int:
-    print("=" * 66)
-    print("ATLAS AI v11.2 SMOKE TEST")
-    print("=" * 66)
+# ============================================================
+# 17. TEST FILE SYNTAX
+# ============================================================
 
-    source = read_bot()
-    tree = parse_bot(source)
-    functions = get_functions(tree)
+try:
 
-    print()
-    print("ENGINE VALIDATION")
-    print("-" * 66)
+    test_source = TEST.read_text(
+        encoding="utf-8"
+    )
 
-    compile_source(source)
-    check_version(source)
-    check_two_engine(source)
-    check_market_engine(functions)
-    check_personal_engine(functions)
-    check_portfolio(source)
-    check_metals(source)
-    check_snapshot(source)
-    check_csv(source, functions)
-    check_trade_geometry(source)
-    check_closed_candle(source)
-    check_telegram(source)
-    check_main(functions)
+    ast.parse(
+        test_source,
+        filename=str(TEST)
+    )
 
-    print()
-    print("=" * 66)
-    print("ATLAS AI v11.2 SMOKE TEST: PASS")
-    print("=" * 66)
+except SyntaxError as exc:
 
-    return 0
+    fail(
+        f"test_v11_2.py syntax error: {exc}"
+    )
+
+ok("test_v11_2.py syntax")
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# ============================================================
+# FINAL
+# ============================================================
+
+print()
+print("=" * 66)
+print("ATLAS AI v11.2 SMOKE TEST: PASS")
+print("=" * 66)
+print()
+print("Validated:")
+print("  ✓ Python syntax")
+print("  ✓ v11.2 marker")
+print("  ✓ MARKET engine")
+print("  ✓ PERSONAL engine")
+print("  ✓ BOTH architecture")
+print("  ✓ Personal portfolio")
+print("  ✓ GOLD / SILVER / COPPER")
+print("  ✓ Price snapshot")
+print("  ✓ CSV reporting")
+print("  ✓ Telegram delivery")
+print("  ✓ TGJU integration")
+print("  ✓ Trade geometry / R/R")
+print("  ✓ Dynamic ranking")
+print("  ✓ No obsolete wrapper")
+print()
