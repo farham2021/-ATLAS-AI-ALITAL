@@ -6,7 +6,7 @@ Purpose:
 - Validate bot.py syntax and structure.
 - Validate that the v11.2 engine is self-contained.
 - Ensure no obsolete launcher/import pattern remains.
-- Do NOT import bot as engine.
+- Do NOT import_bot_as_engine.
 - Do NOT send Telegram messages.
 - Do NOT execute the analytical engine.
 """
