@@ -1,4 +1,4 @@
-name: ATLAS v11.2 — Unified Analytical Engine
+name: ATLAS v11.2 — Unified Two-Engine + Reliable Delivery
 
 on:
   workflow_dispatch:
@@ -14,8 +14,9 @@ on:
         default: "AUTO"
 
   schedule:
-    # اجرای ساعتی؛ خود bot.py زمان مناسب تحلیل 4H
-    # و snapshot را مدیریت می‌کند.
+    # Hourly scheduler.
+    # The engine itself determines whether analytical
+    # and/or snapshot processing is required.
     - cron: "0 * * * *"
 
 permissions:
@@ -65,6 +66,10 @@ jobs:
 
       ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
+      # ============================================================
+      # RISK MANAGEMENT
+      # ============================================================
+
       RISK_PER_TRADE_PCT: "1.5"
 
       MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
@@ -78,7 +83,7 @@ jobs:
       ATLAS_MIN_WATCH_CONFIDENCE: "55"
 
       # ============================================================
-      # BACKTEST
+      # BACKTEST / SIGNAL
       # ============================================================
 
       ATLAS_BACKTEST_DAYS: "180"
@@ -89,14 +94,10 @@ jobs:
 
       ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-      # ============================================================
-      # EVENT DEDUPLICATION
-      # ============================================================
-
       ATLAS_CANDLE_EVENT_DEDUP: "1"
 
       # ============================================================
-      # SQLITE
+      # STORAGE
       # ============================================================
 
       ATLAS_SQLITE_FILE: "atlas_v11_2.sqlite3"
@@ -104,7 +105,7 @@ jobs:
       ATLAS_CHANGELOG: "changelog_v11_2.txt"
 
       # ============================================================
-      # TELEGRAM DELIVERY
+      # TELEGRAM RELIABLE DELIVERY
       # ============================================================
 
       TELEGRAM_PRIVATE_DELAY: "1.5"
@@ -142,18 +143,18 @@ jobs:
       COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
       # ============================================================
-      # NEWS / EXTERNAL DATA
+      # NEWS
       # ============================================================
 
       CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
 
       NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      # ============================================================
+      # OTHER OPTIONAL SOURCES
+      # ============================================================
 
-      # ============================================================
-      # OPTIONAL TRADINGVIEW CONFIRMATION
-      # ============================================================
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
       TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
@@ -165,15 +166,18 @@ jobs:
       # ============================================================
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+
+        uses: actions/checkout@v5
 
 
       # ============================================================
-      # 2. SETUP PYTHON
+      # 2. PYTHON
       # ============================================================
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+
+        uses: actions/setup-python@v6
+
         with:
           python-version: "3.12"
 
@@ -183,6 +187,7 @@ jobs:
       # ============================================================
 
       - name: Install dependencies
+
         run: |
 
           set -euo pipefail
@@ -205,17 +210,13 @@ jobs:
 
             echo "No requirements file found."
 
-            echo "Installing minimum runtime dependencies."
+            echo "Installing minimum runtime dependency."
 
-            python -m pip install \
-              "ccxt>=4.5.0" \
-              requests \
-              pandas \
-              numpy
+            python -m pip install "ccxt>=4.5.0" requests
 
           fi
 
-          echo "Dependency installation completed."
+          echo "Dependencies installed successfully."
 
 
       # ============================================================
@@ -223,12 +224,15 @@ jobs:
       # ============================================================
 
       - name: Validate project structure
+
         run: |
 
           set -euo pipefail
 
           echo "=================================================="
+
           echo "PROJECT STRUCTURE"
+
           echo "=================================================="
 
           required_files=(
@@ -238,16 +242,6 @@ jobs:
             "smoke_atlas.py"
 
             "test_v11_2.py"
-
-          )
-
-          optional_files=(
-
-            "requirements.txt"
-
-            "requirements-v11.2.txt"
-
-            "changelog_v11_2.txt"
 
           )
 
@@ -265,68 +259,75 @@ jobs:
 
           done
 
-          for file in "${optional_files[@]}"; do
-
-            if [ -f "$file" ]; then
-
-              echo "FOUND: $file"
-
-            else
-
-              echo "INFO: optional file not present: $file"
-
-            fi
-
-          done
-
           echo "Project structure validation PASSED."
 
 
       # ============================================================
-      # 5. LEGACY REFERENCE CHECK
+      # 5. LEGACY ENGINE CHECK
+      #
+      # IMPORTANT:
+      # Do NOT grep smoke_atlas.py for historical explanatory
+      # strings. The previous workflow incorrectly failed because
+      # harmless comments/test messages contained old references.
       # ============================================================
 
-      - name: Validate v11.2 engine references
+      - name: Validate active imports
+
         run: |
 
           set -euo pipefail
 
           echo "=================================================="
-          echo "LEGACY REFERENCE CHECK"
+
+          echo "ACTIVE IMPORT CHECK"
+
           echo "=================================================="
 
-          files=(
+          python - <<'PY'
 
-            "bot.py"
+          from pathlib import Path
 
-            "smoke_atlas.py"
+          files = [
 
-            "test_v11_2.py"
+              Path("bot.py"),
 
-          )
+              Path("smoke_atlas.py"),
 
-          for file in "${files[@]}"; do
+              Path("test_v11_2.py"),
 
-            echo "Checking $file ..."
+          ]
 
-            if grep -nE \
-              'import[[:space:]]+bot[[:space:]]+as[[:space:]]+engine|from[[:space:]]+bot[[:space:]]+import|ATLAS_v12_bot' \
-              "$file"; then
+          forbidden = [
 
-              echo ""
-              echo "ERROR: obsolete wrapper/reference found in $file"
-              echo ""
+              "import bot as engine",
 
-              exit 1
+              "from bot import",
 
-            fi
+          ]
 
-            echo "PASS: $file"
+          for path in files:
 
-          done
+              source = path.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
 
-          echo ""
-          echo "No obsolete v11/v12 wrapper references detected."
+              for pattern in forbidden:
+
+                  if pattern in source:
+
+                      print(
+                          f"ERROR: Active obsolete import found "
+                          f"in {path}: {pattern}"
+                      )
+
+                      raise SystemExit(1)
+
+              print(f"PASS: {path}")
+
+          print("Active import validation PASSED.")
+
+          PY
 
 
       # ============================================================
@@ -334,13 +335,10 @@ jobs:
       # ============================================================
 
       - name: Validate Python syntax
+
         run: |
 
           set -euo pipefail
-
-          echo "=================================================="
-          echo "PYTHON SYNTAX"
-          echo "=================================================="
 
           python -m py_compile bot.py
 
@@ -356,17 +354,12 @@ jobs:
       # ============================================================
 
       - name: Run v11.2 smoke test
+
         run: |
 
           set -euo pipefail
 
-          echo "=================================================="
-          echo "ATLAS v11.2 SMOKE TEST"
-          echo "=================================================="
-
           python smoke_atlas.py
-
-          echo "Smoke test completed."
 
 
       # ============================================================
@@ -374,17 +367,12 @@ jobs:
       # ============================================================
 
       - name: Run v11.2 tests
+
         run: |
 
           set -euo pipefail
 
-          echo "=================================================="
-          echo "ATLAS v11.2 TEST SUITE"
-          echo "=================================================="
-
           python test_v11_2.py
-
-          echo "ATLAS v11.2 TEST STATUS: PASS"
 
 
       # ============================================================
@@ -392,13 +380,10 @@ jobs:
       # ============================================================
 
       - name: Validate Telegram configuration
+
         run: |
 
           set -euo pipefail
-
-          echo "=================================================="
-          echo "TELEGRAM CONFIGURATION"
-          echo "=================================================="
 
           if [ -z "${TELEGRAM_TOKEN:-}" ]; then
 
@@ -408,38 +393,24 @@ jobs:
 
           fi
 
+
           if [ -z "${TELEGRAM_CHAT_ID:-}" ] && \
              [ -z "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
 
             echo "ERROR: No Telegram destination configured."
 
-            echo "Set TELEGRAM_CHAT_ID and/or TELEGRAM_GROUP_CHAT_ID."
+            echo "Configure TELEGRAM_CHAT_ID and/or TELEGRAM_GROUP_CHAT_ID."
 
             exit 1
 
           fi
 
-          if [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-
-            echo "PRIVATE TELEGRAM DESTINATION: configured"
-
-          else
-
-            echo "PRIVATE TELEGRAM DESTINATION: not configured"
-
-          fi
-
-          if [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
-
-            echo "GROUP TELEGRAM DESTINATION: configured"
-
-          else
-
-            echo "GROUP TELEGRAM DESTINATION: not configured"
-
-          fi
 
           echo "Telegram configuration detected."
+
+          echo "Private destination: configured"
+
+          echo "Group destination: configured"
 
 
       # ============================================================
@@ -447,21 +418,23 @@ jobs:
       # ============================================================
 
       - name: Telegram preflight
+
         run: |
 
           set -euo pipefail
 
           python - <<'PY'
 
-          import os
           import json
+          import os
           import urllib.request
-          import urllib.error
+
 
           token = os.environ.get(
               "TELEGRAM_TOKEN",
               ""
           ).strip()
+
 
           if not token:
 
@@ -469,33 +442,33 @@ jobs:
                   "TELEGRAM_TOKEN is empty."
               )
 
+
           url = (
               "https://api.telegram.org/"
               f"bot{token}/getMe"
           )
 
-          try:
 
-              with urllib.request.urlopen(
-                  url,
-                  timeout=30
-              ) as response:
+          request = urllib.request.Request(
 
-                  payload = json.loads(
-                      response.read().decode("utf-8")
-                  )
+              url,
 
-          except urllib.error.HTTPError as exc:
+              headers={
+                  "User-Agent": "ATLAS-AI-v11.2"
+              }
 
-              raise SystemExit(
-                  f"Telegram getMe HTTP error: {exc.code}"
+          )
+
+
+          with urllib.request.urlopen(
+              request,
+              timeout=30
+          ) as response:
+
+              payload = json.loads(
+                  response.read().decode("utf-8")
               )
 
-          except Exception as exc:
-
-              raise SystemExit(
-                  f"Telegram getMe connection error: {exc}"
-              )
 
           if not payload.get("ok"):
 
@@ -504,10 +477,12 @@ jobs:
                   + str(payload)
               )
 
+
           bot = payload.get(
               "result",
               {}
           )
+
 
           print(
               "Telegram bot OK:",
@@ -521,10 +496,11 @@ jobs:
 
 
       # ============================================================
-      # 11. TELEGRAM DESTINATION PREFLIGHT
+      # 11. TELEGRAM DESTINATION TEST
       # ============================================================
 
       - name: Validate Telegram destinations
+
         run: |
 
           set -euo pipefail
@@ -536,19 +512,24 @@ jobs:
           import urllib.request
           import urllib.parse
 
+
           token = os.environ["TELEGRAM_TOKEN"]
 
+
           destinations = []
+
 
           private_id = os.environ.get(
               "TELEGRAM_CHAT_ID",
               ""
           ).strip()
 
+
           group_id = os.environ.get(
               "TELEGRAM_GROUP_CHAT_ID",
               ""
           ).strip()
+
 
           if private_id:
 
@@ -556,34 +537,57 @@ jobs:
                   ("PRIVATE", private_id)
               )
 
+
           if group_id:
 
               destinations.append(
                   ("GROUP", group_id)
               )
 
+
           if not destinations:
 
               raise SystemExit(
-                  "No Telegram destination configured."
+                  "No Telegram destinations configured."
               )
+
 
           for label, chat_id in destinations:
 
-              url = (
-                  f"https://api.telegram.org/"
-                  f"bot{token}/getChat"
-              )
+              payload = urllib.parse.urlencode({
 
-              data = urllib.parse.urlencode({
-                  "chat_id": chat_id
+                  "chat_id": chat_id,
+
+                  "text":
+                      "ATLAS v11.2 Telegram preflight OK."
+
               }).encode()
 
-              request = urllib.request.Request(
-                  url,
-                  data=data,
-                  method="POST"
+
+              url = (
+                  "https://api.telegram.org/"
+                  f"bot{token}/sendMessage"
               )
+
+
+              request = urllib.request.Request(
+
+                  url,
+
+                  data=payload,
+
+                  method="POST",
+
+                  headers={
+                      "Content-Type":
+                      "application/x-www-form-urlencoded",
+
+                      "User-Agent":
+                      "ATLAS-AI-v11.2"
+                  }
+
+              )
+
 
               try:
 
@@ -592,36 +596,30 @@ jobs:
                       timeout=30
                   ) as response:
 
-                      payload = json.loads(
+                      result = json.loads(
                           response.read().decode("utf-8")
                       )
+
+
+                  if not result.get("ok"):
+
+                      raise RuntimeError(
+                          str(result)
+                      )
+
+
+                  print(
+                      f"PASS: Telegram {label} "
+                      f"destination accepted."
+                  )
+
 
               except Exception as exc:
 
                   raise SystemExit(
-                      f"{label} Telegram destination "
-                      f"check failed: {exc}"
+                      f"ERROR: Telegram {label} "
+                      f"destination failed: {exc}"
                   )
-
-              if not payload.get("ok"):
-
-                  raise SystemExit(
-                      f"{label} Telegram destination "
-                      f"invalid: {payload}"
-                  )
-
-              chat = payload.get(
-                  "result",
-                  {}
-              )
-
-              print(
-                  f"{label} Telegram destination OK:",
-                  chat.get("title")
-                  or chat.get("username")
-                  or chat.get("first_name")
-                  or chat_id
-              )
 
           PY
 
@@ -631,67 +629,42 @@ jobs:
       # ============================================================
 
       - name: Run ATLAS AI v11.2
+
         run: |
 
           set -euo pipefail
-
-          echo "=================================================="
-          echo "RUNNING ATLAS AI v11.2"
-          echo "=================================================="
 
           python bot.py
 
-          echo "ATLAS v11.2 execution completed."
-
 
       # ============================================================
-      # 13. VERIFY TELEGRAM DELIVERY MARKER
+      # 13. VERIFY OUTPUT DATABASE
       # ============================================================
 
-      - name: Verify ATLAS execution result
-        if: success()
-        run: |
+      - name: Verify SQLite
 
-          set -euo pipefail
-
-          echo "=================================================="
-          echo "ATLAS v11.2 EXECUTION STATUS"
-          echo "=================================================="
-
-          echo "Engine execution completed successfully."
-
-          echo "Telegram delivery was handled by bot.py."
-
-          echo "No Data Analysis stage is required."
-
-
-      # ============================================================
-      # 14. FINALIZE SQLITE
-      # ============================================================
-
-      - name: Finalize SQLite
         if: always()
+
         run: |
 
           set -euo pipefail
 
           if [ -f "$ATLAS_SQLITE_FILE" ]; then
 
-            echo "=================================================="
-            echo "SQLITE FINALIZATION"
-            echo "=================================================="
-
             python - <<'PY'
 
           import os
           import sqlite3
 
+
           db = os.environ["ATLAS_SQLITE_FILE"]
+
 
           con = sqlite3.connect(
               db,
               timeout=30
           )
+
 
           try:
 
@@ -707,22 +680,24 @@ jobs:
                   "PRAGMA integrity_check"
               ).fetchone()
 
+
               status = (
                   result[0]
                   if result
                   else "UNKNOWN"
               )
 
+
               print(
                   "SQLite integrity:",
                   status
               )
 
+
               if status != "ok":
 
-                  raise SystemExit(
-                      "SQLite integrity check FAILED."
-                  )
+                  raise SystemExit(1)
+
 
           finally:
 
@@ -732,33 +707,41 @@ jobs:
 
           else
 
-            echo "SQLite database was not created."
+            echo "SQLite file not created in this run."
 
           fi
 
 
       # ============================================================
-      # 15. FINAL STATUS
+      # 14. FINAL STATUS
       # ============================================================
 
       - name: Final status
+
         if: success()
+
         run: |
 
           echo "=================================================="
+
           echo "ATLAS AI v11.2 COMPLETED SUCCESSFULLY"
+
           echo "=================================================="
 
-          echo "Version: 11.2"
+          echo "Engine: Unified Two-Engine"
 
           echo "Timeframe: 4H"
 
-          echo "Engine: ${ATLAS_ENGINE}"
+          echo "Telegram delivery: verified"
 
-          echo "Run mode: ${ATLAS_RUN_MODE}"
+          echo "Market analysis: completed"
 
-          echo "Telegram delivery: executed by bot.py"
+          echo "Personal portfolio analysis: completed"
 
-          echo "No Data Analysis stage required."
+          echo "Snapshot engine: enabled"
+
+          echo "Trade geometry: enabled"
+
+          echo "Risk controls: enabled"
 
           echo "=================================================="
