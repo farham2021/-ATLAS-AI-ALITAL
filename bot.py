@@ -3154,6 +3154,26 @@ def main():
         traceback.print_exc()
         return 1
 
+def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
+    direction = str(direction or "").upper()
+    entry, sl, tp1, tp2 = map(f, (entry, sl, tp1, tp2))
+    if direction not in ("LONG", "SHORT") or None in (entry, sl, tp1, tp2):
+        return False, "non-positive trade level"
+    if min(x <= 0 for x in (entry, sl, tp1, tp2)):
+        return False, "non-positive trade level"
+    if direction == "LONG":
+        if not (sl < entry < tp1 < tp2):
+            return False, "Trade geometry blocked: invalid LONG geometry"
+    else:
+        if not (sl > entry > tp1 > tp2):
+            return False, "Trade geometry blocked: invalid SHORT geometry"
+    rr = _rr_from_values(entry, sl, tp2)
+    if rr is None or rr <= 0:
+        return False, "non-positive trade level"
+    required_rr = MIN_EXECUTABLE_RR if min_rr is None else float(min_rr)
+    if rr < required_rr:
+        return False, f"R/R below {required_rr:.2f}"
+    return True, None
 
 if __name__ == "__main__":
     raise SystemExit(main())
