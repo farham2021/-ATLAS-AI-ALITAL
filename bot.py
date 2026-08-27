@@ -2330,29 +2330,27 @@ def weekly_pivot(rows):
 def multi_source_validation(symbol, exchange_price=None):
     return {}
 
-
 def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
     """Deterministic safety gate: reject impossible/contradictory trade geometry."""
     direction = str(direction or "").upper()
     entry, sl, tp1, tp2 = map(f, (entry, sl, tp1, tp2))
     if direction not in ("LONG", "SHORT") or None in (entry, sl, tp1, tp2):
-        return False, "missing trade levels"
+        return False, "non-positive trade level"
     if min(x <= 0 for x in (entry, sl, tp1, tp2)):
         return False, "non-positive trade level"
     if direction == "LONG":
         if not (sl < entry < tp1 < tp2):
-            return False, "invalid LONG geometry"
+            return False, "Trade geometry blocked: invalid LONG geometry"
     else:
         if not (sl > entry > tp1 > tp2):
-            return False, "invalid SHORT geometry"
+            return False, "Trade geometry blocked: invalid SHORT geometry"
     rr = _rr_from_values(entry, sl, tp2)
     if rr is None or rr <= 0:
-        return False, "invalid R/R"
+        return False, "non-positive trade level"
     required_rr = MIN_EXECUTABLE_RR if min_rr is None else float(min_rr)
     if rr < required_rr:
         return False, f"R/R below {required_rr:.2f}"
     return True, None
-
 
 # ============================================================
 # MAIN
