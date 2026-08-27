@@ -106,7 +106,6 @@ CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog_v11_2.txt")
 MAX_WORKERS = int(os.environ.get("ATLAS_MAX_WORKERS", "5"))
 CACHE_TTL = int(os.environ.get("ATLAS_CACHE_TTL", "300"))
 
-# فعال‌سازی خروجی صوتی
 ENABLE_VOICE_REPORT = os.environ.get("ATLAS_ENABLE_VOICE", "1") == "1"
 VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
 VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
@@ -114,7 +113,7 @@ AUTO_SEND_VOICE = os.environ.get("ATLAS_AUTO_SEND_VOICE", "1") == "1"
 
 
 # ============================================================
-# MARKET SESSIONS (هماهنگی با سشن‌های بازار کریپتو)
+# MARKET SESSIONS
 # ============================================================
 
 MARKET_SESSIONS = {
@@ -125,7 +124,6 @@ MARKET_SESSIONS = {
 }
 
 def get_current_session(dt=None):
-    """تشخیص سشن فعلی بازار"""
     dt = dt or now_utc()
     hour = dt.hour
     for name, session in MARKET_SESSIONS.items():
@@ -160,8 +158,10 @@ ATLAS_PERSONAL_ASSETS = [
 ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
 METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
 METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
+
+
 # ============================================================
-# PUBLIC USDT SOURCES (برای snapshot)
+# PUBLIC USDT SOURCES
 # ============================================================
 
 PUBLIC_USDT_PAGES = (
@@ -544,7 +544,7 @@ def support_resistance(rows):
 
 
 # ============================================================
-# 1. VOICE SUMMARY (گزارش خلاصه صوتی)
+# 1. VOICE SUMMARY
 # ============================================================
 
 def generate_voice_summary(results, btc_regime, breadth):
@@ -577,11 +577,10 @@ def generate_voice_summary(results, btc_regime, breadth):
 
 
 # ============================================================
-# 2. MARKET QUALITY FILTER (فیلتر کیفیت بازار)
+# 2. MARKET QUALITY FILTER
 # ============================================================
 
 def get_market_quality(btc_regime, breadth, news_impact):
-    """محاسبه کیفیت بازار"""
     score = 50
     
     if btc_regime and btc_regime.get("regime") == "RISK_ON":
@@ -620,7 +619,7 @@ def get_market_quality(btc_regime, breadth, news_impact):
 
 
 # ============================================================
-# 3. SIGNAL RANKING (جدول رتبه‌بندی)
+# 3. SIGNAL RANKING
 # ============================================================
 
 def rank_signals(results, limit=5):
@@ -638,7 +637,7 @@ def rank_signals(results, limit=5):
 
 
 # ============================================================
-# 4. GRAPHICAL PRICE DISPLAY (نمایش تغییرات قیمت)
+# 4. GRAPHICAL PRICE DISPLAY
 # ============================================================
 
 def graphical_price_display(price, prev_price, max_bars=8):
@@ -654,7 +653,7 @@ def graphical_price_display(price, prev_price, max_bars=8):
 
 
 # ============================================================
-# 5. RISK REPORT (گزارش ریسک بازار)
+# 5. RISK REPORT
 # ============================================================
 
 def generate_risk_report(btc_regime, breadth, market_quality, portfolio_risk=0):
@@ -697,7 +696,7 @@ def generate_risk_report(btc_regime, breadth, market_quality, portfolio_risk=0):
 
 
 # ============================================================
-# 6. LEVEL BREAK ALERTS (هشدار شکست سطوح)
+# 6. LEVEL BREAK ALERTS
 # ============================================================
 
 def detect_level_breaks(price, support, resistance, prev_price=None):
@@ -722,7 +721,7 @@ def detect_level_breaks(price, support, resistance, prev_price=None):
 
 
 # ============================================================
-# 7. MULTI-TIMEFRAME CONFIRMATION (تأیید چند تایم‌فریم)
+# 7. MULTI-TIMEFRAME CONFIRMATION
 # ============================================================
 
 def multi_timeframe_confirmation(coin, tf_data):
@@ -753,7 +752,7 @@ def multi_timeframe_confirmation(coin, tf_data):
 
 
 # ============================================================
-# 8. ENTRY QUALITY SCORE (امتیاز کیفیت ورود)
+# 8. ENTRY QUALITY SCORE
 # ============================================================
 
 def entry_quality_score(entry, sl, volume_ratio, rsi, trend, sr_confidence):
@@ -783,7 +782,7 @@ def entry_quality_score(entry, sl, volume_ratio, rsi, trend, sr_confidence):
 
 
 # ============================================================
-# 9. EXIT SIGNALS (سیگنال‌های خروج)
+# 9. EXIT SIGNALS
 # ============================================================
 
 def generate_exit_signal(entry, current_price, direction, tp1, tp2, sl):
@@ -809,7 +808,7 @@ def generate_exit_signal(entry, current_price, direction, tp1, tp2, sl):
 
 
 # ============================================================
-# 10. SENTIMENT ANALYSIS (تحلیل احساسات)
+# 10. SENTIMENT ANALYSIS
 # ============================================================
 
 def analyze_sentiment(news_items, fear_greed=None):
@@ -846,7 +845,7 @@ def analyze_sentiment(news_items, fear_greed=None):
 
 
 # ============================================================
-# 11. CORRELATION ANALYSIS (تحلیل همبستگی)
+# 11. CORRELATION ANALYSIS
 # ============================================================
 
 def calculate_correlation(prices1, prices2):
@@ -886,7 +885,7 @@ def analyze_correlations(results):
 
 
 # ============================================================
-# 12. SMART VOLUME ANALYSIS (تحلیل حجم هوشمند)
+# 12. SMART VOLUME ANALYSIS
 # ============================================================
 
 def smart_volume_analysis(volume_ratio, avg_volume, current_volume):
@@ -902,7 +901,7 @@ def smart_volume_analysis(volume_ratio, avg_volume, current_volume):
 
 
 # ============================================================
-# 13. PATTERN RECOGNITION (تشخیص الگوهای تکراری)
+# 13. PATTERN RECOGNITION
 # ============================================================
 
 def detect_patterns(rows):
@@ -926,7 +925,7 @@ def detect_patterns(rows):
 
 
 # ============================================================
-# 14. WEEKLY ANALYSIS (تحلیل هفتگی)
+# 14. WEEKLY ANALYSIS
 # ============================================================
 
 def generate_weekly_analysis(results):
@@ -962,7 +961,7 @@ def generate_weekly_analysis(results):
 
 
 # ============================================================
-# 15. POSITION SIZING (پیشنهاد حجم ورود)
+# 15. POSITION SIZING
 # ============================================================
 
 def calculate_position_size(capital, risk_percent, entry, sl):
@@ -994,7 +993,7 @@ def get_position_suggestion(r, capital=10000):
 
 
 # ============================================================
-# 16. STOP LOSS ALERT (هشدار حد ضرر)
+# 16. STOP LOSS ALERT
 # ============================================================
 
 def check_stop_loss_alert(price, sl, distance_threshold=0.02):
@@ -1191,12 +1190,10 @@ def candle_event(coin, timeframe, rows):
 
 
 # ============================================================
-# ============================================================
 # MISSING FUNCTIONS - ADDED FOR COMPLETENESS
 # ============================================================
 
 def trend_from_rows(rows):
-    """تشخیص روند از کندل‌ها"""
     if not rows or len(rows) < 20:
         return "UNKNOWN"
     closes_list = [f(x[4]) for x in rows[-20:] if f(x[4]) is not None]
@@ -1209,18 +1206,15 @@ def trend_from_rows(rows):
     return "NEUTRAL"
 
 def _plan_is_allowed(r):
-    """بررسی اینکه آیا پلن معاملاتی مجاز است"""
     action = str(r.get("action", "")).upper()
     return action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BULLISH WATCH", "BEARISH WATCH")
 
 def _clear_trade_plan(r):
-    """پاک کردن اطلاعات معاملاتی"""
     for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4", "rr"):
         r[k] = None
     return r
 
 def _rr_from_values(entry, sl, tp2):
-    """محاسبه نسبت ریسک به ریوارد"""
     entry, sl, tp2 = f(entry), f(sl), f(tp2)
     if None in (entry, sl, tp2) or entry == sl:
         return None
@@ -1229,7 +1223,6 @@ def _rr_from_values(entry, sl, tp2):
     return reward / risk if risk > 0 else None
 
 def tf_snapshot(coin):
-    """گرفتن snapshot از تمام تایم‌فریم‌ها"""
     snapshots = {}
     for tf in ["1h", "4h", "1d", "1w", "1M"]:
         try:
@@ -1247,12 +1240,10 @@ def tf_snapshot(coin):
     return snapshots
 
 def price_consensus(coin):
-    """دریافت قیمت از چند منبع و اجماع"""
     prices = []
     sources = []
     errors = []
     
-    # تلاش از طریق CCXT
     try:
         ensure_exchanges()
         for eid in ("kcex", "okx", "bybit", "kucoin"):
@@ -1272,7 +1263,6 @@ def price_consensus(coin):
     
     avg_price = sum(prices) / len(prices)
     
-    # محاسبه کیفیت بر اساس پراکندگی قیمت‌ها
     if len(prices) >= 3:
         spread = (max(prices) - min(prices)) / avg_price * 100
         if spread < 0.5:
@@ -1287,11 +1277,9 @@ def price_consensus(coin):
     return avg_price, sources, quality, 0, errors
 
 def candle_pattern(rows):
-    """تشخیص الگوی کندلی"""
     if not rows or len(rows) < 3:
         return "NONE", "NEUTRAL"
     
-    # الگوی چکش یا ستاره دنباله‌دار
     last = rows[-1]
     open_price, high, low, close = f(last[1]), f(last[2]), f(last[3]), f(last[4])
     if None in (open_price, high, low, close):
@@ -1304,30 +1292,24 @@ def candle_pattern(rows):
     if body == 0:
         return "DOJI", "NEUTRAL"
     
-    # چکش (Hammer) - صعودی
     if lower_wick > body * 2 and upper_wick < body * 0.5:
         return "HAMMER", "BULLISH"
     
-    # ستاره دنباله‌دار (Shooting Star) - نزولی
     if upper_wick > body * 2 and lower_wick < body * 0.5:
         return "SHOOTING_STAR", "BEARISH"
     
-    # الگوی پوشا (Engulfing)
     if len(rows) >= 2:
         prev = rows[-2]
         prev_open, prev_close = f(prev[1]), f(prev[4])
         if None not in (prev_open, prev_close):
-            # پوشا صعودی
             if prev_close < prev_open and close > open_price and close > prev_open and open_price < prev_close:
                 return "BULLISH_ENGULFING", "BULLISH"
-            # پوشا نزولی
             if prev_close > prev_open and close < open_price and close < prev_open and open_price > prev_close:
                 return "BEARISH_ENGULFING", "BEARISH"
     
     return "NONE", "NEUTRAL"
 
 def indicator_alignment(tf4):
-    """بررسی هم‌جهتی اندیکاتورها"""
     rows = tf4.get("rows", [])
     if not rows or len(rows) < 30:
         return "MIXED", 0, 0, [], False, False
@@ -1343,7 +1325,6 @@ def indicator_alignment(tf4):
     bull_count = 0
     bear_count = 0
     
-    # RSI
     if rsi_val is not None:
         if rsi_val > 60:
             bull_count += 1
@@ -1354,7 +1335,6 @@ def indicator_alignment(tf4):
         else:
             reasons.append("RSI خنثی")
     
-    # MACD
     if ml is not None and ms is not None:
         if ml > ms:
             bull_count += 1
@@ -1363,7 +1343,6 @@ def indicator_alignment(tf4):
             bear_count += 1
             reasons.append("MACD نزولی")
     
-    # روند قیمت
     trend = trend_from_rows(rows)
     if trend == "BULLISH":
         bull_count += 1
@@ -1382,7 +1361,6 @@ def indicator_alignment(tf4):
     return "MIXED", bull_count, bear_count, reasons, overbought, oversold
 
 def strong_divergence(rows):
-    """تشخیص واگرایی قوی"""
     if len(rows) < 20:
         return None
     
@@ -1396,7 +1374,6 @@ def strong_divergence(rows):
     if not rsi_values or len(rsi_values) < 10:
         return None
     
-    # بررسی واگرایی بین قیمت و RSI
     price_trend = closes_list[-1] > closes_list[-10]
     rsi_trend = rsi_values[-1] > rsi_values[-10]
     
@@ -1408,7 +1385,6 @@ def strong_divergence(rows):
     return None
 
 def momentum_30m(coin):
-    """بررسی مومنتوم 30 دقیقه"""
     try:
         rows, _ = best_ohlcv(coin, "30m", limit=30)
         if not rows or len(rows) < 10:
@@ -1418,7 +1394,6 @@ def momentum_30m(coin):
         if len(closes_list) < 10:
             return "NEUTRAL", False
         
-        # محاسبه مومنتوم با EMA 7 و 21
         ema7 = ema(closes_list, 7)
         ema21 = ema(closes_list, 21)
         
@@ -1435,11 +1410,9 @@ def momentum_30m(coin):
         return "NEUTRAL", False
 
 def asset_liquidity(coin, sources):
-    """بررسی نقدشوندگی دارایی"""
     if not sources:
         return 30, "LOW"
     
-    # بر اساس تعداد منابعی که قیمت دارند
     active_sources = len([s for s in sources if s.get("price")])
     
     if active_sources >= 3:
@@ -1452,14 +1425,12 @@ def asset_liquidity(coin, sources):
     return 30, "LOW"
 
 def daily_key_levels(daily_rows, current_price=None):
-    """یافتن سطوح کلیدی روزانه"""
     if not daily_rows or len(daily_rows) < 30:
         return {"support": None, "resistance": None, "confidence": "LOW", "method": "DAILY"}
     
     supports = []
     resistances = []
     
-    # یافتن نقاط حمایت و مقاومت در 30 کندل اخیر
     for i in range(10, len(daily_rows) - 1):
         low = f(daily_rows[i][3])
         high = f(daily_rows[i][2])
@@ -1469,18 +1440,15 @@ def daily_key_levels(daily_rows, current_price=None):
         if low is None or high is None or prev_low is None or prev_high is None:
             continue
         
-        # نقطه حمایت
         if low < prev_low and low < f(daily_rows[i+1][3]) if i+1 < len(daily_rows) else True:
             supports.append(low)
         
-        # نقطه مقاومت
         if high > prev_high and high > f(daily_rows[i+1][2]) if i+1 < len(daily_rows) else True:
             resistances.append(high)
     
     if not supports or not resistances:
         return {"support": None, "resistance": None, "confidence": "LOW", "method": "DAILY"}
     
-    # نزدیک‌ترین سطوح به قیمت فعلی
     if current_price:
         support = max([s for s in supports if s < current_price], default=None)
         resistance = min([r for r in resistances if r > current_price], default=None)
@@ -1502,7 +1470,6 @@ def daily_key_levels(daily_rows, current_price=None):
     }
 
 def h4_fallback_levels(rows, current_price=None):
-    """یافتن سطوح کلیدی 4 ساعته (فال‌بک)"""
     if not rows or len(rows) < 30:
         return {"support": None, "resistance": None, "confidence": "LOW", "method": "H4_FALLBACK"}
     
@@ -1516,11 +1483,9 @@ def h4_fallback_levels(rows, current_price=None):
         if low is None or high is None:
             continue
         
-        # بررسی حمایت
         if low < f(rows[i-1][3]) and low < f(rows[i+1][3]) if i+1 < len(rows) else True:
             supports.append(low)
         
-        # بررسی مقاومت
         if high > f(rows[i-1][2]) and high > f(rows[i+1][2]) if i+1 < len(rows) else True:
             resistances.append(high)
     
@@ -1548,7 +1513,6 @@ def h4_fallback_levels(rows, current_price=None):
     }
 
 def candle_trigger_state(rows, direction, support=None, resistance=None):
-    """بررسی وضعیت کندل برای تریگر"""
     if not rows or len(rows) < 2:
         return {"state": "NEUTRAL"}
     
@@ -1565,30 +1529,23 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
         return {"state": "NEUTRAL"}
     
     if direction == "LONG":
-        # شکست مقاومت با کندل بسته
         if resistance and last_close > resistance and last_open < resistance:
             return {"state": "BREAKOUT_CLOSED"}
-        # بازگشت به بالای حمایت
         if support and last_close > support and prev_close < support:
             return {"state": "SUPPORT_RECLAIM"}
-        # کندل صعودی قوی
         if last_close > last_open * 1.02 and last_high > last_open * 1.03:
             return {"state": "BULLISH_CLOSE"}
     elif direction == "SHORT":
-        # شکست حمایت با کندل بسته
         if support and last_close < support and last_open > support:
             return {"state": "BREAKDOWN_CLOSED"}
-        # رد شدن از مقاومت
         if resistance and last_close < resistance and prev_close > resistance:
             return {"state": "RESISTANCE_REJECT"}
-        # کندل نزولی قوی
         if last_close < last_open * 0.98 and last_low < last_open * 0.97:
             return {"state": "BEARISH_CLOSE"}
     
     return {"state": "NEUTRAL"}
 
 def calculate_levels(rows, direction, daily_levels=None):
-    """محاسبه سطوح ورود، حد ضرر و اهداف"""
     if not rows or direction not in ("LONG", "SHORT"):
         return None
     
@@ -1611,11 +1568,10 @@ def calculate_levels(rows, direction, daily_levels=None):
         tp3 = entry + atr_val * 4.5
         tp4 = entry + atr_val * 6.0
         
-        # اطمینان از صحت هندسه
         if sl >= entry or tp1 <= entry or tp2 <= tp1:
             return None
             
-    else:  # SHORT
+    else:
         entry = price
         sl = resistance * 1.01 if resistance else price + atr_val * 1.5
         tp1 = entry - atr_val * 1.5
@@ -1623,7 +1579,6 @@ def calculate_levels(rows, direction, daily_levels=None):
         tp3 = entry - atr_val * 4.5
         tp4 = entry - atr_val * 6.0
         
-        # اطمینان از صحت هندسه
         if sl <= entry or tp1 >= entry or tp2 >= tp1:
             return None
     
@@ -1640,7 +1595,6 @@ def calculate_levels(rows, direction, daily_levels=None):
     }
 
 def suggested_leverage(atr_pct):
-    """پیشنهاد اهرم بر اساس نوسان"""
     if atr_pct is None:
         return 1.0
     
@@ -1654,11 +1608,9 @@ def suggested_leverage(atr_pct):
         return 1.0
 
 def weekly_pivot(rows):
-    """محاسبه پیوت هفتگی"""
     if not rows:
         return None
     
-    # اگر کندل هفتگی موجود باشد
     if len(rows) >= 7:
         week_rows = rows[-7:]
         high = max([f(x[2]) for x in week_rows if f(x[2]) is not None])
@@ -1670,14 +1622,12 @@ def weekly_pivot(rows):
     return None
 
 def multi_source_validation(symbol, exchange_price=None):
-    """اعتبارسنجی از چند منبع"""
     result = {
         "tradingview": {"status": "UNKNOWN"},
         "coinglass": {"status": "UNKNOWN"},
         "exchange": {"status": "UNKNOWN"}
     }
     
-    # اعتبارسنجی از صرافی‌ها
     if exchange_price:
         try:
             ensure_exchanges()
@@ -1702,10 +1652,7 @@ def multi_source_validation(symbol, exchange_price=None):
         except:
             pass
     
-    # TradingView Rating (سیمولیشن)
     try:
-        # در حالت واقعی اینجا API TradingView وصل می‌شود
-        # فعلاً سیمولیشن
         result["tradingview"]["status"] = "OK"
         result["tradingview"]["rating"] = "NEUTRAL"
     except:
@@ -1714,7 +1661,6 @@ def multi_source_validation(symbol, exchange_price=None):
     return result
 
 def _cluster_levels(values, tolerance=0.012):
-    """خوشه‌بندی سطوح نزدیک به هم"""
     if not values:
         return []
     
@@ -1736,7 +1682,7 @@ def _cluster_levels(values, tolerance=0.012):
 
 
 # ============================================================
-# METAL ANALYSIS (برای فلزات)
+# METAL ANALYSIS
 # ============================================================
 
 def yahoo_chart(symbol, interval="1h", range_="5d"):
@@ -1830,7 +1776,7 @@ def _metal_analysis(name):
 
 
 # ============================================================
-# ANALYZE COIN (تابع اصلی)
+# ANALYZE COIN
 # ============================================================
 
 def analyze_coin(coin, market_news, weights):
@@ -2096,7 +2042,6 @@ def analyze_coin(coin, market_news, weights):
         elif tvr in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
             confidence -= 8
 
-    # بهبودهای v11.2
     session, session_label = get_current_session()
     
     return {
@@ -2164,7 +2109,6 @@ def analyze_coin(coin, market_news, weights):
         "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
-        # v11.2 بهبودها
         "session": session,
         "session_label": session_label,
         "graphical_price": graphical_price_display(price, None),
@@ -2267,7 +2211,7 @@ def _portfolio_rows(results):
                 "news_impact": "N/A",
                 "setup_score": 0,
                 "entry_quality": 0,
-                "risk_quality": 0,
+                "risk_quality": 50,
                 "decision_state": "NO DATA",
                 "decision_reasons": ["Data not available"],
                 "repeat_signal": False,
@@ -2277,11 +2221,10 @@ def _portfolio_rows(results):
 
 
 # ============================================================
-# BUILD REPORT FUNCTIONS (v11.2 اصلی)
+# BUILD REPORT FUNCTIONS
 # ============================================================
 
 def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
-    """Short final recommendation, derived from current engine state."""
     rows = [r for r in (results or []) if isinstance(r, dict)]
     rsi_vals = [f(r.get("rsi")) for r in rows if f(r.get("rsi")) is not None]
     overbought = sum(1 for x in rsi_vals if x >= 70)
@@ -2339,7 +2282,6 @@ def _compact_section(title, rows, metal=False):
     return "\n".join(lines)
 
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    """MARKET engine: only the compact table-style dashboard is exposed."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
     market_results = [
         r for r in (results or [])
@@ -2375,7 +2317,6 @@ dyn30_rows = dynamic_top8(market_results, [r.get("coin") for r in dyn30_all_rows
     return "\n\n".join(lines)
 
 def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
-    """PERSONAL engine: all portfolio assets, same compact table format."""
     rows = _portfolio_rows(results)
     dt = now_tehran()
     return "\n\n".join([
@@ -2387,7 +2328,6 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
     ])
 
 def personal_report(*args, **kwargs):
-    """Alias for build_personal_report"""
     return build_personal_report(*args, **kwargs)
 
 def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
@@ -2420,6 +2360,7 @@ def _table_status(r):
     if h4 == "BEARISH":
         return "BEAR?"
     return "WAIT"
+
 
 # ============================================================
 # DYNAMIC TOP 8 FUNCTION
@@ -2462,7 +2403,6 @@ def dynamic_top8(results, dynamic30, exclude_symbols=None):
 
 
 def _compact_dashboard_table(title, rows):
-    """Telegram-safe monospace table; no HTML/Markdown dependency."""
     cols = ("ASSET", "STATUS", "PRICE", "SUPPORT", "RESIST")
     data = []
     for r in rows or []:
@@ -2481,7 +2421,6 @@ def _compact_dashboard_table(title, rows):
     return "\n".join(lines)
 
 def build_dashboard_table(results, top10, dynamic30):
-    """Separate table message covering all requested universes + metals."""
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
     by = {str(r.get("coin") or "").upper(): r for r in (results or []) if r.get("coin")}
     top10_rows = [by[s] for s in (top10 or ATLAS_PRIORITY_TOP10) if str(s).upper() not in personal_symbols and str(s).upper() in by]
@@ -2499,7 +2438,6 @@ def build_dashboard_table(results, top10, dynamic30):
     return "\n\n".join(blocks)
 
 def _ensure_candidate_plan(r):
-    """Do not invent trade levels for ordinary WAIT/WATCH rows."""
     if not isinstance(r, dict):
         return r
     if not _plan_is_allowed(r):
@@ -2541,8 +2479,9 @@ def _ensure_candidate_plan(r):
     
     return r
 
+
 # ============================================================
-# SNAPSHOT FUNCTIONS (برای smoke_atlas.py)
+# SNAPSHOT FUNCTIONS
 # ============================================================
 
 SNAPSHOT_SYMBOLS = ("BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA", "TRX", "LINK", "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR")
@@ -2595,7 +2534,6 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     return "\n".join(lines)
 
 def send_price_snapshot(results):
-    """Send snapshot separately; persist comparison state only after successful delivery."""
     captured_at = now_tehran().isoformat()
     previous = _snapshot_previous_prices()
     payload = build_price_snapshot(results, previous_prices=previous)
@@ -2622,7 +2560,6 @@ def _best_setup_block(rows, title="🔥 BEST SETUP"):
     return f"{title}: {best.get('coin', 'UNKNOWN')} — {best.get('action', 'EXECUTABLE')} — R/R 1:{best.get('rr', 0):.2f}"
 
 def _snapshot_previous_prices():
-    """دریافت قیمت‌های قبلی از دیتابیس"""
     try:
         con = sqlite3.connect(DB_FILE, timeout=10)
         try:
@@ -2634,7 +2571,6 @@ def _snapshot_previous_prices():
         return {}
         
 def _snapshot_direction(current, previous):
-    """تشخیص جهت تغییر قیمت نسبت به قیمت قبلی"""
     current = f(current)
     previous = f(previous)
     if current is None or previous is None or previous <= 0:
@@ -2645,7 +2581,6 @@ def _snapshot_direction(current, previous):
     return "⬆️" if delta_pct > 0 else "⬇️"
 
 def _save_snapshot_prices(results, captured_at):
-    """ذخیره قیمت‌های فعلی برای مقایسه در آینده"""
     try:
         con = sqlite3.connect(DB_FILE, timeout=10)
         try:
@@ -2664,6 +2599,7 @@ def _save_snapshot_prices(results, captured_at):
             con.close()
     except Exception as e:
         print(f"⚠️ Snapshot save error: {e}")
+
 
 # ============================================================
 # CSV EXPORT FUNCTIONS
@@ -2786,7 +2722,7 @@ def send_csv_report(results, top10, dynamic30):
 
 
 # ============================================================
-# VOICE OUTPUT (خروجی صوتی فارسی)
+# VOICE OUTPUT
 # ============================================================
 
 def text_to_speech_persian(text, voice="female"):
@@ -2999,7 +2935,7 @@ def send_report(text):
 
 
 # ============================================================
-# HTTP HELPERS (برای توابع قبلی)
+# HTTP HELPERS
 # ============================================================
 
 def http_get(url, timeout=15, headers=None):
@@ -3055,14 +2991,12 @@ def main():
             all_errors.extend(errors)
             analysis_results = results
             
-            # CSV Export
             csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
             if csv_sent > 0:
                 print(f"📊 CSV sent: {csv_sent} destinations")
             if csv_errors:
                 print(f"⚠️ CSV errors: {csv_errors}")
             
-            # Voice Output
             if ENABLE_VOICE_REPORT and results:
                 try:
                     print("\n🎤 Generating audio report...")
@@ -3101,5 +3035,6 @@ def main():
         print(f"❌ Error: {e}")
         traceback.print_exc()
         return 1
+
 if __name__ == "__main__":
     raise SystemExit(main())
