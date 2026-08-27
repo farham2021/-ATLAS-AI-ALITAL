@@ -1,0 +1,32 @@
+name: Fix Indentation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Fix indentation in bot.py
+        run: |
+          echo "=== BEFORE FIX ==="
+          tail -15 bot.py
+          
+          # روش 1: حذف همه فاصله‌های خط 2306 و 2307
+          sed -i '2306s/^[[:space:]]*//' bot.py
+          sed -i '2307s/^[[:space:]]*//' bot.py
+          
+          echo "=== AFTER FIX ==="
+          tail -15 bot.py
+          
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bot.py
+          git commit -m "fix: indentation error at line 2306" || echo "No changes to commit"
+          git push
