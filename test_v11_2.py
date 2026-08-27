@@ -35,6 +35,8 @@ def test_all():
     try:
         result = bot.get_market_quality({}, {}, "NORMAL")
         assert "score" in result
+        assert "level" in result
+        assert "emoji" in result
         tests_passed += 1
         print("✅ Market Quality")
     except Exception as e:
@@ -61,10 +63,12 @@ def test_all():
         tests_failed += 1
         print(f"❌ Graphical Price Display: {e}")
     
-    # 5. Test Risk Report
+    # 5. Test Risk Report - اصلاح شده
     try:
-        result = bot.generate_risk_report({}, {}, {"level": "HIGH", "score": 80})
+        market_quality = {"level": "HIGH", "score": 80, "emoji": "🟢"}
+        result = bot.generate_risk_report({}, {}, market_quality)
         assert isinstance(result, str)
+        assert "ریسک" in result or "Risk" in result
         tests_passed += 1
         print("✅ Risk Report")
     except Exception as e:
