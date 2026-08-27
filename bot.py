@@ -5132,28 +5132,26 @@ def main():
             try:
                 voice_data = analysis_results if analysis_results else snapshot_results
                 
-                if voice_data:
-                    print(f"\n🎤 Generating audio report... ({len(voice_data)} items)")
-                    audio_file = generate_audio_report(voice_data)
-                    
+                # Voice Output
+            if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
+                try:
+                    print("\n🎤 Generating audio report...")
+                    voice_text = "به گزارش صوتی اطلس خوش آمدید. "
+                    if results:
+                        for r in results[:5]:
+                            voice_text += f"{r.get('coin', '')} {r.get('action', '')} با اطمینان {r.get('confidence', 0)} درصد. "
+                    audio_file = generate_audio_report(voice_text)
                     if audio_file:
-                        print(f"✅ Audio file created: {audio_file} ({os.path.getsize(audio_file)} bytes)")
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
                         if result:
                             print("✅ Audio report sent successfully")
-                        else:
-                            print("❌ Failed to send audio report")
                         try:
                             os.unlink(audio_file)
                         except:
                             pass
-                    else:
-                        print("❌ Failed to generate audio file")
-                else:
-                    print("ℹ️ No data for voice report")
-            except Exception as e:
-                print(f"⚠️ Audio error: {e}")
-                traceback.print_exc()
+                except Exception as e:
+                    print(f"⚠️ Audio error: {e}")               
+                    traceback.print_exc()
         else:
             print(f"ℹ️ Voice disabled: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}")
 
