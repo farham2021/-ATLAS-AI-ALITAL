@@ -130,7 +130,10 @@ def get_current_session(dt=None):
 def generate_voice_summary(results):
     """تولید خلاصه صوتی از نتایج"""
     if not results:
+        print("⚠️ generate_voice_summary: results is empty")
         return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
+    
+    print(f"📝 generate_voice_summary: processing {len(results)} items")
     
     # دریافت سشن فعلی
     session, session_label, session_multiplier = get_current_session()
@@ -156,6 +159,8 @@ def generate_voice_summary(results):
                     down_count += 1
                 else:
                     stable_count += 1
+    
+    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}, changes={len(changes)}")
     
     # تولید متن صوتی
     lines = [
@@ -186,7 +191,9 @@ def generate_voice_summary(results):
     
     lines.append("این پیام به صورت خودکار هر ۳ ساعت بروزرسانی می‌شود.")
     
-    return " ".join(lines)
+    result = " ".join(lines)
+    print(f"📝 Voice text length: {len(result)} characters")
+    return result
 
 
 def generate_voice_summary_from_snapshot(results):
@@ -259,8 +266,8 @@ def text_to_speech_persian(text, voice="female"):
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
         tts.save(temp_file.name)
         return temp_file.name
-    except ImportError:
-        pass
+    except ImportError as e:
+        print(f"⚠️ gTTS not installed: {e}")
     
     try:
         import edge_tts
@@ -275,8 +282,8 @@ def text_to_speech_persian(text, voice="female"):
             await communicate.save(output_path)
         asyncio.run(generate())
         return output_path
-    except ImportError:
-        pass
+    except ImportError as e:
+        print(f"⚠️ edge-tts not installed: {e}")
     
     try:
         text_encoded = urllib.parse.quote(text)
@@ -304,6 +311,7 @@ def generate_audio_report(results, filename="audio_report.mp3"):
     if len(audio_text) < 50:
         audio_text = generate_voice_summary_from_snapshot(results)
     
+    print(f"🎤 Generating audio with text: {audio_text[:100]}...")
     audio_file = text_to_speech_persian(audio_text, VOICE_TYPE)
     if audio_file:
         import shutil
@@ -316,9 +324,14 @@ def generate_audio_report(results, filename="audio_report.mp3"):
 def send_audio_report(audio_file, caption=None):
     """ارسال گزارش صوتی به تلگرام"""
     if not os.path.exists(audio_file):
+        print(f"❌ Audio file not found: {audio_file}")
         return False
     if not TELEGRAM_TOKEN:
+        print("❌ TELEGRAM_TOKEN not set")
         return False
+    
+    print(f"📤 Sending audio file: {audio_file} ({os.path.getsize(audio_file)} bytes)")
+    
     with open(audio_file, 'rb') as f:
         audio_data = f.read()
     boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
@@ -351,6 +364,7 @@ def send_audio_report(audio_file, caption=None):
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode())
+            print(f"📤 Telegram audio response: {result.get('ok', False)}")
             return result.get('ok', False)
     except Exception as e:
         print(f"❌ Audio send error: {e}")
@@ -374,7 +388,7 @@ def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=No
             # محاسبه امتیاز کیفیت
             quality_score = 0
             quality_score += r.get("confidence", 0) * 0.4
-            quality_score += min(r.get("rr", 0), 5) * 15
+            quality_score += min(r.get("rr", 0) or 0, 5) * 15
             quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
             quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
             quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
@@ -452,7 +466,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
     """ساخت جدول تصویری از سیگنال‌ها"""
     try:
         import matplotlib.pyplot as plt
-        from matplotlib.table import Table
         import matplotlib.font_manager as fm
         
         # تنظیم فونت
@@ -558,8 +571,8 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         plt.close()
         
         return filename
-    except ImportError:
-        print("⚠️ Matplotlib not installed, skipping image table")
+    except ImportError as e:
+        print(f"⚠️ Matplotlib not installed: {e}")
         return None
     except Exception as e:
         print(f"⚠️ Image generation error: {e}")
@@ -4794,6 +4807,7 @@ def _conditional_trade_plan(result):
 # ============================================================
 # ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT
 # ============================================================
+
 SNAPSHOT_SYMBOLS = ("BTC","ETH","XRP","SOL","BNB","DOGE","ADA","TRX","LINK","XLM","SUI","AVAX","LTC","SHIB","HBAR","DOT","BCH","XMR","NEAR")
 PUBLIC_USDT_PAGES = (
     "https://wallex.ir/price/usdt",
@@ -4913,17 +4927,21 @@ def fetch_snapshot_results():
     return rows
 
 
-
 def _snapshot_previous_prices():
+    """دریافت قیمت‌های قبلی از دیتابیس"""
     try:
-        con=sqlite3.connect(DB_FILE, timeout=10)
+        con = sqlite3.connect(DB_FILE, timeout=10)
         try:
-            rows=con.execute("select symbol, price from snapshot_prices").fetchall()
-            return {str(sym).upper(): float(price) for sym,price in rows if price is not None}
+            rows = con.execute("select symbol, price from snapshot_prices").fetchall()
+            result = {str(sym).upper(): float(price) for sym, price in rows if price is not None}
+            print(f"📊 Loaded {len(result)} previous prices from database")
+            return result
         finally:
             con.close()
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Snapshot previous prices error: {e}")
         return {}
+
 
 def _snapshot_direction(current, previous):
     """تشخیص جهت تغییر قیمت و نمایش فلش مناسب"""
@@ -4936,14 +4954,15 @@ def _snapshot_direction(current, previous):
         return "➡️"
     return "⬆️" if delta_pct > 0 else "⬇️"
 
+
 def _save_snapshot_prices(results, captured_at):
     try:
-        con=sqlite3.connect(DB_FILE, timeout=10)
+        con = sqlite3.connect(DB_FILE, timeout=10)
         try:
             con.execute("create table if not exists snapshot_prices(symbol text primary key, price real not null, captured_at text not null)")
             for r in results or []:
-                sym=str(r.get("coin") or "").upper()
-                price=f(r.get("price"))
+                sym = str(r.get("coin") or "").upper()
+                price = f(r.get("price"))
                 if sym and price is not None and price > 0:
                     con.execute(
                         "insert into snapshot_prices(symbol,price,captured_at) values(?,?,?) "
@@ -4954,14 +4973,19 @@ def _save_snapshot_prices(results, captured_at):
         finally:
             con.close()
     except Exception as e:
-        append_changelog("SNAPSHOT_STATE", None, None, f"save failed: {e}")
+        print(f"⚠️ Snapshot save error: {e}")
+
 
 def build_price_snapshot(results, updated_at=None, previous_prices=None):
-    by_coin={str(r.get("coin") or "").upper():r for r in (results or [])}
-    dt=updated_at or now_tehran()
-    previous_prices = previous_prices if previous_prices is not None else _snapshot_previous_prices()
-    weekdays=("دوشنبه","سه‌شنبه","چهارشنبه","پنجشنبه","جمعه","شنبه","یکشنبه")
-    lines=[
+    by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
+    dt = updated_at or now_tehran()
+    
+    # اگر previous_prices ارسال نشده، از دیتابیس بخوان
+    if previous_prices is None:
+        previous_prices = _snapshot_previous_prices()
+    
+    weekdays = ("دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه")
+    lines = [
         f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
         "",
         f"⏰ آخرین بروزرسانی : {dt.strftime('%H:%M:%S')}",
@@ -4969,25 +4993,34 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         "📊 وضعیت بازار ارزهای دیجیتال:",
         "───────────────────",
     ]
+    
+    # شمارش فلش‌ها برای دیباگ
+    arrow_stats = {"⬆️": 0, "⬇️": 0, "➡️": 0}
+    
     for sym in SNAPSHOT_SYMBOLS:
-        r=by_coin.get(sym)
+        r = by_coin.get(sym)
         if not r:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
-        price=f(r.get("price"))
+        price = f(r.get("price"))
         if price is None:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
-        arrow=_snapshot_direction(price, previous_prices.get(sym))
+        arrow = _snapshot_direction(price, previous_prices.get(sym))
+        arrow_stats[arrow] = arrow_stats.get(arrow, 0) + 1
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
+    
+    # اضافه کردن آمار فلش‌ها برای دیباگ
+    print(f"📊 Arrow stats: ⬆️={arrow_stats.get('⬆️', 0)}, ⬇️={arrow_stats.get('⬇️', 0)}, ➡️={arrow_stats.get('➡️', 0)}")
+    
     lines.append("───────────────────")
-    usdt=fetch_usdt_toman_public()
+    usdt = fetch_usdt_toman_public()
     if usdt is None:
         lines.append("💵 🟡 نرخ تتر  :   در دسترس نیست")
     else:
         lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
     lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
-    # اضافه کردن سشن به اسنپ‌شات
+    
     session, session_label, session_multiplier = get_current_session()
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
@@ -4995,13 +5028,13 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
 
 def send_price_snapshot(results):
     """Send snapshot separately; persist comparison state only after successful delivery."""
-    captured_at=now_tehran().isoformat()
-    previous=_snapshot_previous_prices()
-    payload=build_price_snapshot(results, previous_prices=previous)
-    parts,sent,errors=send_report(payload)
+    captured_at = now_tehran().isoformat()
+    previous = _snapshot_previous_prices()
+    payload = build_price_snapshot(results, previous_prices=previous)
+    parts, sent, errors = send_report(payload)
     if sent == parts and sent > 0:
         _save_snapshot_prices(results, captured_at)
-    return sent,errors
+    return sent, errors
 
 def _automatic_run_plan(now=None):
     """Unified scheduler: analysis every 4H, snapshot every 3H, both at overlaps."""
@@ -5026,9 +5059,9 @@ def main():
         else:
             do_analysis, do_snapshot = True, True
 
-        total_sent=0
-        all_errors=[]
-        analysis_results=[]
+        total_sent = 0
+        all_errors = []
+        analysis_results = []
 
         if do_analysis:
             text, results, macro, news, market_info, unavailable = report()
@@ -5046,7 +5079,7 @@ def main():
             outputs.append(signal_ranking)
             
             for payload in outputs:
-                parts,sent,errors=send_report(payload)
+                parts, sent, errors = send_report(payload)
                 total_sent += sent
                 all_errors.extend(errors)
                 print(payload)
@@ -5063,8 +5096,8 @@ def main():
             total_sent += csv_sent
             all_errors.extend(csv_errors)
             print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
-            save_context(macro,news,market_liquidity_index(results),market_info)
-            save_run(results,sum(len(split_telegram(x)) for x in outputs),macro,news,unavailable)
+            save_context(macro, news, market_liquidity_index(results), market_info)
+            save_run(results, sum(len(split_telegram(x)) for x in outputs), macro, news, unavailable)
 
         if do_snapshot:
             snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
@@ -5108,21 +5141,24 @@ def main():
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
             return 0
 
-        if all_errors or total_sent==0:
-            raise RuntimeError("Telegram delivery failed: "+"; ".join(all_errors or ["0 messages sent"]))
+        if all_errors or total_sent == 0:
+            raise RuntimeError("Telegram delivery failed: " + "; ".join(all_errors or ["0 messages sent"]))
         return 0
     except Exception as e:
-        tb=traceback.format_exc()
-        append_changelog("FATAL",None,None,str(e),{"traceback":tb})
+        tb = traceback.format_exc()
+        append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert=f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
-                for destination in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
+                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
+                for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
                     if destination:
-                        try: telegram_send_one(destination,alert)
-                        except Exception as te: print(f"Telegram error alert failed: {te}")
-        except Exception: pass
+                        try:
+                            telegram_send_one(destination, alert)
+                        except Exception as te:
+                            print(f"Telegram error alert failed: {te}")
+        except Exception:
+            pass
         return 1
 
 if __name__ == "__main__":
