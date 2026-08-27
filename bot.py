@@ -93,6 +93,27 @@ CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
 
 
 # ============================================================
+# MARKET SESSIONS
+# ============================================================
+
+MARKET_SESSIONS = {
+    "ASIA": {"open": 0, "close": 8, "label": "🇯🇵 آسیا", "multiplier": 0.8},
+    "EUROPE": {"open": 7, "close": 15, "label": "🇬🇧 اروپا", "multiplier": 1.0},
+    "AMERICA": {"open": 12, "close": 20, "label": "🇺🇸 آمریکا", "multiplier": 0.9},
+    "OVERLAP": {"open": 12, "close": 15, "label": "🔀 همپوشانی اروپا-آمریکا", "multiplier": 1.2},
+}
+
+def get_current_session(dt=None):
+    """تشخیص سشن فعلی بازار و ضریب کیفیت آن"""
+    dt = dt or now_utc()
+    hour = dt.hour
+    for name, session in MARKET_SESSIONS.items():
+        if session["open"] <= hour < session["close"]:
+            return name, session["label"], session["multiplier"]
+    return "CLOSED", "🔒 خارج از سشن", 0.7
+
+
+# ============================================================
 # MULTI-SOURCE VALIDATION LAYER
 # ============================================================
 # Exchange OHLCV/tickers are the execution-grade market layer.
@@ -2036,6 +2057,26 @@ def analyze_coin(coin, market_news, weights):
         elif tvr in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
             confidence -= 8
 
+    # ============================================================
+    # اعمال ضریب سشن بازار روی کانفیدنس
+    # ============================================================
+    session, session_label, session_multiplier = get_current_session()
+    
+    # ذخیره کانفیدنس اصلی برای گزارش
+    confidence_raw = confidence
+    
+    # اعمال ضریب سشن
+    confidence = confidence * session_multiplier
+    
+    # اگر در سشن کم‌نقدینگی هستیم، هشدار اضافه کن
+    if session in ("ASIA", "CLOSED"):
+        warning = warning or f"سشن {session_label} — نقدینگی کمتر، احتیاط بیشتر"
+    
+    # اگر در همپوشانی هستیم، یک امتیاز مثبت به دلیل نقدینگی بالا
+    if session == "OVERLAP":
+        if "همپوشانی سشن — نقدینگی بالا" not in str(reason_parts):
+            reason_parts.append("همپوشانی سشن — نقدینگی بالا")
+
     return {
         "coin": coin,
         "price": price,
@@ -2076,7 +2117,7 @@ def analyze_coin(coin, market_news, weights):
         "action": action,
         "confidence": int(clamp(confidence, 0, 100)),
         "score_components": score_components,
-        "confidence_raw": round(confidence, 2),
+        "confidence_raw": round(confidence_raw, 2),
         "overbought": overbought,
         "oversold": oversold,
         "quality": quality,
@@ -2101,6 +2142,10 @@ def analyze_coin(coin, market_news, weights):
         "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
+        # سشن‌های بازار
+        "session": session,
+        "session_label": session_label,
+        "session_multiplier": session_multiplier,
     }
 
 
@@ -3335,9 +3380,13 @@ def asset_block(r, metal=False, detail=False):
     rsi_text = f"{rsi_v:.1f}" if rsi_v is not None else "N/A"
     atr_text = f"{atr_v:.2f}%" if atr_v is not None else "N/A"
 
+    # دریافت سشن فعلی
+    session, session_label, session_multiplier = get_current_session()
+
     lines = [
         f"🔹 {symbol} | {action} | اطمینان: {int(conf) if isinstance(conf,(int,float)) else 0}%",
         f"Price: {fmt(price)} | 24H: {pct(r.get('change'))}" if not metal else f"Price: {fmt(price)}",
+        f"🕐 سشن: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x",
         f"Trend: H4 {r.get('h4_trend','UNKNOWN')} / D1 {r.get('d1_trend','UNKNOWN')} / W1 {r.get('w1_trend','UNKNOWN')}",
         f"RSI: {rsi_text} | MACD: {r.get('macd','N/A')} | ATR: {atr_text}",
         f"S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))}",
@@ -3464,7 +3513,9 @@ def _metal_analysis(name):
         if (direction=="LONG" and rsi_v is not None and 50<=rsi_v<=68) or (direction=="SHORT" and rsi_v is not None and 32<=rsi_v<=50): conf += 10
         if levels: conf += 10
         rr=_rr_from_values((levels or {}).get("entry"),(levels or {}).get("sl"),(levels or {}).get("tp2")) if levels else None
-        return {"coin":name,"price":price,"change":None,"h4_trend":trend,"d1_trend":trend,"w1_trend":"UNKNOWN","rsi":rsi_v,"macd":macd_state,"atr_pct":atrp,"support":support,"resistance":resistance,"direction":direction,"action":action,"confidence":min(int(conf),100),"entry":(levels or {}).get("entry"),"sl":(levels or {}).get("sl"),"tp1":(levels or {}).get("tp1"),"tp2":(levels or {}).get("tp2"),"tp3":(levels or {}).get("tp3"),"tp4":(levels or {}).get("tp4"),"rr":rr,"reason":"روند 4H + MACD + ساختار قیمت","snapshots":{"4h":{"rows":rows}}}
+        # دریافت سشن برای فلزات
+        session, session_label, session_multiplier = get_current_session()
+        return {"coin":name,"price":price,"change":None,"h4_trend":trend,"d1_trend":trend,"w1_trend":"UNKNOWN","rsi":rsi_v,"macd":macd_state,"atr_pct":atrp,"support":support,"resistance":resistance,"direction":direction,"action":action,"confidence":min(int(conf),100),"entry":(levels or {}).get("entry"),"sl":(levels or {}).get("sl"),"tp1":(levels or {}).get("tp1"),"tp2":(levels or {}).get("tp2"),"tp3":(levels or {}).get("tp3"),"tp4":(levels or {}).get("tp4"),"rr":rr,"reason":"روند 4H + MACD + ساختار قیمت","snapshots":{"4h":{"rows":rows}},"session":session,"session_label":session_label,"session_multiplier":session_multiplier}
     except Exception as e:
         return {"coin":name,"price":None,"change":None,"h4_trend":"N/A","d1_trend":"N/A","w1_trend":"N/A","rsi":None,"macd":"N/A","atr_pct":None,"support":None,"resistance":None,"direction":"NONE","action":"NO DATA","confidence":0,"reason":"داده در دسترس نیست","error":str(e)}
 
@@ -3496,6 +3547,9 @@ def _compact_scenario_row(r, metal=False):
     sl = f(r.get("sl"))
     tp1 = f(r.get("tp1"))
     tp2 = f(r.get("tp2"))
+
+    # دریافت سشن فعلی
+    session, session_label, session_multiplier = get_current_session()
 
     if action in ("BUY", "BUY CONFIRMATION"):
         status = "BUY"
@@ -3571,6 +3625,8 @@ def _compact_scenario_row(r, metal=False):
         "status": status,
         "price": price,
         "change": change,
+        "session": session_label,
+        "session_multiplier": session_multiplier,
     }
 
 
@@ -3588,6 +3644,9 @@ def _compact_section(title, rows, metal=False):
             f"   🟢 صعودی: {x['سناریوی صعودی']}\n"
             f"   🔴 نزولی: {x['سناریوی نزولی (اصلاح)']}"
         )
+    # اضافه کردن سشن به انتهای بخش
+    session, session_label, session_multiplier = get_current_session()
+    lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
 
 
@@ -3622,6 +3681,9 @@ def _compact_dashboard_table(title, rows):
     lines=[title,"───────────────────",header,sep]
     for row in data:
         lines.append("  ".join(str(v).ljust(widths[i]) for i,v in enumerate(row)))
+    # اضافه کردن سشن به انتهای جدول
+    session, session_label, session_multiplier = get_current_session()
+    lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
 
 def build_dashboard_table(results, top10, dynamic30):
@@ -3650,30 +3712,32 @@ def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regi
     bullish = sum(1 for r in rows if str(r.get("h4_trend") or "").upper() == "BULLISH")
     bearish = sum(1 for r in rows if str(r.get("h4_trend") or "").upper() == "BEARISH")
     regime = str(btc_regime or "").upper()
+    session, session_label, session_multiplier = get_current_session()
+    
     if not rows:
-        return "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید جهت بازار و شکل‌گیری سطوح حمایتی معتبر بمانید."
+        return f"توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید جهت بازار و شکل‌گیری سطوح حمایتی معتبر بمانید. (سشن: {session_label})"
 
     if overbought >= max(3, len(rsi_vals) // 4) and bearish >= bullish * 0.35:
         return (
-            "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر یک اصلاح قیمت "
-            "(pullback) به سطوح حمایتی کلیدی باشید. با توجه به اینکه بخشی از شاخص‌ها "
-            "نشان از اشباع خرید و کاهش قدرت دارند، هرگونه ورود جدید در قیمت‌های فعلی "
-            "ریسک بالایی دارد. منتظر شفاف‌تر شدن جهت بازار باشید."
+            f"توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر یک اصلاح قیمت "
+            f"(pullback) به سطوح حمایتی کلیدی باشید. با توجه به اینکه بخشی از شاخص‌ها "
+            f"نشان از اشباع خرید و کاهش قدرت دارند، هرگونه ورود جدید در قیمت‌های فعلی "
+            f"ریسک بالایی دارد. منتظر شفاف‌تر شدن جهت بازار باشید. (سشن: {session_label} | ضریب: {session_multiplier:.1f}x)"
         )
     if regime == "BEARISH" or bearish > bullish:
         return (
-            "توصیه نهایی: فعلاً HOLD باشید و از ورود عجولانه خودداری کنید. "
-            "ابتدا تثبیت قیمت روی حمایت‌های کلیدی و تغییر تأییدشده ساختار روند را انتظار بکشید."
+            f"توصیه نهایی: فعلاً HOLD باشید و از ورود عجولانه خودداری کنید. "
+            f"ابتدا تثبیت قیمت روی حمایت‌های کلیدی و تغییر تأییدشده ساختار روند را انتظار بکشید. (سشن: {session_label} | ضریب: {session_multiplier:.1f}x)"
         )
     if bullish > bearish * 1.5 and overbought < max(3, len(rsi_vals) // 3):
         return (
-            "توصیه نهایی: روند فعلاً متمایل به صعود است؛ ورود فقط روی شکست و تثبیت "
-            "مقاومت‌های کلیدی یا pullback کنترل‌شده به حمایت‌ها منطقی است. از تعقیب قیمت "
-            "پس از جهش‌های تند خودداری کنید."
+            f"توصیه نهایی: روند فعلاً متمایل به صعود است؛ ورود فقط روی شکست و تثبیت "
+            f"مقاومت‌های کلیدی یا pullback کنترل‌شده به حمایت‌ها منطقی است. از تعقیب قیمت "
+            f"پس از جهش‌های تند خودداری کنید. (سشن: {session_label} | ضریب: {session_multiplier:.1f}x)"
         )
     return (
-        "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید شفاف‌تر جهت بازار "
-        "یا یک pullback به سطوح حمایتی کلیدی بمانید. ورود در شرایط نامطمئن ریسک بهینه‌ای ندارد."
+        f"توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید شفاف‌تر جهت بازار "
+        f"یا یک pullback به سطوح حمایتی کلیدی بمانید. ورود در شرایط نامطمئن ریسک بهینه‌ای ندارد. (سشن: {session_label} | ضریب: {session_multiplier:.1f}x)"
     )
 
 
@@ -3704,9 +3768,11 @@ def _best_setup_block(results, universe_filter=None, title="🔥 BEST SETUP"):
     direction="BUY" if str(r.get("direction"))=="LONG" else "SELL"
     entry,sl,tp1,tp2=_csv_safe_plan(r)
     risk_note=" | RSI اشباع خرید" if rsi_v is not None and rsi_v>=75 else ""
+    session, session_label, session_multiplier = get_current_session()
     return (f"{title}: {r.get('coin')} — {direction} — R/R 1:{rr:.2f}\n"
             f"   Entry: {fmt(entry)} | SL: {fmt(sl)} | TP1: {fmt(tp1)} | TP2: {fmt(tp2)}\n"
-            f"   Confidence: {float(r.get('confidence') or 0):.0f}% | H4/D1: {r.get('h4_trend','UNKNOWN')}/{r.get('d1_trend','UNKNOWN')}{risk_note}")
+            f"   Confidence: {float(r.get('confidence') or 0):.0f}% | H4/D1: {r.get('h4_trend','UNKNOWN')}/{r.get('d1_trend','UNKNOWN')}{risk_note}\n"
+            f"   🕐 سشن: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
 
 def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     """MARKET engine: only the compact table-style dashboard is exposed."""
@@ -3733,10 +3799,12 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
 
     metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
     dt = now_tehran()
+    session, session_label, session_multiplier = get_current_session()
     lines = [
         "🤖 ATLAS AI — MARKET 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x",
         _best_setup_block(market_results),
         _compact_section("📡 ATLAS TOP 10", top10_rows),
         _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
@@ -3750,10 +3818,12 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
     """PERSONAL engine: all portfolio assets, same compact table format."""
     rows = _portfolio_rows(results)
     dt = now_tehran()
+    session, session_label, session_multiplier = get_current_session()
     return "\n\n".join([
         "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x",
         _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP"),
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
         _final_market_recommendation(rows, [], [], macro, btc_regime),
@@ -4399,6 +4469,9 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     else:
         lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
     lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
+    # اضافه کردن سشن به اسنپ‌شات
+    session, session_label, session_multiplier = get_current_session()
+    lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
 
 
