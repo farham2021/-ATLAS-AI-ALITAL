@@ -1983,7 +1983,7 @@ def _ensure_candidate_plan(r):
         return _clear_trade_plan(r)
     
     # ============================================================
-    # این بخش باید اضافه شود
+    # اصلاح خطا: اضافه کردن آرگومان ششم (None)
     # ============================================================
     valid, reason = _validate_trade_geometry(
         r.get("direction"), 
@@ -1991,7 +1991,7 @@ def _ensure_candidate_plan(r):
         r.get("sl"), 
         r.get("tp1"), 
         r.get("tp2"), 
-        min_rr=None
+        None  # <--- این آرگومان اضافه شد
     )
     if not valid:
         r["gate_reason"] = f"Trade geometry blocked: {reason}"
