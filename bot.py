@@ -78,15 +78,6 @@ TELEGRAM_MAX_RETRIES = int(os.environ.get("TELEGRAM_MAX_RETRIES", "5"))
 TELEGRAM_BASE_RETRY_DELAY = float(os.environ.get("TELEGRAM_BASE_RETRY_DELAY", "3"))
 TELEGRAM_MAX_WAIT = float(os.environ.get("TELEGRAM_MAX_WAIT", "60"))
 
-# Voice Output Settings
-ENABLE_VOICE_REPORT = os.environ.get("ATLAS_ENABLE_VOICE", "1") == "1"
-VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
-VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
-AUTO_SEND_VOICE = os.environ.get("ATLAS_AUTO_SEND_VOICE", "1") == "1"
-
-# Image Table Settings
-ENABLE_IMAGE_TABLE = os.environ.get("ATLAS_ENABLE_IMAGE_TABLE", "1") == "1"
-
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
 ).strip().rstrip("/")
@@ -101,7 +92,9 @@ CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
 COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
 CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
 
-# Voice Output Settings - اصلاح شده با پشتیبانی از true/false/1/0
+# ============================================================
+# BOOLEAN PARSER - برای متغیرهای true/false/1/0
+# ============================================================
 def _parse_bool(value):
     if isinstance(value, bool):
         return value
@@ -109,11 +102,31 @@ def _parse_bool(value):
         return value.lower() in ("true", "1", "yes", "on")
     return bool(value)
 
+# ============================================================
+# VOICE & IMAGE SETTINGS - با پشتیبانی از true/false/1/0
+# ============================================================
 ENABLE_VOICE_REPORT = _parse_bool(os.environ.get("ATLAS_ENABLE_VOICE", "1"))
 AUTO_SEND_VOICE = _parse_bool(os.environ.get("ATLAS_AUTO_SEND_VOICE", "1"))
 VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
 VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
 ENABLE_IMAGE_TABLE = _parse_bool(os.environ.get("ATLAS_ENABLE_IMAGE_TABLE", "1"))
+
+# ============================================================
+# RUN MODE & ENGINE MODE - با پیش‌فرض‌های صحیح
+# ============================================================
+def get_run_mode():
+    """حالت اجرا: AUTO, SNAPSHOT, ANALYSIS, BOTH"""
+    mode = os.environ.get("ATLAS_RUN_MODE", "AUTO").strip().upper()
+    if mode not in ("AUTO", "SNAPSHOT", "ANALYSIS", "BOTH"):
+        return "AUTO"
+    return mode
+
+def get_engine_mode():
+    """حالت موتور: MARKET, PERSONAL, BOTH"""
+    mode = os.environ.get("ATLAS_ENGINE", "BOTH").strip().upper()
+    if mode not in ("MARKET", "PERSONAL", "BOTH"):
+        return "BOTH"
+    return mode
 
 # ============================================================
 # MARKET SESSIONS
@@ -484,6 +497,10 @@ def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=No
 
 def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
     """ساخت جدول تصویری از سیگنال‌ها"""
+    if not ENABLE_IMAGE_TABLE:
+        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
+        return None
+    
     try:
         import matplotlib.pyplot as plt
         import matplotlib.font_manager as fm
@@ -602,6 +619,7 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
 def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     """ارسال جدول تصویری به تلگرام"""
     if not ENABLE_IMAGE_TABLE:
+        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
         return False
     
     filename = build_image_table(results, top10_symbols, dynamic30_symbols)
@@ -616,30 +634,31 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
             image_data = f.read()
         
         boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
-        body_parts = []
-        body_parts.append('--' + boundary)
-        body_parts.append('Content-Disposition: form-data; name="chat_id"')
-        body_parts.append('')
+        body = bytearray()
+        
+        # chat_id
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
         chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
         if chat_id:
-            body_parts.append(str(chat_id))
+            body.extend(str(chat_id).encode())
+        body.extend(b'\r\n')
         
-        body_parts.append('--' + boundary)
-        body_parts.append('Content-Disposition: form-data; name="photo"; filename="signal_table.png"')
-        body_parts.append('Content-Type: image/png')
-        body_parts.append('')
-        body_parts.append(image_data.decode('latin-1') if isinstance(image_data, bytes) else image_data)
-        body_parts.append('--' + boundary + '--')
-        body_parts.append('')
+        # photo
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(f'Content-Disposition: form-data; name="photo"; filename="signal_table.png"\r\n'.encode())
+        body.extend(b'Content-Type: image/png\r\n\r\n')
+        body.extend(image_data)
+        body.extend(b'\r\n')
+        body.extend(f'--{boundary}--\r\n'.encode())
         
-        body = '\r\n'.join(str(p) for p in body_parts).encode('utf-8')
         headers = {
             'Content-Type': f'multipart/form-data; boundary={boundary}',
             'Content-Length': str(len(body))
         }
         
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+        req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode())
             os.unlink(filename)
@@ -4384,13 +4403,12 @@ def personal_report(*args, **kwargs):
 
 
 def atlas_engine_mode():
-    mode=(os.environ.get("ATLAS_ENGINE") or "BOTH").strip().upper()
-    return mode if mode in {"MARKET","PERSONAL","BOTH"} else "MARKET"
+    return get_engine_mode()
 
 
 def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
-    mode=atlas_engine_mode()
+    mode=get_engine_mode()
     if mode=="MARKET": return [market]
     personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
     if mode=="PERSONAL": return [personal]
@@ -5068,7 +5086,8 @@ def _automatic_run_plan(now=None):
 def main():
     try:
         telegram_preflight()
-        run_mode = (os.environ.get("ATLAS_RUN_MODE") or "BOTH").strip().upper()
+        run_mode = get_run_mode()
+        
         if run_mode == "AUTO":
             plan = _automatic_run_plan()
             do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
@@ -5128,19 +5147,12 @@ def main():
         # ============================================================
         # Voice Output - ارسال گزارش صوتی
         # ============================================================
-        if ENABLE_VOICE_REPORT:
+        if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
             try:
+                print("\n🎤 Generating audio report...")
                 voice_data = analysis_results if analysis_results else snapshot_results
-                
-                # Voice Output
-            if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
-                try:
-                    print("\n🎤 Generating audio report...")
-                    voice_text = "به گزارش صوتی اطلس خوش آمدید. "
-                    if results:
-                        for r in results[:5]:
-                            voice_text += f"{r.get('coin', '')} {r.get('action', '')} با اطمینان {r.get('confidence', 0)} درصد. "
-                    audio_file = generate_audio_report(voice_text)
+                if voice_data:
+                    audio_file = generate_audio_report(voice_data)
                     if audio_file:
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
                         if result:
@@ -5149,11 +5161,16 @@ def main():
                             os.unlink(audio_file)
                         except:
                             pass
-                except Exception as e:
-                    print(f"⚠️ Audio error: {e}")               
-                    traceback.print_exc()
+                else:
+                    print("⚠️ No voice data available")
+            except Exception as e:
+                print(f"⚠️ Audio error: {e}")
+                traceback.print_exc()
         else:
-            print(f"ℹ️ Voice disabled: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}")
+            if not ENABLE_VOICE_REPORT:
+                print(f"ℹ️ Voice disabled: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}")
+            elif not AUTO_SEND_VOICE:
+                print(f"ℹ️ Voice disabled: AUTO_SEND_VOICE={AUTO_SEND_VOICE}")
 
         if not do_analysis and not do_snapshot:
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
