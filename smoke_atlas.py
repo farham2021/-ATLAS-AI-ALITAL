@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 from pathlib import Path
 import ast, re, sys
@@ -30,11 +29,15 @@ required = [
     # Voice functions
     "generate_voice_summary", "text_to_speech_persian", "generate_audio_report", "send_audio_report",
     # Session functions
-    "get_current_session", "MARKET_SESSIONS",
+    "get_current_session",
 ]
 missing = [x for x in required if x not in funcs]
 if missing:
     fail("missing required functions: " + ", ".join(missing))
+
+# Check for MARKET_SESSIONS variable (not a function)
+if "MARKET_SESSIONS" not in s:
+    fail("MARKET_SESSIONS dictionary not found")
 
 checks = {
     "version v11.1": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.1', s, re.M)),
