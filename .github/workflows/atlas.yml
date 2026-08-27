@@ -54,6 +54,8 @@ jobs:
       ATLAS_VOICE_TYPE: "female"
       ATLAS_VOICE_LANGUAGE: "fa"
       ATLAS_AUTO_SEND_VOICE: "1"
+      # Image Table Settings
+      ATLAS_ENABLE_IMAGE_TABLE: "true"
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
@@ -80,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --upgrade ccxt gTTS edge-tts
+          python -m pip install --upgrade ccxt gTTS edge-tts matplotlib Pillow
 
       - name: Verify source
         run: |
