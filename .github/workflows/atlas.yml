@@ -1,82 +1,134 @@
-name: ATLAS AI Bot v11
+name: ATLAS v11.1 — Unified Two-Engine + Trade Geometry + Dynamic CSV + Dashboard + 3H Snapshot + Voice
 
 on:
-  schedule:
-    # اجرا هر 4 ساعت یکبار
-    - cron: '0 */4 * * *'
-  # اجرای دستی از دکمه Actions
   workflow_dispatch:
+    inputs:
+      engine:
+        description: "MARKET / PERSONAL / BOTH"
+        required: false
+        default: "BOTH"
+      run_mode:
+        description: "AUTO / BOTH / ANALYSIS / SNAPSHOT"
+        required: false
+        default: "BOTH"
+  schedule:
+    - cron: "0 */4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-v11-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  run-atlas:
+  atlas:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 60
+    env:
+      PYTHONUNBUFFERED: "1"
+      ATLAS_VERSION: "11.1"
+      ATLAS_ENGINE: ${{ github.event.inputs.engine || 'BOTH' }}
+      ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
+      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+      ATLAS_TIMEFRAME: "4H"
+      ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+      ATLAS_TRADINGVIEW_INTERVAL: "240"
+      RISK_PER_TRADE_PCT: "1.5"
+      MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+      ATLAS_MIN_CONFIDENCE: "55"
+      ATLAS_MAX_LEVERAGE: "10"
+      ATLAS_MIN_EXECUTABLE_RR: "2.0"
+      ATLAS_MIN_WATCH_CONFIDENCE: "55"
+      ATLAS_BACKTEST_DAYS: "180"
+      ATLAS_SIGNAL_HORIZON_BARS: "36"
+      ATLAS_BACKTEST_IMPROVEMENT: "10"
+      ATLAS_BACKTEST_REFRESH_HOURS: "24"
+      ATLAS_CANDLE_EVENT_DEDUP: "1"
+      ATLAS_MIN_VOLUME_RATIO: "0.60"
+      ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
+      ATLAS_CHANGELOG: "changelog.txt"
+      # Voice Output Settings
+      ATLAS_ENABLE_VOICE: "true"
+      ATLAS_VOICE_TYPE: "female"
+      ATLAS_VOICE_LANGUAGE: "fa"
+      ATLAS_AUTO_SEND_VOICE: "true"
+      # Image Table Settings
+      ATLAS_ENABLE_IMAGE_TABLE: "true"
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+      CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+      COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+      CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
-      
+          python-version: "3.12"
+
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install ccxt edge-tts gtts matplotlib
-      
-      - name: Run ATLAS Bot
-        env:
-          # ===== Telegram (Secrets) =====
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
-          
-          # ===== Supabase (Secret) =====
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          
-          # ===== API Keys (Secrets) =====
-          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
-          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
-          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
-          
-          # ===== ATLAS Runtime Settings (Variables) =====
-          ATLAS_RUN_MODE: ${{ vars.ATLAS_RUN_MODE }}
-          ATLAS_ENGINE: ${{ vars.ATLAS_ENGINE }}
-          
-          # ===== ATLAS Voice Settings (Variables) =====
-          ATLAS_ENABLE_VOICE: ${{ vars.ATLAS_ENABLE_VOICE }}
-          ATLAS_AUTO_SEND_VOICE: ${{ vars.ATLAS_AUTO_SEND_VOICE }}
-          ATLAS_VOICE_TYPE: ${{ vars.ATLAS_VOICE_TYPE }}
-          ATLAS_VOICE_LANGUAGE: ${{ vars.ATLAS_VOICE_LANGUAGE }}
-          
-          # ===== ATLAS Image Settings (Variables) =====
-          ATLAS_ENABLE_IMAGE_TABLE: ${{ vars.ATLAS_ENABLE_IMAGE_TABLE }}
-          
-          # ===== ATLAS Trading Settings (Variables) =====
-          ATLAS_MIN_CONFIDENCE: ${{ vars.ATLAS_MIN_CONFIDENCE }}
-          ATLAS_MIN_EXECUTABLE_RR: ${{ vars.ATLAS_MIN_EXECUTABLE_RR }}
-          ATLAS_MIN_VOLUME_RATIO: ${{ vars.ATLAS_MIN_VOLUME_RATIO }}
-          ATLAS_MAX_LEVERAGE: ${{ vars.ATLAS_MAX_LEVERAGE }}
-          ATLAS_BACKTEST_DAYS: ${{ vars.ATLAS_BACKTEST_DAYS }}
-          
-          # ===== Telegram Rate Limits (Variables) =====
-          TELEGRAM_PRIVATE_DELAY: ${{ vars.TELEGRAM_PRIVATE_DELAY }}
-          TELEGRAM_GROUP_DELAY: ${{ vars.TELEGRAM_GROUP_DELAY }}
-          TELEGRAM_MAX_RETRIES: ${{ vars.TELEGRAM_MAX_RETRIES }}
-          
+          set -euo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --upgrade ccxt gTTS edge-tts matplotlib Pillow
+
+      - name: Verify source
         run: |
+          set -euo pipefail
+          test -f bot.py
+          test -f smoke_atlas.py
+          python -m py_compile bot.py
+          python -m py_compile smoke_atlas.py
+
+      - name: Run v11 smoke test
+        run: |
+          set -euo pipefail
+          python smoke_atlas.py
+
+      - name: Run v11 export unit test
+        run: |
+          set -euo pipefail
+          python test_v11_1.py
+
+      - name: Validate Telegram
+        run: |
+          set -euo pipefail
+          test -n "$TELEGRAM_TOKEN"
+          test -n "$TELEGRAM_CHAT_ID" || test -n "$TELEGRAM_GROUP_CHAT_ID"
+
+      - name: Run ATLAS v11.1
+        run: |
+          set -euo pipefail
           python bot.py
-      
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: atlas-logs
-          path: |
-            changelog.txt
-            atlas_v11.sqlite3
-            *.mp3
-            *.png
+
+      - name: Finalize SQLite
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f "$ATLAS_SQLITE_FILE" ]; then
+            python - <<'PY'
+          import os, sqlite3
+          db=os.environ['ATLAS_SQLITE_FILE']
+          con=sqlite3.connect(db,timeout=30)
+          try:
+              con.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+              con.execute('PRAGMA optimize')
+              result=con.execute('PRAGMA integrity_check').fetchone()
+              print('SQLite integrity:', result[0] if result else 'UNKNOWN')
+              if not result or result[0] != 'ok': raise SystemExit(1)
+          finally:
+              con.close()
+          PY
+          fi
