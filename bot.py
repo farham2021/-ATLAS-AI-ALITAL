@@ -141,7 +141,7 @@ def generate_voice_summary(results):
     
     for r in results:
         price = f(r.get("price"))
-        change = f(r.get("change"))
+        change = f(r.get("change")) or f(r.get("change24"))
         symbol = r.get("coin", "")
         if price:
             prices.append(price)
@@ -156,6 +156,68 @@ def generate_voice_summary(results):
     
     # محاسبه میانگین قیمت
     avg_price = sum(prices) / len(prices) if prices else 0
+    
+    # تولید متن صوتی
+    lines = [
+        "به گزارش صوتی اطلس خوش آمدید.",
+        f"گزارش لحظه‌ای بازار ارزهای دیجیتال در سشن {session_label}.",
+    ]
+    
+    if up_count > 0:
+        lines.append(f"{up_count} ارز صعودی هستند.")
+    if down_count > 0:
+        lines.append(f"{down_count} ارز نزولی هستند.")
+    if stable_count > 0:
+        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
+    
+    # بهترین و بدترین عملکرد
+    if changes:
+        best = max(changes, key=lambda x: x[1])
+        worst = min(changes, key=lambda x: x[1])
+        if best[1] > 0:
+            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
+        if worst[1] < 0:
+            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
+    
+    # قیمت تتر
+    usdt = fetch_usdt_toman_public()
+    if usdt:
+        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
+    
+    lines.append("این پیام به صورت خودکار هر ۳ ساعت بروزرسانی می‌شود.")
+    
+    return " ".join(lines)
+
+
+def generate_voice_summary_from_snapshot(results):
+    """تولید خلاصه صوتی از داده‌های اسنپ‌شات"""
+    if not results:
+        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
+    
+    # دریافت سشن فعلی
+    session, session_label, session_multiplier = get_current_session()
+    
+    # تحلیل قیمت‌ها
+    up_count = 0
+    down_count = 0
+    stable_count = 0
+    changes = []
+    prices = []
+    
+    for r in results:
+        price = f(r.get("price"))
+        change = f(r.get("change")) or f(r.get("change24"))
+        symbol = r.get("coin", "")
+        if price:
+            prices.append(price)
+            if change is not None:
+                changes.append((symbol, change))
+                if change > 0.5:
+                    up_count += 1
+                elif change < -0.5:
+                    down_count += 1
+                else:
+                    stable_count += 1
     
     # تولید متن صوتی
     lines = [
@@ -234,7 +296,16 @@ def text_to_speech_persian(text, voice="female"):
 
 def generate_audio_report(results, filename="audio_report.mp3"):
     """تولید فایل صوتی از گزارش"""
+    if not results:
+        return None
+    
+    # استفاده از generate_voice_summary معمولی
     audio_text = generate_voice_summary(results)
+    
+    # اگر متن خیلی کوتاه است، از نسخه snapshot استفاده کن
+    if len(audio_text) < 50:
+        audio_text = generate_voice_summary_from_snapshot(results)
+    
     audio_file = text_to_speech_persian(audio_text, VOICE_TYPE)
     if audio_file:
         import shutil
@@ -4730,30 +4801,37 @@ def main():
         # ============================================================
         # Voice Output - ارسال گزارش صوتی
         # ============================================================
-        if ENABLE_VOICE_REPORT and analysis_results:
+        if ENABLE_VOICE_REPORT:
             try:
-                print(f"\n🎤 Generating audio report... ({len(analysis_results)} results)")
-                audio_text = generate_voice_summary(analysis_results)
-                print(f"📝 Voice text: {audio_text[:100]}...")
-                audio_file = generate_audio_report(analysis_results)
-                if audio_file:
-                    print(f"✅ Audio file created: {audio_file} ({os.path.getsize(audio_file)} bytes)")
-                    result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
-                    if result:
-                        print("✅ Audio report sent successfully")
+                # اگر analysis_results وجود دارد از آن استفاده کن، وگرنه از snapshot_results
+                voice_data = analysis_results if analysis_results else snapshot_results
+                
+                if voice_data:
+                    print(f"\n🎤 Generating audio report... ({len(voice_data)} items)")
+                    
+                    # استفاده از generate_audio_report معمولی
+                    audio_file = generate_audio_report(voice_data)
+                    
+                    if audio_file:
+                        print(f"✅ Audio file created: {audio_file} ({os.path.getsize(audio_file)} bytes)")
+                        result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
+                        if result:
+                            print("✅ Audio report sent successfully")
+                        else:
+                            print("❌ Failed to send audio report")
+                        try:
+                            os.unlink(audio_file)
+                        except:
+                            pass
                     else:
-                        print("❌ Failed to send audio report")
-                    try:
-                        os.unlink(audio_file)
-                    except:
-                        pass
+                        print("❌ Failed to generate audio file")
                 else:
-                    print("❌ Failed to generate audio file")
+                    print("ℹ️ No data for voice report")
             except Exception as e:
                 print(f"⚠️ Audio error: {e}")
                 traceback.print_exc()
         else:
-            print(f"ℹ️ Voice skipped: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}, analysis_results={bool(analysis_results)}")
+            print(f"ℹ️ Voice disabled: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}")
 
         if not do_analysis and not do_snapshot:
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
