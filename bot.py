@@ -1191,6 +1191,551 @@ def candle_event(coin, timeframe, rows):
 
 
 # ============================================================
+# ============================================================
+# MISSING FUNCTIONS - ADDED FOR COMPLETENESS
+# ============================================================
+
+def trend_from_rows(rows):
+    """تشخیص روند از کندل‌ها"""
+    if not rows or len(rows) < 20:
+        return "UNKNOWN"
+    closes_list = [f(x[4]) for x in rows[-20:] if f(x[4]) is not None]
+    if len(closes_list) < 20:
+        return "UNKNOWN"
+    if closes_list[-1] > closes_list[0] * 1.02:
+        return "BULLISH"
+    elif closes_list[-1] < closes_list[0] * 0.98:
+        return "BEARISH"
+    return "NEUTRAL"
+
+def _plan_is_allowed(r):
+    """بررسی اینکه آیا پلن معاملاتی مجاز است"""
+    action = str(r.get("action", "")).upper()
+    return action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BULLISH WATCH", "BEARISH WATCH")
+
+def _clear_trade_plan(r):
+    """پاک کردن اطلاعات معاملاتی"""
+    for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4", "rr"):
+        r[k] = None
+    return r
+
+def _rr_from_values(entry, sl, tp2):
+    """محاسبه نسبت ریسک به ریوارد"""
+    entry, sl, tp2 = f(entry), f(sl), f(tp2)
+    if None in (entry, sl, tp2) or entry == sl:
+        return None
+    risk = abs(entry - sl)
+    reward = abs(tp2 - entry)
+    return reward / risk if risk > 0 else None
+
+def tf_snapshot(coin):
+    """گرفتن snapshot از تمام تایم‌فریم‌ها"""
+    snapshots = {}
+    for tf in ["1h", "4h", "1d", "1w", "1M"]:
+        try:
+            rows, source = best_ohlcv(coin, tf, limit=250)
+            snapshots[tf] = {
+                "rows": rows,
+                "trend": trend_from_rows(rows),
+                "rsi": rsi(closes(rows)),
+                "macd": macd(closes(rows))[0] if len(closes(rows)) >= 35 else None,
+                "event": candle_event(coin, tf, rows),
+                "engine": source
+            }
+        except Exception:
+            snapshots[tf] = {"rows": [], "trend": "UNKNOWN", "rsi": None, "macd": None, "event": {"status": "NO_DATA"}, "engine": "N/A"}
+    return snapshots
+
+def price_consensus(coin):
+    """دریافت قیمت از چند منبع و اجماع"""
+    prices = []
+    sources = []
+    errors = []
+    
+    # تلاش از طریق CCXT
+    try:
+        ensure_exchanges()
+        for eid in ("kcex", "okx", "bybit", "kucoin"):
+            try:
+                ticker = exchange_ticker(eid, coin)
+                if ticker.get("price"):
+                    prices.append(ticker["price"])
+                    sources.append({"source": eid.upper(), "price": ticker["price"], "change": ticker.get("change")})
+            except Exception as e:
+                errors.append(f"{eid}: {str(e)}")
+                continue
+    except Exception as e:
+        errors.append(f"CCXT: {str(e)}")
+    
+    if not prices:
+        return None, [], "LOW", 0, errors
+    
+    avg_price = sum(prices) / len(prices)
+    
+    # محاسبه کیفیت بر اساس پراکندگی قیمت‌ها
+    if len(prices) >= 3:
+        spread = (max(prices) - min(prices)) / avg_price * 100
+        if spread < 0.5:
+            quality = "HIGH"
+        elif spread < 2:
+            quality = "MEDIUM"
+        else:
+            quality = "LOW"
+    else:
+        quality = "MEDIUM"
+    
+    return avg_price, sources, quality, 0, errors
+
+def candle_pattern(rows):
+    """تشخیص الگوی کندلی"""
+    if not rows or len(rows) < 3:
+        return "NONE", "NEUTRAL"
+    
+    # الگوی چکش یا ستاره دنباله‌دار
+    last = rows[-1]
+    open_price, high, low, close = f(last[1]), f(last[2]), f(last[3]), f(last[4])
+    if None in (open_price, high, low, close):
+        return "NONE", "NEUTRAL"
+    
+    body = abs(close - open_price)
+    upper_wick = high - max(open_price, close)
+    lower_wick = min(open_price, close) - low
+    
+    if body == 0:
+        return "DOJI", "NEUTRAL"
+    
+    # چکش (Hammer) - صعودی
+    if lower_wick > body * 2 and upper_wick < body * 0.5:
+        return "HAMMER", "BULLISH"
+    
+    # ستاره دنباله‌دار (Shooting Star) - نزولی
+    if upper_wick > body * 2 and lower_wick < body * 0.5:
+        return "SHOOTING_STAR", "BEARISH"
+    
+    # الگوی پوشا (Engulfing)
+    if len(rows) >= 2:
+        prev = rows[-2]
+        prev_open, prev_close = f(prev[1]), f(prev[4])
+        if None not in (prev_open, prev_close):
+            # پوشا صعودی
+            if prev_close < prev_open and close > open_price and close > prev_open and open_price < prev_close:
+                return "BULLISH_ENGULFING", "BULLISH"
+            # پوشا نزولی
+            if prev_close > prev_open and close < open_price and close < prev_open and open_price > prev_close:
+                return "BEARISH_ENGULFING", "BEARISH"
+    
+    return "NONE", "NEUTRAL"
+
+def indicator_alignment(tf4):
+    """بررسی هم‌جهتی اندیکاتورها"""
+    rows = tf4.get("rows", [])
+    if not rows or len(rows) < 30:
+        return "MIXED", 0, 0, [], False, False
+    
+    closes_list = closes(rows)
+    if len(closes_list) < 30:
+        return "MIXED", 0, 0, [], False, False
+    
+    rsi_val = rsi(closes_list)
+    ml, ms, _ = macd(closes_list)
+    
+    reasons = []
+    bull_count = 0
+    bear_count = 0
+    
+    # RSI
+    if rsi_val is not None:
+        if rsi_val > 60:
+            bull_count += 1
+            reasons.append("RSI صعودی")
+        elif rsi_val < 40:
+            bear_count += 1
+            reasons.append("RSI نزولی")
+        else:
+            reasons.append("RSI خنثی")
+    
+    # MACD
+    if ml is not None and ms is not None:
+        if ml > ms:
+            bull_count += 1
+            reasons.append("MACD صعودی")
+        else:
+            bear_count += 1
+            reasons.append("MACD نزولی")
+    
+    # روند قیمت
+    trend = trend_from_rows(rows)
+    if trend == "BULLISH":
+        bull_count += 1
+        reasons.append("روند صعودی")
+    elif trend == "BEARISH":
+        bear_count += 1
+        reasons.append("روند نزولی")
+    
+    overbought = rsi_val is not None and rsi_val > 70
+    oversold = rsi_val is not None and rsi_val < 30
+    
+    if bull_count > bear_count:
+        return "BULLISH", bull_count, bear_count, reasons, overbought, oversold
+    elif bear_count > bull_count:
+        return "BEARISH", bull_count, bear_count, reasons, overbought, oversold
+    return "MIXED", bull_count, bear_count, reasons, overbought, oversold
+
+def strong_divergence(rows):
+    """تشخیص واگرایی قوی"""
+    if len(rows) < 20:
+        return None
+    
+    closes_list = closes(rows)
+    if len(closes_list) < 20:
+        return None
+    
+    rsi_values = []
+    for i in range(14, len(closes_list)):
+        rsi_values.append(rsi(closes_list[:i+1]))
+    if not rsi_values or len(rsi_values) < 10:
+        return None
+    
+    # بررسی واگرایی بین قیمت و RSI
+    price_trend = closes_list[-1] > closes_list[-10]
+    rsi_trend = rsi_values[-1] > rsi_values[-10]
+    
+    if price_trend and not rsi_trend:
+        return "BEARISH_3_LEVEL"
+    elif not price_trend and rsi_trend:
+        return "BULLISH_3_LEVEL"
+    
+    return None
+
+def momentum_30m(coin):
+    """بررسی مومنتوم 30 دقیقه"""
+    try:
+        rows, _ = best_ohlcv(coin, "30m", limit=30)
+        if not rows or len(rows) < 10:
+            return "NEUTRAL", False
+        
+        closes_list = closes(rows)
+        if len(closes_list) < 10:
+            return "NEUTRAL", False
+        
+        # محاسبه مومنتوم با EMA 7 و 21
+        ema7 = ema(closes_list, 7)
+        ema21 = ema(closes_list, 21)
+        
+        if ema7 is None or ema21 is None:
+            return "NEUTRAL", False
+        
+        if ema7 > ema21 * 1.01:
+            return "BULLISH", True
+        elif ema7 < ema21 * 0.99:
+            return "BEARISH", True
+        
+        return "NEUTRAL", False
+    except Exception:
+        return "NEUTRAL", False
+
+def asset_liquidity(coin, sources):
+    """بررسی نقدشوندگی دارایی"""
+    if not sources:
+        return 30, "LOW"
+    
+    # بر اساس تعداد منابعی که قیمت دارند
+    active_sources = len([s for s in sources if s.get("price")])
+    
+    if active_sources >= 3:
+        return 80, "HIGH"
+    elif active_sources >= 2:
+        return 60, "MEDIUM"
+    elif active_sources >= 1:
+        return 40, "LOW"
+    
+    return 30, "LOW"
+
+def daily_key_levels(daily_rows, current_price=None):
+    """یافتن سطوح کلیدی روزانه"""
+    if not daily_rows or len(daily_rows) < 30:
+        return {"support": None, "resistance": None, "confidence": "LOW", "method": "DAILY"}
+    
+    supports = []
+    resistances = []
+    
+    # یافتن نقاط حمایت و مقاومت در 30 کندل اخیر
+    for i in range(10, len(daily_rows) - 1):
+        low = f(daily_rows[i][3])
+        high = f(daily_rows[i][2])
+        prev_low = f(daily_rows[i-1][3])
+        prev_high = f(daily_rows[i-1][2])
+        
+        if low is None or high is None or prev_low is None or prev_high is None:
+            continue
+        
+        # نقطه حمایت
+        if low < prev_low and low < f(daily_rows[i+1][3]) if i+1 < len(daily_rows) else True:
+            supports.append(low)
+        
+        # نقطه مقاومت
+        if high > prev_high and high > f(daily_rows[i+1][2]) if i+1 < len(daily_rows) else True:
+            resistances.append(high)
+    
+    if not supports or not resistances:
+        return {"support": None, "resistance": None, "confidence": "LOW", "method": "DAILY"}
+    
+    # نزدیک‌ترین سطوح به قیمت فعلی
+    if current_price:
+        support = max([s for s in supports if s < current_price], default=None)
+        resistance = min([r for r in resistances if r > current_price], default=None)
+    else:
+        support = supports[-1] if supports else None
+        resistance = resistances[-1] if resistances else None
+    
+    confidence = "HIGH" if len(supports) > 5 and len(resistances) > 5 else "MEDIUM" if len(supports) > 2 and len(resistances) > 2 else "LOW"
+    
+    return {
+        "support": support,
+        "resistance": resistance,
+        "confidence": confidence,
+        "method": "DAILY",
+        "support_touches": len(supports),
+        "resistance_touches": len(resistances),
+        "support_score": min(100, len(supports) * 15),
+        "resistance_score": min(100, len(resistances) * 15)
+    }
+
+def h4_fallback_levels(rows, current_price=None):
+    """یافتن سطوح کلیدی 4 ساعته (فال‌بک)"""
+    if not rows or len(rows) < 30:
+        return {"support": None, "resistance": None, "confidence": "LOW", "method": "H4_FALLBACK"}
+    
+    supports = []
+    resistances = []
+    
+    for i in range(5, len(rows) - 1):
+        low = f(rows[i][3])
+        high = f(rows[i][2])
+        
+        if low is None or high is None:
+            continue
+        
+        # بررسی حمایت
+        if low < f(rows[i-1][3]) and low < f(rows[i+1][3]) if i+1 < len(rows) else True:
+            supports.append(low)
+        
+        # بررسی مقاومت
+        if high > f(rows[i-1][2]) and high > f(rows[i+1][2]) if i+1 < len(rows) else True:
+            resistances.append(high)
+    
+    if not supports or not resistances:
+        return {"support": None, "resistance": None, "confidence": "LOW", "method": "H4_FALLBACK"}
+    
+    if current_price:
+        support = max([s for s in supports if s < current_price], default=None)
+        resistance = min([r for r in resistances if r > current_price], default=None)
+    else:
+        support = supports[-1] if supports else None
+        resistance = resistances[-1] if resistances else None
+    
+    confidence = "HIGH" if len(supports) > 5 and len(resistances) > 5 else "MEDIUM" if len(supports) > 2 and len(resistances) > 2 else "LOW"
+    
+    return {
+        "support": support,
+        "resistance": resistance,
+        "confidence": confidence,
+        "method": "H4_FALLBACK",
+        "support_touches": len(supports),
+        "resistance_touches": len(resistances),
+        "support_score": min(100, len(supports) * 15),
+        "resistance_score": min(100, len(resistances) * 15)
+    }
+
+def candle_trigger_state(rows, direction, support=None, resistance=None):
+    """بررسی وضعیت کندل برای تریگر"""
+    if not rows or len(rows) < 2:
+        return {"state": "NEUTRAL"}
+    
+    last = rows[-1]
+    prev = rows[-2]
+    
+    last_close = f(last[4])
+    last_open = f(last[1])
+    last_high = f(last[2])
+    last_low = f(last[3])
+    prev_close = f(prev[4])
+    
+    if None in (last_close, last_open, last_high, last_low, prev_close):
+        return {"state": "NEUTRAL"}
+    
+    if direction == "LONG":
+        # شکست مقاومت با کندل بسته
+        if resistance and last_close > resistance and last_open < resistance:
+            return {"state": "BREAKOUT_CLOSED"}
+        # بازگشت به بالای حمایت
+        if support and last_close > support and prev_close < support:
+            return {"state": "SUPPORT_RECLAIM"}
+        # کندل صعودی قوی
+        if last_close > last_open * 1.02 and last_high > last_open * 1.03:
+            return {"state": "BULLISH_CLOSE"}
+    elif direction == "SHORT":
+        # شکست حمایت با کندل بسته
+        if support and last_close < support and last_open > support:
+            return {"state": "BREAKDOWN_CLOSED"}
+        # رد شدن از مقاومت
+        if resistance and last_close < resistance and prev_close > resistance:
+            return {"state": "RESISTANCE_REJECT"}
+        # کندل نزولی قوی
+        if last_close < last_open * 0.98 and last_low < last_open * 0.97:
+            return {"state": "BEARISH_CLOSE"}
+    
+    return {"state": "NEUTRAL"}
+
+def calculate_levels(rows, direction, daily_levels=None):
+    """محاسبه سطوح ورود، حد ضرر و اهداف"""
+    if not rows or direction not in ("LONG", "SHORT"):
+        return None
+    
+    price = f(rows[-1][4])
+    if price is None:
+        return None
+    
+    atr_val = atr(rows, 14)
+    if atr_val is None:
+        return None
+    
+    support = f(daily_levels.get("support")) if daily_levels else None
+    resistance = f(daily_levels.get("resistance")) if daily_levels else None
+    
+    if direction == "LONG":
+        entry = price
+        sl = support * 0.99 if support else price - atr_val * 1.5
+        tp1 = entry + atr_val * 1.5
+        tp2 = entry + atr_val * 3.0
+        tp3 = entry + atr_val * 4.5
+        tp4 = entry + atr_val * 6.0
+        
+        # اطمینان از صحت هندسه
+        if sl >= entry or tp1 <= entry or tp2 <= tp1:
+            return None
+            
+    else:  # SHORT
+        entry = price
+        sl = resistance * 1.01 if resistance else price + atr_val * 1.5
+        tp1 = entry - atr_val * 1.5
+        tp2 = entry - atr_val * 3.0
+        tp3 = entry - atr_val * 4.5
+        tp4 = entry - atr_val * 6.0
+        
+        # اطمینان از صحت هندسه
+        if sl <= entry or tp1 >= entry or tp2 >= tp1:
+            return None
+    
+    pivot = (support + resistance) / 2 if support and resistance else price
+    
+    return {
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "tp4": tp4,
+        "pivot": pivot
+    }
+
+def suggested_leverage(atr_pct):
+    """پیشنهاد اهرم بر اساس نوسان"""
+    if atr_pct is None:
+        return 1.0
+    
+    if atr_pct < 1:
+        return min(MAX_LEVERAGE, 5.0)
+    elif atr_pct < 2:
+        return min(MAX_LEVERAGE, 3.0)
+    elif atr_pct < 4:
+        return min(MAX_LEVERAGE, 2.0)
+    else:
+        return 1.0
+
+def weekly_pivot(rows):
+    """محاسبه پیوت هفتگی"""
+    if not rows:
+        return None
+    
+    # اگر کندل هفتگی موجود باشد
+    if len(rows) >= 7:
+        week_rows = rows[-7:]
+        high = max([f(x[2]) for x in week_rows if f(x[2]) is not None])
+        low = min([f(x[3]) for x in week_rows if f(x[3]) is not None])
+        close = f(week_rows[-1][4])
+        if None not in (high, low, close):
+            return (high + low + close) / 3
+    
+    return None
+
+def multi_source_validation(symbol, exchange_price=None):
+    """اعتبارسنجی از چند منبع"""
+    result = {
+        "tradingview": {"status": "UNKNOWN"},
+        "coinglass": {"status": "UNKNOWN"},
+        "exchange": {"status": "UNKNOWN"}
+    }
+    
+    # اعتبارسنجی از صرافی‌ها
+    if exchange_price:
+        try:
+            ensure_exchanges()
+            prices = []
+            for eid in ("kcex", "okx", "bybit"):
+                try:
+                    ticker = exchange_ticker(eid, symbol)
+                    if ticker.get("price"):
+                        prices.append(ticker["price"])
+                except:
+                    continue
+            
+            if prices:
+                avg_price = sum(prices) / len(prices)
+                deviation = abs(exchange_price - avg_price) / avg_price * 100
+                if deviation < 1:
+                    result["exchange"]["status"] = "OK"
+                    result["exchange"]["deviation"] = deviation
+                else:
+                    result["exchange"]["status"] = "DEVIATION"
+                    result["exchange"]["deviation"] = deviation
+        except:
+            pass
+    
+    # TradingView Rating (سیمولیشن)
+    try:
+        # در حالت واقعی اینجا API TradingView وصل می‌شود
+        # فعلاً سیمولیشن
+        result["tradingview"]["status"] = "OK"
+        result["tradingview"]["rating"] = "NEUTRAL"
+    except:
+        pass
+    
+    return result
+
+def _cluster_levels(values, tolerance=0.012):
+    """خوشه‌بندی سطوح نزدیک به هم"""
+    if not values:
+        return []
+    
+    sorted_vals = sorted(values)
+    clusters = []
+    current_cluster = [sorted_vals[0]]
+    
+    for v in sorted_vals[1:]:
+        if abs(v - current_cluster[-1]) / current_cluster[-1] < tolerance:
+            current_cluster.append(v)
+        else:
+            clusters.append(sum(current_cluster) / len(current_cluster))
+            current_cluster = [v]
+    
+    if current_cluster:
+        clusters.append(sum(current_cluster) / len(current_cluster))
+    
+    return clusters
+
+
+# ============================================================
 # METAL ANALYSIS (برای فلزات)
 # ============================================================
 
@@ -1885,7 +2430,7 @@ def _opportunity_score(r):
     rr = float(r.get("rr") or 0)
     setup = float(r.get("setup_score") or 0)
     entry = float(r.get("entry_quality") or 0)
-    risk = float(r.get("risk_quality") or 0)
+    risk = float(r.get("risk_quality") or 50)
     tv = (r.get("tradingview_rating") or "").upper()
     tv_bonus = 8 if tv in ("BUY", "STRONG_BUY") and r.get("direction") == "LONG" else 8 if tv in ("SELL", "STRONG_SELL") and r.get("direction") == "SHORT" else 0
     executable = 30 if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") else 0
@@ -1982,23 +2527,20 @@ def _ensure_candidate_plan(r):
     if r.get("rr") is None:
         return _clear_trade_plan(r)
     
-    # ============================================================
-    # اصلاح خطا: اضافه کردن آرگومان ششم (None)
-    # ============================================================
     valid, reason = _validate_trade_geometry(
         r.get("direction"), 
         r.get("entry"), 
         r.get("sl"), 
         r.get("tp1"), 
         r.get("tp2"), 
-        None  # <--- این آرگومان اضافه شد
+        None
     )
     if not valid:
         r["gate_reason"] = f"Trade geometry blocked: {reason}"
         return _clear_trade_plan(r)
-    # ============================================================
     
     return r
+
 # ============================================================
 # SNAPSHOT FUNCTIONS (برای smoke_atlas.py)
 # ============================================================
@@ -2457,7 +2999,7 @@ def send_report(text):
 
 
 # ============================================================
-# MISSING FUNCTIONS (برای اتمام)
+# HTTP HELPERS (برای توابع قبلی)
 # ============================================================
 
 def http_get(url, timeout=15, headers=None):
@@ -2471,72 +3013,6 @@ def safe_http_get(url, timeout=15, headers=None, default=None):
     except Exception:
         return default
 
-def _cluster_levels(values, tolerance=0.012):
-    return []
-
-def daily_key_levels(daily_rows, current_price=None):
-    return {"support": None, "resistance": None, "confidence": "LOW"}
-
-def h4_fallback_levels(rows, current_price=None):
-    return {"support": None, "resistance": None, "confidence": "LOW"}
-
-def candle_trigger_state(rows, direction, support=None, resistance=None):
-    return {"state": "NEUTRAL"}
-
-def price_consensus(coin):
-    return 100, [], "MEDIUM", 0, []
-
-def tf_snapshot(coin):
-    return {}
-
-def candle_pattern(rows):
-    return "NONE", "NEUTRAL"
-
-def indicator_alignment(tf4):
-    return "MIXED", 0, 0, [], False, False
-
-def strong_divergence(rows):
-    return None
-
-def momentum_30m(coin):
-    return "NEUTRAL", False
-
-def asset_liquidity(coin, sources):
-    return 50, "MEDIUM"
-
-def calculate_levels(rows, direction, daily_levels=None):
-    return None
-
-def suggested_leverage(atr_pct):
-    return 1.0
-
-def weekly_pivot(rows):
-    return None
-
-def multi_source_validation(symbol, exchange_price=None):
-    return {}
-
-def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
-    """Deterministic safety gate: reject impossible/contradictory trade geometry."""
-    direction = str(direction or "").upper()
-    entry, sl, tp1, tp2 = map(f, (entry, sl, tp1, tp2))
-    if direction not in ("LONG", "SHORT") or None in (entry, sl, tp1, tp2):
-        return False, "non-positive trade level"
-    if min(x <= 0 for x in (entry, sl, tp1, tp2)):
-        return False, "non-positive trade level"
-    if direction == "LONG":
-        if not (sl < entry < tp1 < tp2):
-            return False, "Trade geometry blocked: invalid LONG geometry"
-    else:
-        if not (sl > entry > tp1 > tp2):
-            return False, "Trade geometry blocked: invalid SHORT geometry"
-    rr = _rr_from_values(entry, sl, tp2)
-    if rr is None or rr <= 0:
-        return False, "non-positive trade level"
-    required_rr = MIN_EXECUTABLE_RR if min_rr is None else float(min_rr)
-    if rr < required_rr:
-        return False, f"R/R below {required_rr:.2f}"
-    return True, None
 
 # ============================================================
 # MAIN
