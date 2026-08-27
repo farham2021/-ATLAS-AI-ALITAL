@@ -2334,55 +2334,86 @@ def _rr_from_values(entry, sl, tp):
 
 def main():
     try:
-        print(f"🤖 {VERSION}")
         telegram_preflight()
-        init_sqlite()
-        
-        results = []
-        coins = ["BTC", "ETH", "BNB", "XRP", "SOL"]
-        for coin in coins:
-            try:
-                r = analyze_coin(coin, {"impact": "NORMAL", "bias": "NEUTRAL"}, {"candle_pattern": 15, "rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "news_clear": 15})
-                if r:
-                    results.append(r)
-                    print(f"✅ {coin}: {r['action']}")
-            except Exception as e:
-                print(f"❌ {coin}: {e}")
-        
-        text = build_report(results, ["BTC", "ETH"], [], {}, {"impact": "NORMAL"}, {}, 0)
-        send_report(text)
-        
-        # CSV Export
-        csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
-        if csv_sent > 0:
-            print(f"📊 CSV sent: {csv_sent} destinations")
-        
-        # Voice Output
-        if ENABLE_VOICE_REPORT and results:
-            try:
-                print("\n🎤 Generating audio report...")
-                voice_text = "به گزارش صوتی اطلس خوش آمدید. "
-                for r in results[:3]:
-                    voice_text += f"{r['coin']} {r['action']} با اطمینان {r['confidence']} درصد. "
-                audio_file = generate_audio_report(voice_text)
-                if audio_file:
-                    result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
-                    if result:
-                        print("✅ Audio report sent successfully")
-                    else:
-                        print("❌ Failed to send audio report")
-                    try:
-                        os.unlink(audio_file)
-                    except:
-                        pass
-            except Exception as e:
-                print(f"⚠️ Audio error: {e}")
-        
+        run_mode = (os.environ.get("ATLAS_RUN_MODE") or "BOTH").strip().upper()
+        if run_mode == "AUTO":
+            plan = _automatic_run_plan()
+            do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
+        elif run_mode == "SNAPSHOT":
+            do_analysis, do_snapshot = False, True
+        elif run_mode == "ANALYSIS":
+            do_analysis, do_snapshot = True, False
+        else:
+            do_analysis, do_snapshot = True, True
+
+        total_sent = 0
+        all_errors = []
+        analysis_results = []
+
+        if do_analysis:
+            print("📊 Running analysis...")
+            results = []
+            coins = ["BTC", "ETH", "BNB", "XRP", "SOL"]
+            for coin in coins:
+                try:
+                    r = analyze_coin(coin, {"impact": "NORMAL", "bias": "NEUTRAL"}, {"candle_pattern": 15, "rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "news_clear": 15})
+                    if r:
+                        results.append(r)
+                        print(f"✅ {coin}: {r['action']}")
+                except Exception as e:
+                    print(f"❌ {coin}: {e}")
+            
+            text = build_report(results, ["BTC", "ETH"], [], {}, {"impact": "NORMAL"}, {}, 0)
+            parts, sent, errors = send_report(text)
+            total_sent += sent
+            all_errors.extend(errors)
+            analysis_results = results
+            
+            # CSV Export
+            csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
+            if csv_sent > 0:
+                print(f"📊 CSV sent: {csv_sent} destinations")
+            if csv_errors:
+                print(f"⚠️ CSV errors: {csv_errors}")
+            
+            # Voice Output
+            if ENABLE_VOICE_REPORT and results:
+                try:
+                    print("\n🎤 Generating audio report...")
+                    voice_text = "به گزارش صوتی اطلس خوش آمدید. "
+                    for r in results[:3]:
+                        voice_text += f"{r['coin']} {r['action']} با اطمینان {r['confidence']} درصد. "
+                    audio_file = generate_audio_report(voice_text)
+                    if audio_file:
+                        result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
+                        if result:
+                            print("✅ Audio report sent successfully")
+                        else:
+                            print("❌ Failed to send audio report")
+                        try:
+                            os.unlink(audio_file)
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"⚠️ Audio error: {e}")
+
+        if do_snapshot:
+            print("📸 Running snapshot...")
+            snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
+            snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
+            total_sent += snapshot_sent
+            all_errors.extend(snapshot_errors)
+
+        if not do_analysis and not do_snapshot:
+            print(f"{VERSION}: AUTO schedule has no task at this hour.")
+            return 0
+
+        if all_errors or total_sent == 0:
+            raise RuntimeError("Telegram delivery failed: " + "; ".join(all_errors or ["0 messages sent"]))
         return 0
     except Exception as e:
         print(f"❌ Error: {e}")
         traceback.print_exc()
         return 1
-
 if __name__ == "__main__":
     raise SystemExit(main())
