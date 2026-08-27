@@ -106,10 +106,10 @@ CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog_v11_2.txt")
 MAX_WORKERS = int(os.environ.get("ATLAS_MAX_WORKERS", "5"))
 CACHE_TTL = int(os.environ.get("ATLAS_CACHE_TTL", "300"))
 
-ENABLE_VOICE_REPORT = os.environ.get("ATLAS_ENABLE_VOICE", "1") == "1"
+ENABLE_VOICE_REPORT = os.environ.get("ATLAS_ENABLE_VOICE", "1").strip().lower() in {"1", "true", "yes", "on"}
 VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
 VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
-AUTO_SEND_VOICE = os.environ.get("ATLAS_AUTO_SEND_VOICE", "1") == "1"
+AUTO_SEND_VOICE = os.environ.get("ATLAS_AUTO_SEND_VOICE", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ============================================================
@@ -1856,9 +1856,9 @@ def analyze_coin(coin, market_news, weights):
         volume_points = 0.0
     elif vol_ratio >= 1.50:
         volume_points = weights["volume"]
-    elif vol_ratio >= 1.00:
-        volume_points = weights["volume"] * 0.70
     elif vol_ratio >= MIN_VOLUME_RATIO:
+        volume_points = weights["volume"] * 0.70
+    elif vol_ratio >= 1.00:
         volume_points = weights["volume"] * 0.35
     else:
         volume_points = 0.0
@@ -2301,7 +2301,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     and str(x).upper() not in top10_names
     and str(x).upper() not in personal_symbols
 ]
-dyn30_rows = dynamic_top8(market_results, [r.get("coin") for r in dyn30_all_rows], exclude_symbols=personal_symbols)
+    dyn30_rows = dynamic_top8(market_results, [r.get("coin") for r in dyn30_all_rows], exclude_symbols=personal_symbols)
 
     metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
     dt = now_tehran()
@@ -2793,39 +2793,59 @@ def send_audio_report(audio_file, caption=None):
         return False
     if not TELEGRAM_TOKEN:
         return False
-    with open(audio_file, 'rb') as f:
-        audio_data = f.read()
-    boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
-    body_parts = []
-    body_parts.append('--' + boundary)
-    body_parts.append('Content-Disposition: form-data; name="chat_id"')
-    body_parts.append('')
+
     chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
-    if chat_id:
-        body_parts.append(str(chat_id))
+    if not chat_id:
+        return False
+
+    with open(audio_file, "rb") as f:
+        audio_data = f.read()
+
+    boundary = "---------------------------" + hashlib.md5(
+        str(time.time()).encode()
+    ).hexdigest()[:16]
+    chunks = []
+
+    def add_field(name, value):
+        chunks.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n'
+                f"\r\n{value}\r\n"
+            ).encode("utf-8")
+        )
+
+    add_field("chat_id", str(chat_id))
     if caption:
-        body_parts.append('--' + boundary)
-        body_parts.append('Content-Disposition: form-data; name="caption"')
-        body_parts.append('')
-        body_parts.append(caption)
-    body_parts.append('--' + boundary)
-    body_parts.append(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"')
-    body_parts.append('Content-Type: audio/mpeg')
-    body_parts.append('')
-    body_parts.append(audio_data.decode('latin-1') if isinstance(audio_data, bytes) else audio_data)
-    body_parts.append('--' + boundary + '--')
-    body_parts.append('')
-    body = '\r\n'.join(str(p) for p in body_parts).encode('utf-8')
+        add_field("caption", caption)
+
+    chunks.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="audio"; '
+            f'filename="{os.path.basename(audio_file)}"\r\n'
+            f"Content-Type: audio/mpeg\r\n"
+            f"\r\n"
+        ).encode("utf-8")
+    )
+    chunks.append(audio_data)
+    chunks.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    body = b"".join(chunks)
     headers = {
-        'Content-Type': f'multipart/form-data; boundary={boundary}',
-        'Content-Length': str(len(body))
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
     }
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
-    req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode())
-            return result.get('ok', False)
+            return result.get("ok", False)
     except Exception as e:
         print(f"❌ Audio send error: {e}")
         return False
@@ -2957,6 +2977,7 @@ def safe_http_get(url, timeout=15, headers=None, default=None):
 def main():
     try:
         telegram_preflight()
+
         run_mode = (os.environ.get("ATLAS_RUN_MODE") or "BOTH").strip().upper()
         if run_mode == "AUTO":
             plan = _automatic_run_plan()
@@ -2975,52 +2996,145 @@ def main():
         if do_analysis:
             print("📊 Running analysis...")
             results = []
-            coins = ["BTC", "ETH", "BNB", "XRP", "SOL"]
-            for coin in coins:
+            weights = {
+                "candle_pattern": 15,
+                "rsi": 15,
+                "macd": 15,
+                "volume": 15,
+                "higher_trend": 20,
+                "news_clear": 15,
+            }
+
+            personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+            coins = list(dict.fromkeys(
+                list(ATLAS_PRIORITY_TOP10) + list(ATLAS_STATIC)
+            ))
+            coins = [
+                str(c).upper()
+                for c in coins
+                if str(c).upper() not in personal_symbols
+                and not is_stable(str(c).upper())
+                and not is_ambiguous_symbol(str(c).upper())
+            ]
+
+            def _analyze_one(coin):
                 try:
-                    r = analyze_coin(coin, {"impact": "NORMAL", "bias": "NEUTRAL"}, {"candle_pattern": 15, "rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "news_clear": 15})
-                    if r:
-                        results.append(r)
-                        print(f"✅ {coin}: {r['action']}")
-                except Exception as e:
-                    print(f"❌ {coin}: {e}")
-            
-            text = build_report(results, ["BTC", "ETH"], [], {}, {"impact": "NORMAL"}, {}, 0)
-            parts, sent, errors = send_report(text)
-            total_sent += sent
-            all_errors.extend(errors)
+                    result = analyze_coin(
+                        coin,
+                        {"impact": "NORMAL", "bias": "NEUTRAL"},
+                        weights,
+                    )
+                    if result:
+                        print(f"✅ {coin}: {result.get('action', 'N/A')}")
+                    return result
+                except Exception as exc:
+                    print(f"❌ {coin}: {exc}")
+                    return None
+
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(_analyze_one, coin): coin
+                    for coin in coins
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        results.append(result)
+
+            result_by_coin = {
+                str(r.get("coin")).upper(): r
+                for r in results
+                if r.get("coin")
+            }
+            top10 = [
+                coin for coin in ATLAS_PRIORITY_TOP10
+                if str(coin).upper() in result_by_coin
+            ]
+            dynamic_candidates = [
+                coin for coin in ATLAS_STATIC
+                if str(coin).upper() in result_by_coin
+                and str(coin).upper() not in {
+                    str(x).upper() for x in ATLAS_PRIORITY_TOP10
+                }
+            ]
+            dynamic_rows = dynamic_top8(
+                results,
+                dynamic_candidates,
+                exclude_symbols=personal_symbols,
+            )
+
+            market_text = build_report(
+                results,
+                top10,
+                [r.get("coin") for r in dynamic_rows],
+                {},
+                {"impact": "NORMAL"},
+                {},
+                0,
+            )
+            personal_text = build_personal_report(results)
+
+            engine_mode = atlas_engine_mode()
+            reports_to_send = []
+            if engine_mode in {"MARKET", "BOTH"}:
+                reports_to_send.append(market_text)
+            if engine_mode in {"PERSONAL", "BOTH"}:
+                reports_to_send.append(personal_text)
+
+            for report_text in reports_to_send:
+                _, sent, errors = send_report(report_text)
+                total_sent += sent
+                all_errors.extend(errors)
+
             analysis_results = results
-            
-            csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
+
+            csv_sent, csv_errors = send_csv_report(
+                results,
+                top10,
+                [r.get("coin") for r in dynamic_rows],
+            )
             if csv_sent > 0:
                 print(f"📊 CSV sent: {csv_sent} destinations")
             if csv_errors:
                 print(f"⚠️ CSV errors: {csv_errors}")
-            
-            if ENABLE_VOICE_REPORT and results:
+
+            if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE and results:
                 try:
                     print("\n🎤 Generating audio report...")
                     voice_text = "به گزارش صوتی اطلس خوش آمدید. "
                     for r in results[:3]:
-                        voice_text += f"{r['coin']} {r['action']} با اطمینان {r['confidence']} درصد. "
+                        voice_text += (
+                            f"{r['coin']} {r['action']} "
+                            f"با اطمینان {r['confidence']} درصد. "
+                        )
                     audio_file = generate_audio_report(voice_text)
                     if audio_file:
-                        result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
-                        if result:
-                            print("✅ Audio report sent successfully")
-                        else:
-                            print("❌ Failed to send audio report")
+                        result = send_audio_report(
+                            audio_file,
+                            "🎤 گزارش صوتی اطلس",
+                        )
+                        print(
+                            "✅ Audio report sent successfully"
+                            if result
+                            else "❌ Failed to send audio report"
+                        )
                         try:
                             os.unlink(audio_file)
-                        except:
+                        except OSError:
                             pass
-                except Exception as e:
-                    print(f"⚠️ Audio error: {e}")
+                except Exception as exc:
+                    print(f"⚠️ Audio error: {exc}")
 
         if do_snapshot:
             print("📸 Running snapshot...")
-            snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
-            snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
+            snapshot_results = (
+                analysis_results
+                if analysis_results
+                else fetch_snapshot_results()
+            )
+            snapshot_sent, snapshot_errors = send_price_snapshot(
+                snapshot_results
+            )
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
 
@@ -3029,18 +3143,17 @@ def main():
             return 0
 
         if all_errors or total_sent == 0:
-            raise RuntimeError("Telegram delivery failed: " + "; ".join(all_errors or ["0 messages sent"]))
+            raise RuntimeError(
+                "Telegram delivery failed: "
+                + "; ".join(all_errors or ["0 messages sent"])
+            )
         return 0
-    except Exception as e:
-        print(f"❌ Error: {e}")
+
+    except Exception as exc:
+        print(f"❌ Error: {exc}")
         traceback.print_exc()
         return 1
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
-# ============================================================
-# این دو خط باید کاملاً بدون فاصله (در سطح صفر) باشند
-# ============================================================
 if __name__ == "__main__":
     raise SystemExit(main())
