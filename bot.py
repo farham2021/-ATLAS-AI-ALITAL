@@ -84,6 +84,9 @@ VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
 VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
 AUTO_SEND_VOICE = os.environ.get("ATLAS_AUTO_SEND_VOICE", "1") == "1"
 
+# Image Table Settings
+ENABLE_IMAGE_TABLE = os.environ.get("ATLAS_ENABLE_IMAGE_TABLE", "1") == "1"
+
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
 ).strip().rstrip("/")
@@ -153,9 +156,6 @@ def generate_voice_summary(results):
                     down_count += 1
                 else:
                     stable_count += 1
-    
-    # محاسبه میانگین قیمت
-    avg_price = sum(prices) / len(prices) if prices else 0
     
     # تولید متن صوتی
     lines = [
@@ -299,10 +299,8 @@ def generate_audio_report(results, filename="audio_report.mp3"):
     if not results:
         return None
     
-    # استفاده از generate_voice_summary معمولی
     audio_text = generate_voice_summary(results)
     
-    # اگر متن خیلی کوتاه است، از نسخه snapshot استفاده کن
     if len(audio_text) < 50:
         audio_text = generate_voice_summary_from_snapshot(results)
     
@@ -360,6 +358,269 @@ def send_audio_report(audio_file, caption=None):
 
 
 # ============================================================
+# SIGNAL RANKING TABLE
+# ============================================================
+
+def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=None):
+    """
+    ساخت جدول رتبه‌بندی سیگنال‌ها با فرمت Telegram
+    شامل: TOP 10 اجرایی + TOP 5 فرصت‌های پتانسیل‌دار
+    """
+    # فیلتر کردن سیگنال‌های اجرایی
+    executable = []
+    for r in results:
+        action = str(r.get("action") or "").upper()
+        if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            # محاسبه امتیاز کیفیت
+            quality_score = 0
+            quality_score += r.get("confidence", 0) * 0.4
+            quality_score += min(r.get("rr", 0), 5) * 15
+            quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
+            quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
+            quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
+            r["quality_score"] = min(100, quality_score)
+            executable.append(r)
+    
+    # مرتب‌سازی بر اساس کیفیت
+    executable.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+    
+    # TOP 10 اجرایی
+    top10_exec = executable[:10]
+    
+    # TOP 5 فرصت‌های پتانسیل‌دار (از Dynamic 30)
+    opportunities = []
+    dynamic_set = {str(x).upper() for x in (dynamic30_symbols or [])}
+    for r in results:
+        coin = str(r.get("coin") or "").upper()
+        if coin in dynamic_set:
+            if r.get("action") in ("BULLISH WATCH", "BEARISH WATCH"):
+                # امتیاز فرصت
+                opp_score = r.get("confidence", 0) * 0.5
+                opp_score += min(r.get("rr", 0) or 0, 3) * 10
+                opp_score += r.get("liquidity_score", 0) * 0.1
+                r["opp_score"] = opp_score
+                opportunities.append(r)
+    
+    opportunities.sort(key=lambda x: x.get("opp_score", 0), reverse=True)
+    top5_opp = opportunities[:5]
+    
+    # ساخت جدول
+    lines = []
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("📊 ATLAS SIGNAL RANKING")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    
+    # TOP 10 اجرایی
+    lines.append("")
+    lines.append("🎯 TOP 10 EXECUTABLE SIGNALS")
+    lines.append("───────────────────")
+    if top10_exec:
+        for i, r in enumerate(top10_exec, 1):
+            coin = r.get("coin", "UNKNOWN")
+            direction = "🟢 BUY" if r.get("direction") == "LONG" else "🔴 SELL"
+            conf = r.get("confidence", 0)
+            rr = r.get("rr", 0)
+            quality = r.get("quality_score", 0)
+            lines.append(f"{i:2}. {coin:<6} {direction} | {conf}% | R/R {rr:.2f} | Q:{quality:.0f}%")
+    else:
+        lines.append("⚪ هیچ سیگنال اجرایی یافت نشد")
+    
+    # TOP 5 فرصت‌ها
+    lines.append("")
+    lines.append("🚀 TOP 5 OPPORTUNITIES (Dynamic 30)")
+    lines.append("───────────────────")
+    if top5_opp:
+        for i, r in enumerate(top5_opp, 1):
+            coin = r.get("coin", "UNKNOWN")
+            action = "📈 WATCH" if r.get("action") == "BULLISH WATCH" else "📉 WATCH"
+            conf = r.get("confidence", 0)
+            opp = r.get("opp_score", 0)
+            lines.append(f"{i:2}. {coin:<6} {action} | {conf}% | Score:{opp:.0f}")
+    else:
+        lines.append("⚪ هیچ فرصت پتانسیل‌داری یافت نشد")
+    
+    # اطلاعات تکمیلی
+    lines.append("")
+    session, session_label, session_multiplier = get_current_session()
+    lines.append(f"🕐 سشن: {session_label} | ضریب: {session_multiplier:.1f}x")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    
+    return "\n".join(lines)
+
+
+def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
+    """ساخت جدول تصویری از سیگنال‌ها"""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.table import Table
+        import matplotlib.font_manager as fm
+        
+        # تنظیم فونت
+        try:
+            font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+            if os.path.exists(font_path):
+                fm.fontManager.addfont(font_path)
+                plt.rcParams['font.family'] = 'DejaVu Sans'
+            else:
+                plt.rcParams['font.family'] = 'sans-serif'
+        except:
+            plt.rcParams['font.family'] = 'sans-serif'
+        
+        # آماده‌سازی داده‌ها
+        executable = []
+        for r in results:
+            action = str(r.get("action") or "").upper()
+            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+                quality_score = 0
+                quality_score += r.get("confidence", 0) * 0.4
+                quality_score += min(r.get("rr", 0) or 0, 5) * 15
+                quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
+                quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
+                quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
+                r["quality_score"] = min(100, quality_score)
+                executable.append(r)
+        
+        executable.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+        top10_exec = executable[:10]
+        
+        # ساخت جدول
+        fig, ax = plt.subplots(figsize=(14, 10))
+        ax.axis('off')
+        
+        # ایجاد سلول‌های جدول
+        cell_text = []
+        headers = ['#', 'Asset', 'Direction', 'Confidence', 'R/R', 'Quality']
+        cell_text.append(headers)
+        
+        for i, r in enumerate(top10_exec, 1):
+            direction = '🟢 BUY' if r.get('direction') == 'LONG' else '🔴 SELL'
+            row = [
+                str(i),
+                r.get('coin', 'UNKNOWN'),
+                direction,
+                f"{r.get('confidence', 0)}%",
+                f"{r.get('rr', 0):.2f}",
+                f"{r.get('quality_score', 0):.0f}%"
+            ]
+            cell_text.append(row)
+        
+        # اگر کمتر از 10 تا بود، با ردیف‌های خالی پر کن
+        while len(cell_text) < 11:
+            cell_text.append(['', '', '', '', '', ''])
+        
+        # رسم جدول
+        table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(11)
+        table.scale(1, 2.5)
+        
+        # تنظیم رنگ‌ها
+        for i, row in enumerate(cell_text):
+            for j, cell in enumerate(row):
+                if i == 0:  # هدر
+                    table[(i, j)].set_facecolor('#2c3e50')
+                    table[(i, j)].set_text_props(color='white', weight='bold')
+                elif i % 2 == 0:
+                    table[(i, j)].set_facecolor('#ecf0f1')
+                else:
+                    table[(i, j)].set_facecolor('#ffffff')
+                
+                # رنگ‌بندی بر اساس کیفیت
+                if i > 0 and j == 5 and cell:
+                    try:
+                        val = int(cell.replace('%', ''))
+                        if val >= 80:
+                            table[(i, j)].set_facecolor('#27ae60')
+                            table[(i, j)].set_text_props(color='white')
+                        elif val >= 60:
+                            table[(i, j)].set_facecolor('#f1c40f')
+                        else:
+                            table[(i, j)].set_facecolor('#e74c3c')
+                            table[(i, j)].set_text_props(color='white')
+                    except:
+                        pass
+                
+                # رنگ‌بندی جهت خرید/فروش
+                if i > 0 and j == 2:
+                    if 'BUY' in cell:
+                        table[(i, j)].set_facecolor('#27ae60')
+                        table[(i, j)].set_text_props(color='white')
+                    elif 'SELL' in cell:
+                        table[(i, j)].set_facecolor('#e74c3c')
+                        table[(i, j)].set_text_props(color='white')
+        
+        # عنوان
+        ax.set_title('📊 ATLAS SIGNAL RANKING', fontsize=16, weight='bold', pad=20)
+        
+        # ذخیره تصویر
+        plt.tight_layout()
+        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close()
+        
+        return filename
+    except ImportError:
+        print("⚠️ Matplotlib not installed, skipping image table")
+        return None
+    except Exception as e:
+        print(f"⚠️ Image generation error: {e}")
+        return None
+
+
+def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
+    """ارسال جدول تصویری به تلگرام"""
+    if not ENABLE_IMAGE_TABLE:
+        return False
+    
+    filename = build_image_table(results, top10_symbols, dynamic30_symbols)
+    if not filename or not os.path.exists(filename):
+        return False
+    
+    if not TELEGRAM_TOKEN:
+        return False
+    
+    try:
+        with open(filename, 'rb') as f:
+            image_data = f.read()
+        
+        boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+        body_parts = []
+        body_parts.append('--' + boundary)
+        body_parts.append('Content-Disposition: form-data; name="chat_id"')
+        body_parts.append('')
+        chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
+        if chat_id:
+            body_parts.append(str(chat_id))
+        
+        body_parts.append('--' + boundary)
+        body_parts.append('Content-Disposition: form-data; name="photo"; filename="signal_table.png"')
+        body_parts.append('Content-Type: image/png')
+        body_parts.append('')
+        body_parts.append(image_data.decode('latin-1') if isinstance(image_data, bytes) else image_data)
+        body_parts.append('--' + boundary + '--')
+        body_parts.append('')
+        
+        body = '\r\n'.join(str(p) for p in body_parts).encode('utf-8')
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(body))
+        }
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode())
+            os.unlink(filename)
+            return result.get('ok', False)
+    except Exception as e:
+        print(f"❌ Image send error: {e}")
+        try:
+            os.unlink(filename)
+        except:
+            pass
+        return False
+
+
+# ============================================================
 # MULTI-SOURCE VALIDATION LAYER
 # ============================================================
 # Exchange OHLCV/tickers are the execution-grade market layer.
@@ -399,13 +660,13 @@ SECONDARY_ENDPOINTS = {
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
 MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
-MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "55"))  # کاهش از 60 به 55
+MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "55"))
 MAX_LEVERAGE = float(os.environ.get("ATLAS_MAX_LEVERAGE", "10"))
 BACKTEST_DAYS = int(os.environ.get("ATLAS_BACKTEST_DAYS", "180"))
 SIGNAL_HORIZON_BARS = int(os.environ.get("ATLAS_SIGNAL_HORIZON_BARS", "36"))
 MIN_BACKTEST_IMPROVEMENT = float(os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10"))
 BACKTEST_REFRESH_HOURS = float(os.environ.get("ATLAS_BACKTEST_REFRESH_HOURS", "24"))
-MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.60"))  # کاهش از 0.80 به 0.60
+MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.60"))
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
@@ -4779,11 +5040,24 @@ def main():
                 unavailable, btc_regime, breadth
             )
             outputs.append(build_dashboard_table(results, top10, dynamic30))
+            
+            # اضافه کردن جدول رتبه‌بندی سیگنال‌ها
+            signal_ranking = build_signal_ranking_table(results, top10, dynamic30)
+            outputs.append(signal_ranking)
+            
             for payload in outputs:
                 parts,sent,errors=send_report(payload)
                 total_sent += sent
                 all_errors.extend(errors)
                 print(payload)
+            
+            # ارسال جدول تصویری (در صورت وجود matplotlib)
+            image_sent = send_image_table(results, top10, dynamic30)
+            if image_sent:
+                print("✅ Image table sent successfully")
+            else:
+                print("ℹ️ Image table not sent (matplotlib may not be installed)")
+            
             analysis_results = results
             csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
             total_sent += csv_sent
@@ -4803,13 +5077,10 @@ def main():
         # ============================================================
         if ENABLE_VOICE_REPORT:
             try:
-                # اگر analysis_results وجود دارد از آن استفاده کن، وگرنه از snapshot_results
                 voice_data = analysis_results if analysis_results else snapshot_results
                 
                 if voice_data:
                     print(f"\n🎤 Generating audio report... ({len(voice_data)} items)")
-                    
-                    # استفاده از generate_audio_report معمولی
                     audio_file = generate_audio_report(voice_data)
                     
                     if audio_file:
