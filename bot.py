@@ -1998,7 +1998,7 @@ def _snapshot_previous_prices():
             con.close()
     except Exception:
         return {}
-
+        
 def _snapshot_direction(current, previous):
     """تشخیص جهت تغییر قیمت نسبت به قیمت قبلی"""
     current = f(current)
