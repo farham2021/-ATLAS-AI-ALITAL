@@ -1927,9 +1927,10 @@ def _snapshot_price_text(value):
         return f"${v:.6f}"
     return f"${v:.8f}"
 
-def build_price_snapshot(results, updated_at=None):
+def build_price_snapshot(results, updated_at=None, previous_prices=None):
     by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
     dt = updated_at or now_tehran()
+    previous_prices = previous_prices if previous_prices is not None else _snapshot_previous_prices()
     weekdays = ("دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه")
     lines = [
         f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
@@ -1948,8 +1949,7 @@ def build_price_snapshot(results, updated_at=None):
         if price is None:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
-        ch = f(r.get("change24"))
-        arrow = "⬆️" if ch is not None and ch > 0 else "⬇️" if ch is not None and ch < 0 else "➡️"
+        arrow = _snapshot_direction(price, previous_prices.get(sym))
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
     lines.append("───────────────────")
     usdt = fetch_usdt_toman_public()
@@ -1961,8 +1961,14 @@ def build_price_snapshot(results, updated_at=None):
     return "\n".join(lines)
 
 def send_price_snapshot(results):
-    payload = build_price_snapshot(results)
-    return send_report(payload)
+    """Send snapshot separately; persist comparison state only after successful delivery."""
+    captured_at = now_tehran().isoformat()
+    previous = _snapshot_previous_prices()
+    payload = build_price_snapshot(results, previous_prices=previous)
+    parts, sent, errors = send_report(payload)
+    if sent == parts and sent > 0:
+        _save_snapshot_prices(results, captured_at)
+    return sent, errors
 
 def fetch_usdt_toman_public():
     return 650000
@@ -1979,8 +1985,51 @@ def _best_setup_block(rows, title="🔥 BEST SETUP"):
     if not executable:
         return f"{title}: هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد."
     best = max(executable, key=lambda r: float(r.get("confidence", 0)))
-    return f"{title}: {best.get('coin', 'UNKNOWN')} — {best.get('action', 'EXECUTABLE')} — R/R 1:{best.get('rr', 0):.2f}"
+    return f"{title}: {best.get('coin', 'UNKNOWN')} — {best.get('action', 'EXECUTABLE')} — R/R 1:{best.get('rr', 0):.
 
+def _snapshot_previous_prices():
+    """دریافت قیمت‌های قبلی از دیتابیس"""
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            rows = con.execute("select symbol, price from snapshot_prices").fetchall()
+            return {str(sym).upper(): float(price) for sym, price in rows if price is not None}
+        finally:
+            con.close()
+    except Exception:
+        return {}
+
+def _snapshot_direction(current, previous):
+    """تشخیص جهت تغییر قیمت نسبت به قیمت قبلی"""
+    current = f(current)
+    previous = f(previous)
+    if current is None or previous is None or previous <= 0:
+        return "➡️"
+    delta_pct = (current - previous) / previous * 100.0
+    if abs(delta_pct) < SNAPSHOT_FLAT_THRESHOLD_PCT:
+        return "➡️"
+    return "⬆️" if delta_pct > 0 else "⬇️"
+
+def _save_snapshot_prices(results, captured_at):
+    """ذخیره قیمت‌های فعلی برای مقایسه در آینده"""
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            con.execute("create table if not exists snapshot_prices(symbol text primary key, price real not null, captured_at text not null)")
+            for r in results or []:
+                sym = str(r.get("coin") or "").upper()
+                price = f(r.get("price"))
+                if sym and price is not None and price > 0:
+                    con.execute(
+                        "insert into snapshot_prices(symbol,price,captured_at) values(?,?,?) "
+                        "on conflict(symbol) do update set price=excluded.price,captured_at=excluded.captured_at",
+                        (sym, price, captured_at),
+                    )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Snapshot save error: {e}")
 
 # ============================================================
 # CSV EXPORT FUNCTIONS
