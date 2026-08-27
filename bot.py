@@ -4732,9 +4732,12 @@ def main():
         # ============================================================
         if ENABLE_VOICE_REPORT and analysis_results:
             try:
-                print("\n🎤 Generating audio report...")
+                print(f"\n🎤 Generating audio report... ({len(analysis_results)} results)")
+                audio_text = generate_voice_summary(analysis_results)
+                print(f"📝 Voice text: {audio_text[:100]}...")
                 audio_file = generate_audio_report(analysis_results)
                 if audio_file:
+                    print(f"✅ Audio file created: {audio_file} ({os.path.getsize(audio_file)} bytes)")
                     result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
                     if result:
                         print("✅ Audio report sent successfully")
@@ -4744,8 +4747,13 @@ def main():
                         os.unlink(audio_file)
                     except:
                         pass
+                else:
+                    print("❌ Failed to generate audio file")
             except Exception as e:
                 print(f"⚠️ Audio error: {e}")
+                traceback.print_exc()
+        else:
+            print(f"ℹ️ Voice skipped: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}, analysis_results={bool(analysis_results)}")
 
         if not do_analysis and not do_snapshot:
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
