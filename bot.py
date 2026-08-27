@@ -339,54 +339,57 @@ def generate_audio_report(results, filename="audio_report.mp3"):
 
 
 def send_audio_report(audio_file, caption=None):
-    """ارسال گزارش صوتی به تلگرام"""
+    """ارسال گزارش صوتی به تلگرام - Binary-safe Multipart"""
     if not os.path.exists(audio_file):
-        print(f"❌ Audio file not found: {audio_file}")
         return False
     if not TELEGRAM_TOKEN:
-        print("❌ TELEGRAM_TOKEN not set")
         return False
-    
-    print(f"📤 Sending audio file: {audio_file} ({os.path.getsize(audio_file)} bytes)")
+    if not AUTO_SEND_VOICE:
+        return False
     
     with open(audio_file, 'rb') as f:
         audio_data = f.read()
+    
     boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
-    body_parts = []
-    body_parts.append('--' + boundary)
-    body_parts.append('Content-Disposition: form-data; name="chat_id"')
-    body_parts.append('')
+    body = bytearray()
+    
+    # chat_id
+    body.extend(f'--{boundary}\r\n'.encode())
+    body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
     chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
     if chat_id:
-        body_parts.append(str(chat_id))
+        body.extend(str(chat_id).encode())
+    body.extend(b'\r\n')
+    
+    # caption
     if caption:
-        body_parts.append('--' + boundary)
-        body_parts.append('Content-Disposition: form-data; name="caption"')
-        body_parts.append('')
-        body_parts.append(caption)
-    body_parts.append('--' + boundary)
-    body_parts.append(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"')
-    body_parts.append('Content-Type: audio/mpeg')
-    body_parts.append('')
-    body_parts.append(audio_data.decode('latin-1') if isinstance(audio_data, bytes) else audio_data)
-    body_parts.append('--' + boundary + '--')
-    body_parts.append('')
-    body = '\r\n'.join(str(p) for p in body_parts).encode('utf-8')
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
+        body.extend(caption.encode('utf-8'))
+        body.extend(b'\r\n')
+    
+    # audio (بایت‌های خام)
+    body.extend(f'--{boundary}\r\n'.encode())
+    body.extend(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"\r\n'.encode())
+    body.extend(b'Content-Type: audio/mpeg\r\n\r\n')
+    body.extend(audio_data)
+    body.extend(b'\r\n')
+    body.extend(f'--{boundary}--\r\n'.encode())
+    
     headers = {
         'Content-Type': f'multipart/form-data; boundary={boundary}',
         'Content-Length': str(len(body))
     }
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
-    req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+    req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
-            result = json.loads(response.read().decode())
-            print(f"📤 Telegram audio response: {result.get('ok', False)}")
+            result = json.loads(response.read().decode('utf-8'))
             return result.get('ok', False)
     except Exception as e:
         print(f"❌ Audio send error: {e}")
         return False
-
 
 # ============================================================
 # SIGNAL RANKING TABLE
