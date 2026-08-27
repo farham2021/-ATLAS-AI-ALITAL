@@ -317,15 +317,24 @@ SECONDARY_ENDPOINTS = {
     "KCEX": KCEX_API_URL,
 }
 
+# ============================================================
+# تنظیمات پیشنهادی برای سیگنال‌های بیشتر
+# ============================================================
+# برای دریافت سیگنال‌های بیشتر می‌توانید مقادیر زیر را کاهش دهید:
+# 1. MIN_CONFIDENCE را از ۶۰ به ۵۵ کاهش دهید
+# 2. MIN_VOLUME_RATIO را از ۰.۸۰ به ۰.۶۰ کاهش دهید
+# 3. در سشن همپوشانی اروپا-آمریکا (ساعت ۱۵:۳۰ تا ۱۸:۳۰ تهران) اجرا کنید
+# ============================================================
+
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
 MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
-MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "60"))
+MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "55"))  # کاهش از 60 به 55
 MAX_LEVERAGE = float(os.environ.get("ATLAS_MAX_LEVERAGE", "10"))
 BACKTEST_DAYS = int(os.environ.get("ATLAS_BACKTEST_DAYS", "180"))
 SIGNAL_HORIZON_BARS = int(os.environ.get("ATLAS_SIGNAL_HORIZON_BARS", "36"))
 MIN_BACKTEST_IMPROVEMENT = float(os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10"))
 BACKTEST_REFRESH_HOURS = float(os.environ.get("ATLAS_BACKTEST_REFRESH_HOURS", "24"))
-MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.80"))
+MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.60"))  # کاهش از 0.80 به 0.60
 H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
 REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
 
