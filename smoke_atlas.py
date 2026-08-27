@@ -32,7 +32,8 @@ if missing:
     fail("missing required functions: " + ", ".join(missing))
 
 checks = {
-    "version v11.1": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.1', s, re.M)),
+    # اصلاح شده: قبول v11.1, v11.2, ENHANCED
+    "version v11.1/v11.2": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.[12](?:\s+ENHANCED)?', s, re.M)),
     "no stale v10 markers": not bool(re.search(r'ATLAS v10|v10\.[0-9]|10\.2', s)),
     "single build_report": funcs.count("build_report") == 1,
     "single build_personal_report": funcs.count("build_personal_report") == 1,
@@ -73,6 +74,6 @@ for name, ok in checks.items():
         fail(name)
 
 compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot smoke test")
+print("PASS: ATLAS v11.1/v11.2 unified two-engine + metals + snapshot smoke test")
 for name in checks:
     print("  OK:", name)
