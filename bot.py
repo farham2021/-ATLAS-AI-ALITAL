@@ -160,6 +160,15 @@ ATLAS_PERSONAL_ASSETS = [
 ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
 METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
 METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
+# ============================================================
+# PUBLIC USDT SOURCES (برای snapshot)
+# ============================================================
+
+PUBLIC_USDT_PAGES = (
+    "https://wallex.ir/price/usdt",
+    "https://www.excoino.com/coins",
+    "https://nobitex.ir/usdt/",
+)
 
 DATA_SYMBOL_ALIASES = {"MATIC": "POL"}
 
