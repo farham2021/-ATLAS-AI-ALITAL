@@ -1807,13 +1807,14 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     result_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
     top10_rows = [result_map[s] for s in top10_order if s in result_map]
     top10_names = set(top10_order)
-    dyn30_rows = [
-        result_map[str(x).upper()]
-        for x in (dynamic30 or [])
-        if str(x).upper() in result_map
-        and str(x).upper() not in top10_names
-        and str(x).upper() not in personal_symbols
-    ]
+    dyn30_all_rows = [
+    result_map[str(x).upper()]
+    for x in (dynamic30 or [])
+    if str(x).upper() in result_map
+    and str(x).upper() not in top10_names
+    and str(x).upper() not in personal_symbols
+]
+dyn30_rows = dynamic_top8(market_results, [r.get("coin") for r in dyn30_all_rows], exclude_symbols=personal_symbols)
 
     metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
     dt = now_tehran()
@@ -1874,6 +1875,46 @@ def _table_status(r):
     if h4 == "BEARISH":
         return "BEAR?"
     return "WAIT"
+
+# ============================================================
+# DYNAMIC TOP 8 FUNCTION
+# ============================================================
+
+def _opportunity_score(r):
+    conf = float(r.get("confidence") or 0)
+    rr = float(r.get("rr") or 0)
+    setup = float(r.get("setup_score") or 0)
+    entry = float(r.get("entry_quality") or 0)
+    risk = float(r.get("risk_quality") or 0)
+    tv = (r.get("tradingview_rating") or "").upper()
+    tv_bonus = 8 if tv in ("BUY", "STRONG_BUY") and r.get("direction") == "LONG" else 8 if tv in ("SELL", "STRONG_SELL") and r.get("direction") == "SHORT" else 0
+    executable = 30 if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION") else 0
+    rr_score = min(rr, 4.0) * 10
+    return conf * .45 + rr_score + setup * .08 + entry * .05 + risk * .04 + tv_bonus + executable
+
+def dynamic_top8(results, dynamic30, exclude_symbols=None):
+    top10 = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
+    excluded = {str(x).upper() for x in (exclude_symbols or ())}
+    allowed = {
+        str(x).upper() for x in (dynamic30 or [])
+        if str(x).upper() not in top10
+        and str(x).upper() not in excluded
+        and not is_stable(str(x).upper())
+        and not is_ambiguous_symbol(str(x).upper())
+    }
+    rows = []
+    for r in results or []:
+        coin = str(r.get("coin") or "").upper()
+        if coin not in allowed or is_stable(coin) or is_ambiguous_symbol(coin):
+            continue
+        if not r.get("price") or r.get("action") == "NO DATA":
+            continue
+        r = _ensure_candidate_plan(dict(r))
+        r["opportunity_score"] = _opportunity_score(r)
+        rows.append(r)
+    rows.sort(key=lambda r: (r.get("opportunity_score", 0), abs(float(r.get("change") or 0))), reverse=True)
+    return rows[:8]
+
 
 def _compact_dashboard_table(title, rows):
     """Telegram-safe monospace table; no HTML/Markdown dependency."""
