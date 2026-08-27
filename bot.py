@@ -47,6 +47,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import traceback
 import hashlib
+import tempfile
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from statistics import mean, median
@@ -76,6 +77,12 @@ TELEGRAM_GROUP_DELAY = float(os.environ.get("TELEGRAM_GROUP_DELAY", "3.0"))
 TELEGRAM_MAX_RETRIES = int(os.environ.get("TELEGRAM_MAX_RETRIES", "5"))
 TELEGRAM_BASE_RETRY_DELAY = float(os.environ.get("TELEGRAM_BASE_RETRY_DELAY", "3"))
 TELEGRAM_MAX_WAIT = float(os.environ.get("TELEGRAM_MAX_WAIT", "60"))
+
+# Voice Output Settings
+ENABLE_VOICE_REPORT = os.environ.get("ATLAS_ENABLE_VOICE", "1") == "1"
+VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
+VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
+AUTO_SEND_VOICE = os.environ.get("ATLAS_AUTO_SEND_VOICE", "1") == "1"
 
 SUPABASE_URL = os.environ.get(
     "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
@@ -111,6 +118,174 @@ def get_current_session(dt=None):
         if session["open"] <= hour < session["close"]:
             return name, session["label"], session["multiplier"]
     return "CLOSED", "🔒 خارج از سشن", 0.7
+
+
+# ============================================================
+# VOICE SUMMARY & OUTPUT
+# ============================================================
+
+def generate_voice_summary(results):
+    """تولید خلاصه صوتی از نتایج"""
+    if not results:
+        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
+    
+    # دریافت سشن فعلی
+    session, session_label, session_multiplier = get_current_session()
+    
+    # تحلیل قیمت‌ها
+    prices = []
+    up_count = 0
+    down_count = 0
+    stable_count = 0
+    changes = []
+    
+    for r in results:
+        price = f(r.get("price"))
+        change = f(r.get("change"))
+        symbol = r.get("coin", "")
+        if price:
+            prices.append(price)
+            if change is not None:
+                changes.append((symbol, change))
+                if change > 0.5:
+                    up_count += 1
+                elif change < -0.5:
+                    down_count += 1
+                else:
+                    stable_count += 1
+    
+    # محاسبه میانگین قیمت
+    avg_price = sum(prices) / len(prices) if prices else 0
+    
+    # تولید متن صوتی
+    lines = [
+        "به گزارش صوتی اطلس خوش آمدید.",
+        f"گزارش لحظه‌ای بازار ارزهای دیجیتال در سشن {session_label}.",
+    ]
+    
+    if up_count > 0:
+        lines.append(f"{up_count} ارز صعودی هستند.")
+    if down_count > 0:
+        lines.append(f"{down_count} ارز نزولی هستند.")
+    if stable_count > 0:
+        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
+    
+    # بهترین و بدترین عملکرد
+    if changes:
+        best = max(changes, key=lambda x: x[1])
+        worst = min(changes, key=lambda x: x[1])
+        if best[1] > 0:
+            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
+        if worst[1] < 0:
+            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
+    
+    # قیمت تتر
+    usdt = fetch_usdt_toman_public()
+    if usdt:
+        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
+    
+    lines.append("این پیام به صورت خودکار هر ۳ ساعت بروزرسانی می‌شود.")
+    
+    return " ".join(lines)
+
+
+def text_to_speech_persian(text, voice="female"):
+    """تبدیل متن فارسی به صدا"""
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang="fa", slow=False)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        tts.save(temp_file.name)
+        return temp_file.name
+    except ImportError:
+        pass
+    
+    try:
+        import edge_tts
+        import asyncio
+        voice_map = {"female": "fa-IR-DilaraNeural", "male": "fa-IR-FaridNeural"}
+        selected_voice = voice_map.get(voice, "fa-IR-DilaraNeural")
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        output_path = temp_file.name
+        temp_file.close()
+        async def generate():
+            communicate = edge_tts.Communicate(text, selected_voice)
+            await communicate.save(output_path)
+        asyncio.run(generate())
+        return output_path
+    except ImportError:
+        pass
+    
+    try:
+        text_encoded = urllib.parse.quote(text)
+        url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl=fa&client=tw-ob"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            audio_data = response.read()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        temp_file.write(audio_data)
+        temp_file.close()
+        return temp_file.name
+    except Exception as e:
+        print(f"⚠️ TTS error: {e}")
+        return None
+
+
+def generate_audio_report(results, filename="audio_report.mp3"):
+    """تولید فایل صوتی از گزارش"""
+    audio_text = generate_voice_summary(results)
+    audio_file = text_to_speech_persian(audio_text, VOICE_TYPE)
+    if audio_file:
+        import shutil
+        final_path = filename
+        shutil.move(audio_file, final_path)
+        return final_path
+    return None
+
+
+def send_audio_report(audio_file, caption=None):
+    """ارسال گزارش صوتی به تلگرام"""
+    if not os.path.exists(audio_file):
+        return False
+    if not TELEGRAM_TOKEN:
+        return False
+    with open(audio_file, 'rb') as f:
+        audio_data = f.read()
+    boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+    body_parts = []
+    body_parts.append('--' + boundary)
+    body_parts.append('Content-Disposition: form-data; name="chat_id"')
+    body_parts.append('')
+    chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
+    if chat_id:
+        body_parts.append(str(chat_id))
+    if caption:
+        body_parts.append('--' + boundary)
+        body_parts.append('Content-Disposition: form-data; name="caption"')
+        body_parts.append('')
+        body_parts.append(caption)
+    body_parts.append('--' + boundary)
+    body_parts.append(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"')
+    body_parts.append('Content-Type: audio/mpeg')
+    body_parts.append('')
+    body_parts.append(audio_data.decode('latin-1') if isinstance(audio_data, bytes) else audio_data)
+    body_parts.append('--' + boundary + '--')
+    body_parts.append('')
+    body = '\r\n'.join(str(p) for p in body_parts).encode('utf-8')
+    headers = {
+        'Content-Type': f'multipart/form-data; boundary={boundary}',
+        'Content-Length': str(len(body))
+    }
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+    req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode())
+            return result.get('ok', False)
+    except Exception as e:
+        print(f"❌ Audio send error: {e}")
+        return False
 
 
 # ============================================================
@@ -4410,10 +4585,12 @@ def _snapshot_previous_prices():
         return {}
 
 def _snapshot_direction(current, previous):
-    current=f(current); previous=f(previous)
+    """تشخیص جهت تغییر قیمت و نمایش فلش مناسب"""
+    current = f(current)
+    previous = f(previous)
     if current is None or previous is None or previous <= 0:
         return "➡️"
-    delta_pct=(current-previous)/previous*100.0
+    delta_pct = (current - previous) / previous * 100.0
     if abs(delta_pct) < SNAPSHOT_FLAT_THRESHOLD_PCT:
         return "➡️"
     return "⬆️" if delta_pct > 0 else "⬇️"
@@ -4540,6 +4717,26 @@ def main():
             snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
+
+        # ============================================================
+        # Voice Output - ارسال گزارش صوتی
+        # ============================================================
+        if ENABLE_VOICE_REPORT and analysis_results:
+            try:
+                print("\n🎤 Generating audio report...")
+                audio_file = generate_audio_report(analysis_results)
+                if audio_file:
+                    result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
+                    if result:
+                        print("✅ Audio report sent successfully")
+                    else:
+                        print("❌ Failed to send audio report")
+                    try:
+                        os.unlink(audio_file)
+                    except:
+                        pass
+            except Exception as e:
+                print(f"⚠️ Audio error: {e}")
 
         if not do_analysis and not do_snapshot:
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
