@@ -1,7 +1,7 @@
 # ============================================================
 # ATLAS v11.2 — ENHANCED UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
-# v11.2 Features:
+# v11.2 با بهبودهای کامل:
 # 1. Voice Summary (گزارش خلاصه صوتی)
 # 2. Signal Ranking (جدول رتبه‌بندی)
 # 3. Graphical Price Display (نمایش تغییرات قیمت به صورت گرافیکی)
@@ -1182,6 +1182,100 @@ def candle_event(coin, timeframe, rows):
 
 
 # ============================================================
+# METAL ANALYSIS (برای فلزات)
+# ============================================================
+
+def yahoo_chart(symbol, interval="1h", range_="5d"):
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/" + urllib.parse.quote(symbol) + "?" + urllib.parse.urlencode({"interval": interval, "range": range_, "events": "history"})
+    d = safe_http_get(url, timeout=15, default={})
+    if not isinstance(d, dict):
+        return []
+    chart = d.get("chart")
+    if not isinstance(chart, dict):
+        return []
+    results = chart.get("result")
+    if not isinstance(results, list) or not results:
+        return []
+    result = results[0] or {}
+    indicators = result.get("indicators") or {}
+    quotes = indicators.get("quote") or []
+    if not quotes or not isinstance(quotes[0], dict):
+        return []
+    quote = quotes[0]
+    timestamps = result.get("timestamp") or []
+    rows = []
+    for i, ts in enumerate(timestamps):
+        try:
+            o = f((quote.get("open") or [None] * len(timestamps))[i])
+            h = f((quote.get("high") or [None] * len(timestamps))[i])
+            l = f((quote.get("low") or [None] * len(timestamps))[i])
+            c = f((quote.get("close") or [None] * len(timestamps))[i])
+            v = f((quote.get("volume") or [None] * len(timestamps))[i])
+            if None not in (o, h, l, c):
+                rows.append([int(ts) * 1000, o, h, l, c, v or 0.0])
+        except (IndexError, TypeError, ValueError):
+            continue
+    return strip_incomplete(rows, interval)
+
+def _metal_analysis(name):
+    symbol = METAL_YAHOO.get(name)
+    if not symbol:
+        return {"coin": name, "price": None, "h4_trend": "N/A", "d1_trend": "N/A", "w1_trend": "N/A", "rsi": None, "macd": "N/A", "atr_pct": None, "support": None, "resistance": None, "direction": "NONE", "action": "NO DATA", "confidence": 0, "reason": "داده در دسترس نیست"}
+    try:
+        rows = yahoo_chart(symbol, "4h", "120d")
+        rows = strip_incomplete(rows, "4h")
+        if len(rows) < 60:
+            raise RuntimeError("insufficient closed candles")
+        c = closes(rows)
+        price = c[-1]
+        trend = trend_from_rows(rows)
+        rsi_v = rsi(c)
+        ml, ms, _ = macd(c)
+        macd_state = "BULLISH" if ml is not None and ms is not None and ml > ms else "BEARISH" if ml is not None and ms is not None else "UNKNOWN"
+        atrp = atr_pct(rows)
+        lows = [f(x[3]) for x in rows[-30:] if f(x[3]) is not None and f(x[3]) < price]
+        highs = [f(x[2]) for x in rows[-30:] if f(x[2]) is not None and f(x[2]) > price]
+        support = max(lows) if lows else None
+        resistance = min(highs) if highs else None
+        if support is None or resistance is None:
+            raise RuntimeError("support/resistance unavailable")
+        direction = "LONG" if trend == "BULLISH" and macd_state == "BULLISH" else "SHORT" if trend == "BEARISH" and macd_state == "BEARISH" else "NONE"
+        conf = 55
+        if direction != "NONE":
+            conf += 15
+        if (direction == "LONG" and rsi_v is not None and 50 <= rsi_v <= 68) or (direction == "SHORT" and rsi_v is not None and 32 <= rsi_v <= 50):
+            conf += 10
+        action = "BUY CONFIRMATION" if direction == "LONG" and rsi_v is not None and rsi_v < 72 else "SELL CONFIRMATION" if direction == "SHORT" and rsi_v is not None and rsi_v > 28 else "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH" if direction == "SHORT" else "NO TRADE"
+        return {
+            "coin": name,
+            "price": price,
+            "change": None,
+            "h4_trend": trend,
+            "d1_trend": trend,
+            "w1_trend": "UNKNOWN",
+            "rsi": rsi_v,
+            "macd": macd_state,
+            "atr_pct": atrp,
+            "support": support,
+            "resistance": resistance,
+            "direction": direction,
+            "action": action,
+            "confidence": min(int(conf), 100),
+            "entry": None,
+            "sl": None,
+            "tp1": None,
+            "tp2": None,
+            "tp3": None,
+            "tp4": None,
+            "rr": None,
+            "reason": "روند 4H + MACD + ساختار قیمت",
+            "snapshots": {"4h": {"rows": rows}}
+        }
+    except Exception as e:
+        return {"coin": name, "price": None, "change": None, "h4_trend": "N/A", "d1_trend": "N/A", "w1_trend": "N/A", "rsi": None, "macd": "N/A", "atr_pct": None, "support": None, "resistance": None, "direction": "NONE", "action": "NO DATA", "confidence": 0, "reason": "داده در دسترس نیست", "error": str(e)}
+
+
+# ============================================================
 # ANALYZE COIN (تابع اصلی)
 # ============================================================
 
@@ -1629,52 +1723,79 @@ def _portfolio_rows(results):
 
 
 # ============================================================
-# BUILD REPORT FUNCTIONS (v11.1 اصلی)
+# BUILD REPORT FUNCTIONS (v11.2 اصلی)
 # ============================================================
 
-def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    lines = ["🤖 ATLAS AI — MARKET 4H", "━━━━━━━━━━━━━━━━━━"]
-    dt = now_tehran()
-    lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
-    
-    best = _best_setup_block(results)
-    lines.append(best)
-    
-    lines.append("📡 ATLAS TOP 10")
-    lines.append("───────────────────")
-    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    for r in results[:10]:
-        sym = str(r.get("coin", "")).upper()
-        if sym in personal_symbols:
-            continue
-        status = "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی" if r.get("h4_trend") == "BEARISH" else "خنثی"
-        lines.append(f"🔹 {sym} | {status}")
-        lines.append(f"   نقطه‌ی کلیدی: حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}")
-        lines.append(f"   🟢 صعودی: حفظ و تثبیت بالای {fmt(r.get('resistance'))}")
-        lines.append(f"   🔴 نزولی: شکست زیر {fmt(r.get('support'))}")
-    
+def _compact_scenario_row(r, metal=False):
+    return {
+        "ارز": r.get("coin", ""),
+        "وضعیت کلی": "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی" if r.get("h4_trend") == "BEARISH" else "خنثی",
+        "نقطه‌ی کلیدی": f"حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}",
+        "سناریوی صعودی": f"حفظ و تثبیت بالای {fmt(r.get('resistance'))}",
+        "سناریوی نزولی (اصلاح)": f"شکست زیر {fmt(r.get('support'))}"
+    }
+
+def _compact_section(title, rows, metal=False):
+    lines = [title, "───────────────────"]
+    if not rows:
+        lines.append("⚪ داده‌ای برای نمایش وجود ندارد.")
+        return "\n".join(lines)
+    for r in rows:
+        x = _compact_scenario_row(r, metal=metal)
+        lines.append(
+            f"🔹 {x['ارز']} | {x['وضعیت کلی']}\n"
+            f"   نقطه‌ی کلیدی: {x['نقطه‌ی کلیدی']}\n"
+            f"   🟢 صعودی: {x['سناریوی صعودی']}\n"
+            f"   🔴 نزولی: {x['سناریوی نزولی (اصلاح)']}"
+        )
     return "\n".join(lines)
 
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+    """MARKET engine: only the compact table-style dashboard is exposed."""
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    market_results = [
+        r for r in (results or [])
+        if str(r.get("coin") or "").upper() not in personal_symbols
+    ]
+    top10_order = [
+        str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)
+        if str(x).upper() not in personal_symbols
+    ]
+    result_map = {str(r.get("coin") or "").upper(): r for r in market_results if r.get("coin")}
+    top10_rows = [result_map[s] for s in top10_order if s in result_map]
+    top10_names = set(top10_order)
+    dyn30_rows = [
+        result_map[str(x).upper()]
+        for x in (dynamic30 or [])
+        if str(x).upper() in result_map
+        and str(x).upper() not in top10_names
+        and str(x).upper() not in personal_symbols
+    ]
+
+    metal_rows = [_metal_analysis(x) for x in ATLAS_METALS]
+    dt = now_tehran()
+    lines = [
+        "🤖 ATLAS AI — MARKET 4H",
+        "━━━━━━━━━━━━━━━━━━",
+        f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        _compact_section("📡 ATLAS TOP 10", top10_rows),
+        _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
+        _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
+        _final_market_recommendation(results, top10_rows, dyn30_rows, macro, btc_regime),
+    ]
+    return "\n\n".join(lines)
+
 def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
+    """PERSONAL engine: all portfolio assets, same compact table format."""
     rows = _portfolio_rows(results)
     dt = now_tehran()
-    lines = ["🤖 ATLAS AI — PERSONAL PORTFOLIO 4H", "━━━━━━━━━━━━━━━━━━"]
-    lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
-    
-    best = _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP")
-    lines.append(best)
-    
-    lines.append("💼 PERSONAL PORTFOLIO — همه دارایی‌ها")
-    lines.append("───────────────────")
-    for r in rows:
-        sym = r.get("coin", "")
-        status = "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی" if r.get("h4_trend") == "BEARISH" else "خنثی"
-        lines.append(f"🔹 {sym} | {status}")
-        lines.append(f"   نقطه‌ی کلیدی: حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}")
-        lines.append(f"   🟢 صعودی: حفظ و تثبیت بالای {fmt(r.get('resistance'))}")
-        lines.append(f"   🔴 نزولی: شکست زیر {fmt(r.get('support'))}")
-    
-    return "\n".join(lines)
+    return "\n\n".join([
+        "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
+        "━━━━━━━━━━━━━━━━━━",
+        f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
+        _final_market_recommendation(rows, [], [], macro, btc_regime),
+    ])
 
 def personal_report(*args, **kwargs):
     """Alias for build_personal_report"""
@@ -1707,25 +1828,6 @@ def build_price_snapshot(results, updated_at=None):
         sym = r.get("coin", "")
         price = fmt(r.get("price"))
         lines.append(f"🔹 {sym}: {price}")
-    return "\n".join(lines)
-
-def _compact_scenario_row(r, metal=False):
-    return {
-        "ارز": r.get("coin", ""),
-        "وضعیت کلی": "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی",
-        "نقطه‌ی کلیدی": f"حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}",
-        "سناریوی صعودی": f"حفظ و تثبیت بالای {fmt(r.get('resistance'))}",
-        "سناریوی نزولی (اصلاح)": f"شکست زیر {fmt(r.get('support'))}"
-    }
-
-def _compact_section(title, rows, metal=False):
-    lines = [title, "───────────────────"]
-    for r in rows:
-        x = _compact_scenario_row(r, metal)
-        lines.append(f"🔹 {x['ارز']} | {x['وضعیت کلی']}")
-        lines.append(f"   نقطه‌ی کلیدی: {x['نقطه‌ی کلیدی']}")
-        lines.append(f"   🟢 صعودی: {x['سناریوی صعودی']}")
-        lines.append(f"   🔴 نزولی: {x['سناریوی نزولی (اصلاح)']}")
     return "\n".join(lines)
 
 def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
