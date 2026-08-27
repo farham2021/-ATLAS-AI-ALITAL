@@ -1861,6 +1861,57 @@ def tradingview_chart_url(symbol, metal=False):
     if not tv_symbol:
         return None
     return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(tv_symbol, safe=':!')}"
+    
+def _table_status(r):
+    h4 = str(r.get("h4_trend") or "").upper()
+    d1 = str(r.get("d1_trend") or "").upper()
+    if h4 == "BULLISH" and d1 == "BULLISH":
+        return "BULL"
+    if h4 == "BEARISH" and d1 == "BEARISH":
+        return "BEAR"
+    if h4 == "BULLISH":
+        return "BULL?"
+    if h4 == "BEARISH":
+        return "BEAR?"
+    return "WAIT"
+
+def _compact_dashboard_table(title, rows):
+    """Telegram-safe monospace table; no HTML/Markdown dependency."""
+    cols = ("ASSET", "STATUS", "PRICE", "SUPPORT", "RESIST")
+    data = []
+    for r in rows or []:
+        sym = str(r.get("coin") or r.get("symbol") or "?").upper()
+        data.append((sym, _table_status(r), fmt(r.get("price")), fmt(r.get("support")), fmt(r.get("resistance"))))
+    if not data:
+        return f"{title}\n───────────────────\nداده‌ای برای جدول موجود نیست."
+    widths = [len(x) for x in cols]
+    for row in data:
+        widths = [max(w, len(str(v))) for w, v in zip(widths, row)]
+    header = "  ".join(str(v).ljust(widths[i]) for i, v in enumerate(cols))
+    sep = "  ".join("-" * w for w in widths)
+    lines = [title, "───────────────────", header, sep]
+    for row in data:
+        lines.append("  ".join(str(v).ljust(widths[i]) for i, v in enumerate(row)))
+    return "\n".join(lines)
+
+def build_dashboard_table(results, top10, dynamic30):
+    """Separate table message covering all requested universes + metals."""
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    by = {str(r.get("coin") or "").upper(): r for r in (results or []) if r.get("coin")}
+    top10_rows = [by[s] for s in (top10 or ATLAS_PRIORITY_TOP10) if str(s).upper() not in personal_symbols and str(s).upper() in by]
+    dynamic_rows = [by[str(s).upper()] for s in (dynamic30 or []) if str(s).upper() in by and str(s).upper() not in personal_symbols and str(s).upper() not in {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}]
+    personal_rows = _portfolio_rows(results)
+    metals = [_metal_analysis(x) for x in ATLAS_METALS]
+    blocks = [
+        "📊 ATLAS AI — DASHBOARD TABLE",
+        "━━━━━━━━━━━━━━━━━━",
+        _compact_dashboard_table("📡 MARKET TOP 10 (EX-PERSONAL)", top10_rows),
+        _compact_dashboard_table("📡 DYNAMIC TOP 30 (ALL CANDIDATES)", dynamic_rows),
+        _compact_dashboard_table("💼 PERSONAL PORTFOLIO", personal_rows),
+        _compact_dashboard_table("🪙 ATLAS METALS", metals),
+    ]
+    return "\n\n".join(blocks)
+
 def _ensure_candidate_plan(r):
     """Do not invent trade levels for ordinary WAIT/WATCH rows."""
     if not isinstance(r, dict):
