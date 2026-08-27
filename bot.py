@@ -1819,19 +1819,58 @@ def tradingview_chart_url(symbol, metal=False):
         return None
     return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(tv_symbol, safe=':!')}"
 
-def build_price_snapshot(results, updated_at=None):
-    dt = updated_at or now_tehran()
-    lines = [f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')}"]
-    lines.append("📊 وضعیت بازار ارزهای دیجیتال:")
-    lines.append("───────────────────")
-    for r in results[:10]:
-        sym = r.get("coin", "")
-        price = fmt(r.get("price"))
-        lines.append(f"🔹 {sym}: {price}")
-    return "\n".join(lines)
+# ============================================================
+# SNAPSHOT FUNCTIONS (برای smoke_atlas.py)
+# ============================================================
 
-def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
-    return "توصیه نهایی: روند فعلاً متمایل به صعود است؛ ورود فقط روی شکست و تثبیت مقاومت‌های کلیدی یا pullback کنترل‌شده به حمایت‌ها منطقی است."
+SNAPSHOT_SYMBOLS = ("BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA", "TRX", "LINK", "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR")
+
+def _snapshot_price_text(value):
+    v = f(value)
+    if v is None:
+        return None
+    if v >= 1:
+        return f"${v:,.2f}" if v < 10000 else f"${v:,.0f}"
+    if v >= 0.1:
+        return f"${v:.2f}"
+    if v >= 0.01:
+        return f"${v:.4f}"
+    if v >= 0.0001:
+        return f"${v:.6f}"
+    return f"${v:.8f}"
+
+def build_price_snapshot(results, updated_at=None):
+    by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
+    dt = updated_at or now_tehran()
+    weekdays = ("دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه")
+    lines = [
+        f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
+        "",
+        f"⏰ آخرین بروزرسانی : {dt.strftime('%H:%M:%S')}",
+        "",
+        "📊 وضعیت بازار ارزهای دیجیتال:",
+        "───────────────────",
+    ]
+    for sym in SNAPSHOT_SYMBOLS:
+        r = by_coin.get(sym)
+        if not r:
+            lines.append(f"🔹 ➖{sym:<6}:   N/A")
+            continue
+        price = f(r.get("price"))
+        if price is None:
+            lines.append(f"🔹 ➖{sym:<6}:   N/A")
+            continue
+        ch = f(r.get("change24"))
+        arrow = "⬆️" if ch is not None and ch > 0 else "⬇️" if ch is not None and ch < 0 else "➡️"
+        lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
+    lines.append("───────────────────")
+    usdt = fetch_usdt_toman_public()
+    if usdt is None:
+        lines.append("💵 🟡 نرخ تتر  :   در دسترس نیست")
+    else:
+        lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
+    lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
+    return "\n".join(lines)
 
 def send_price_snapshot(results):
     payload = build_price_snapshot(results)
