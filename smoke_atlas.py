@@ -26,6 +26,10 @@ required = [
     "_compact_scenario_row", "_compact_section", "_final_market_recommendation",
     "send_price_snapshot", "fetch_usdt_toman_public",
     "fetch_snapshot_results", "_automatic_run_plan", "generate_csv_report", "send_csv_report", "_best_setup_block",
+    # Voice functions
+    "generate_voice_summary", "text_to_speech_persian", "generate_audio_report", "send_audio_report",
+    # Session functions
+    "get_current_session", "MARKET_SESSIONS",
 ]
 missing = [x for x in required if x not in funcs]
 if missing:
@@ -66,13 +70,17 @@ checks = {
     "best setup validation": "def _best_setup_block(" in s and "MIN_EXECUTABLE_RR" in s and "repeat_signal" in s,
     "CSV invalid geometry suppressed": "_csv_safe_plan" in s and "_validate_trade_geometry" in s,
     "snapshot arrows": "⬆️" in s and "⬇️" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
-
+    # Voice checks
+    "voice summary": "generate_voice_summary" in s,
+    "voice output": "send_audio_report" in s and "ATLAS_ENABLE_VOICE" in s,
+    "session support": "get_current_session" in s and "MARKET_SESSIONS" in s and "multiplier" in s,
+    "session in snapshot": "سشن فعلی" in s and "ضریب کیفیت" in s,
 }
 for name, ok in checks.items():
     if not ok:
         fail(name)
 
 compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot smoke test")
+print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot + voice + session smoke test")
 for name in checks:
     print("  OK:", name)
