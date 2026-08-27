@@ -12,12 +12,7 @@ on:
         required: false
         default: "BOTH"
   schedule:
-    # Unified hourly scheduler. The bot itself decides:
-    # - analytical engines every 4 hours
-    # - Price Snapshot every 3 hours
-    # - both at overlap hours
-    # Telegram analytical output is compact table-style; full technical analysis remains internal.
-    - cron: "0 * * * *"
+    - cron: "0 */4 * * *"
 
 permissions:
   contents: read
@@ -34,7 +29,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       ATLAS_VERSION: "11.1"
       ATLAS_ENGINE: ${{ github.event.inputs.engine || 'BOTH' }}
-      ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
+      ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
       ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
       ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
       ATLAS_TIMEFRAME: "4H"
