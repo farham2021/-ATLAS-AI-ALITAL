@@ -101,6 +101,19 @@ CRYPTOPANIC_TOKEN = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
 COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
 CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
 
+# Voice Output Settings - اصلاح شده با پشتیبانی از true/false/1/0
+def _parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+ENABLE_VOICE_REPORT = _parse_bool(os.environ.get("ATLAS_ENABLE_VOICE", "1"))
+AUTO_SEND_VOICE = _parse_bool(os.environ.get("ATLAS_AUTO_SEND_VOICE", "1"))
+VOICE_TYPE = os.environ.get("ATLAS_VOICE_TYPE", "female")
+VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
+ENABLE_IMAGE_TABLE = _parse_bool(os.environ.get("ATLAS_ENABLE_IMAGE_TABLE", "1"))
 
 # ============================================================
 # MARKET SESSIONS
@@ -259,16 +272,9 @@ def generate_voice_summary_from_snapshot(results):
 
 
 def text_to_speech_persian(text, voice="female"):
-    """تبدیل متن فارسی به صدا"""
-    try:
-        from gtts import gTTS
-        tts = gTTS(text=text, lang="fa", slow=False)
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-        tts.save(temp_file.name)
-        return temp_file.name
-    except ImportError as e:
-        print(f"⚠️ gTTS not installed: {e}")
+    """تبدیل متن فارسی به صدا - اولویت: Edge TTS → gTTS → Google Translate"""
     
+    # مسیر اول: Edge TTS
     try:
         import edge_tts
         import asyncio
@@ -282,9 +288,20 @@ def text_to_speech_persian(text, voice="female"):
             await communicate.save(output_path)
         asyncio.run(generate())
         return output_path
-    except ImportError as e:
-        print(f"⚠️ edge-tts not installed: {e}")
+    except:
+        pass
     
+    # مسیر دوم: gTTS
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang="fa", slow=False)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        tts.save(temp_file.name)
+        return temp_file.name
+    except:
+        pass
+    
+    # مسیر سوم: Google Translate
     try:
         text_encoded = urllib.parse.quote(text)
         url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl=fa&client=tw-ob"
