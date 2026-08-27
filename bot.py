@@ -1861,7 +1861,52 @@ def tradingview_chart_url(symbol, metal=False):
     if not tv_symbol:
         return None
     return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(tv_symbol, safe=':!')}"
+def _ensure_candidate_plan(r):
+    """Do not invent trade levels for ordinary WAIT/WATCH rows."""
+    if not isinstance(r, dict):
+        return r
+    if not _plan_is_allowed(r):
+        return _clear_trade_plan(r)
 
+    direction = r.get("direction")
+    rows = (r.get("snapshots") or {}).get("4h", {}).get("rows") or []
+    if direction not in ("LONG", "SHORT") or not rows:
+        return _clear_trade_plan(r)
+
+    try:
+        levels = calculate_levels(rows, direction, {
+            "support": f(r.get("support")),
+            "resistance": f(r.get("resistance")),
+        })
+    except Exception:
+        levels = None
+
+    if not levels:
+        return _clear_trade_plan(r)
+
+    for k in ("entry", "sl", "tp1", "tp2", "tp3", "tp4"):
+        r[k] = levels.get(k)
+    r["rr"] = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
+    if r.get("rr") is None:
+        return _clear_trade_plan(r)
+    
+    # ============================================================
+    # این بخش باید اضافه شود
+    # ============================================================
+    valid, reason = _validate_trade_geometry(
+        r.get("direction"), 
+        r.get("entry"), 
+        r.get("sl"), 
+        r.get("tp1"), 
+        r.get("tp2"), 
+        min_rr=None
+    )
+    if not valid:
+        r["gate_reason"] = f"Trade geometry blocked: {reason}"
+        return _clear_trade_plan(r)
+    # ============================================================
+    
+    return r
 # ============================================================
 # SNAPSHOT FUNCTIONS (برای smoke_atlas.py)
 # ============================================================
