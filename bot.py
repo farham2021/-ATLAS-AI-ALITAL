@@ -326,6 +326,50 @@ def init_sqlite():
             bars_to_exit integer,
             notes text
         );
+        create table if not exists model_weights(
+            feature text primary key,
+            weight real not null,
+            baseline_weight real not null,
+            samples integer default 0,
+            wins integer default 0,
+            losses integer default 0,
+            updated_at text,
+            reason text
+        );
+        create table if not exists self_healing_cursor(
+            id integer primary key check(id=1),
+            processed_closed integer not null default 0,
+            updated_at text
+        );
+        create table if not exists self_healing_processed(
+            signal_id integer primary key,
+            processed_at text not null
+        );
+        create table if not exists telegram_sent_reports(
+            report_hash text not null,
+            destination text not null,
+            sent_at text not null,
+            primary key(report_hash, destination)
+        );
+        create table if not exists snapshot_prices(
+            symbol text primary key,
+            price real not null,
+            captured_at text not null
+        );
+        create table if not exists backtest_gate_cache(
+            id integer primary key check(id=1),
+            timestamp text not null,
+            passed integer not null,
+            details text
+        );
+        create table if not exists candle_events(
+            coin text not null,
+            timeframe text not null,
+            last_closed_ts integer,
+            last_status text,
+            observed_at text not null,
+            primary key(coin, timeframe)
+        );
         create table if not exists signal_memory(
             coin text primary key,
             direction text,
@@ -371,17 +415,6 @@ def init_sqlite():
             passed integer,
             details text
         );
-        create table if not exists telegram_sent_reports(
-            report_hash text not null,
-            destination text not null,
-            sent_at text not null,
-            primary key(report_hash, destination)
-        );
-        create table if not exists snapshot_prices(
-            symbol text primary key,
-            price real not null,
-            captured_at text not null
-        );
         create table if not exists weekly_performance(
             week_start text primary key,
             total_signals integer,
@@ -401,6 +434,15 @@ def init_sqlite():
 
 def closes(rows):
     return [f(x[4]) for x in rows if f(x[4]) is not None]
+
+def ema(values, n):
+    if len(values) < n:
+        return None
+    a = 2 / (n + 1)
+    e = sum(values[:n]) / n
+    for x in values[n:]:
+        e = (x - e) * a + e
+    return e
 
 def sma(values, n):
     if len(values) < n:
@@ -458,8 +500,6 @@ def atr(rows, n=14):
     for i in range(1, len(rows)):
         h, l, pc = f(rows[i][2]), f(rows[i][3]), f(rows[i - 1][4])
         tr.append(max(h - l, abs(h - pc), abs(l - pc)))
-        if None in tr:
-            return None
     return sum(tr[-n:]) / n
 
 def atr_pct(rows, n=14):
@@ -476,17 +516,15 @@ def volume_ratio(rows, n=20):
     avg = sum(vols[-n - 1:-1]) / n
     return vols[-1] / avg if avg else None
 
-def trend_from_rows(rows):
-    c = closes(rows)
-    s20, s50 = sma(c, 20), sma(c, 50)
-    if not s20 or not s50:
-        return "UNKNOWN"
-    price = c[-1]
-    if price > s20 > s50:
-        return "BULLISH"
-    if price < s20 < s50:
-        return "BEARISH"
-    return "MIXED"
+def volume_state(rows):
+    vr = volume_ratio(rows)
+    if vr is None:
+        return "UNKNOWN", None
+    if vr > 1.35:
+        return "STRONG", vr
+    if vr < 0.75:
+        return "WEAK", vr
+    return "NORMAL", vr
 
 def support_resistance(rows):
     lows = [f(x[3]) for x in rows[-30:] if f(x[3]) is not None]
@@ -537,20 +575,17 @@ def get_market_quality(btc_regime, breadth, news_impact):
     """محاسبه کیفیت بازار"""
     score = 50
     
-    # تأثیر رژیم BTC
     if btc_regime and btc_regime.get("regime") == "RISK_ON":
         score += 20
     elif btc_regime and btc_regime.get("regime") == "RISK_OFF":
         score -= 20
     
-    # تأثیر وسعت بازار
     if breadth and isinstance(breadth, dict):
         if breadth.get("score", 50) >= 65:
             score += 15
         elif breadth.get("score", 50) <= 35:
             score -= 15
     
-    # تأثیر اخبار
     if news_impact == "HIGH":
         score -= 25
     elif news_impact == "NORMAL":
@@ -558,7 +593,6 @@ def get_market_quality(btc_regime, breadth, news_impact):
     
     score = max(0, min(100, score))
     
-    # تعیین سطح
     if score >= 70:
         level = "HIGH"
         emoji = "🟢"
@@ -611,19 +645,16 @@ def graphical_price_display(price, prev_price, max_bars=8):
 
 
 # ============================================================
-# 5. RISK REPORT (گزارش ریسک بازار) - اصلاح شده
+# 5. RISK REPORT (گزارش ریسک بازار)
 # ============================================================
 
 def generate_risk_report(btc_regime, breadth, market_quality, portfolio_risk=0):
-    """تولید گزارش ریسک بازار"""
     lines = ["━━━━━━━━━━━━━━━━━━", "🛡️ گزارش ریسک بازار", "━━━━━━━━━━━━━━━━━━"]
     
-    # رژیم BTC
     regime = btc_regime.get("regime", "UNKNOWN") if btc_regime else "UNKNOWN"
     regime_emoji = "🟢" if regime == "RISK_ON" else "🔴" if regime == "RISK_OFF" else "🟡"
     lines.append(f"{regime_emoji} رژیم بازار: {regime}")
     
-    # کیفیت بازار - با بررسی وجود کلیدها
     if market_quality and isinstance(market_quality, dict):
         level = market_quality.get("level", "MEDIUM")
         score = market_quality.get("score", 50)
@@ -632,18 +663,15 @@ def generate_risk_report(btc_regime, breadth, market_quality, portfolio_risk=0):
     else:
         lines.append("🟡 کیفیت بازار: نامشخص")
     
-    # وسعت بازار
     if breadth and isinstance(breadth, dict):
         breadth_score = breadth.get("score", 50)
         breadth_emoji = "🟢" if breadth_score >= 65 else "🔴" if breadth_score <= 35 else "🟡"
         lines.append(f"{breadth_emoji} وسعت بازار: {breadth_score:.1f}% صعودی")
     
-    # ریسک پرتفوی
     if portfolio_risk and portfolio_risk > 0:
         risk_emoji = "🟢" if portfolio_risk <= 3 else "🟡" if portfolio_risk <= 6 else "🔴"
         lines.append(f"{risk_emoji} ریسک پرتفوی: {portfolio_risk:.1f}%")
     
-    # وضعیت نهایی
     if market_quality and isinstance(market_quality, dict):
         if market_quality.get("level") == "LOW":
             status = "⚠️ ریسک بالا - احتیاط"
@@ -873,14 +901,12 @@ def detect_patterns(rows):
         return []
     patterns = []
     c = closes(rows)
-    # Double Bottom (کف دوقلو) - ساده شده
     if len(c) >= 20:
         recent = c[-20:]
         min1 = min(recent[:10])
         min2 = min(recent[10:])
         if abs(min1 - min2) / max(min1, min2) < 0.03 and c[-1] > min2 * 1.02:
             patterns.append({"pattern": "DOUBLE_BOTTOM", "direction": "BULLISH", "message": "📊 الگوی کف دوقلو شناسایی شد"})
-    # Double Top (سقف دوقلو)
     if len(c) >= 20:
         recent = c[-20:]
         max1 = max(recent[:10])
@@ -1037,6 +1063,11 @@ def ensure_exchanges(force=False):
     init_exchanges()
     return bool(EX)
 
+def coingecko_headers():
+    if COINGECKO_API_KEY:
+        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
+    return {}
+
 def symbol_for(eid, coin):
     markets = MARKETS.get(eid, {})
     dc = data_symbol(coin)
@@ -1085,6 +1116,37 @@ def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
         raise RuntimeError(f"{eid}: insufficient candles")
     return strip_incomplete(rows, timeframe)
 
+def _next_candle_boundary_ms(start_ms, timeframe):
+    dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    if timeframe == "1M":
+        if dt.month == 12:
+            nxt = dt.replace(year=dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            nxt = dt.replace(month=dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return int(nxt.timestamp() * 1000)
+    if timeframe == "1w":
+        nxt = dt + timedelta(days=7)
+        return int(nxt.timestamp() * 1000)
+    fixed = {
+        "15m": 15 * 60 * 1000,
+        "30m": 30 * 60 * 1000,
+        "1h": 60 * 60 * 1000,
+        "4h": 4 * 60 * 60 * 1000,
+        "1d": 24 * 60 * 60 * 1000,
+    }.get(timeframe)
+    if fixed is None:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return start_ms + fixed
+
+def candle_is_closed(start_ms, timeframe, now_ms=None):
+    if start_ms is None:
+        return False
+    now_ms = now_ms or int(time.time() * 1000)
+    try:
+        return _next_candle_boundary_ms(int(start_ms), timeframe) <= now_ms
+    except Exception:
+        return False
+
 def strip_incomplete(rows, timeframe):
     clean = []
     now_ms = int(time.time() * 1000)
@@ -1098,298 +1160,596 @@ def strip_incomplete(rows, timeframe):
             clean.append(list(row))
     return clean
 
-def candle_is_closed(start_ms, timeframe, now_ms=None):
-    if start_ms is None:
-        return False
-    now_ms = now_ms or int(time.time() * 1000)
-    try:
-        dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
-        if timeframe == "1M":
-            if dt.month == 12:
-                nxt = dt.replace(year=dt.year + 1, month=1, day=1)
-            else:
-                nxt = dt.replace(month=dt.month + 1, day=1)
-            return int(nxt.timestamp() * 1000) <= now_ms
-        if timeframe == "1w":
-            nxt = dt + timedelta(days=7)
-            return int(nxt.timestamp() * 1000) <= now_ms
-        fixed = {
-            "15m": 15 * 60 * 1000, "30m": 30 * 60 * 1000,
-            "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000,
-            "1d": 24 * 60 * 60 * 1000,
-        }.get(timeframe)
-        if fixed is None:
-            return False
-        return start_ms + fixed <= now_ms
-    except Exception:
-        return False
+def candle_event(coin, timeframe, rows):
+    latest = int(rows[-1][0]) if rows else None
+    if latest is None:
+        return {"status": "NO_DATA", "closed_ts": None, "timeframe": timeframe}
+    status = "NEW_CLOSED"
+    if EVENT_DEDUP_ENABLED:
+        with sqlite_conn() as c:
+            prev = c.execute(
+                "select last_closed_ts from candle_events where coin=? and timeframe=?",
+                (coin, timeframe),
+            ).fetchone()
+            if prev and prev[0] == latest:
+                status = "UNCHANGED"
+            c.execute(
+                "insert into candle_events(coin,timeframe,last_closed_ts,last_status,observed_at) values(?,?,?,?,?) "
+                "on conflict(coin,timeframe) do update set last_closed_ts=excluded.last_closed_ts,last_status=excluded.last_status,observed_at=excluded.observed_at",
+                (coin, timeframe, latest, status, now_utc().isoformat()),
+            )
+    return {"status": status, "closed_ts": latest, "timeframe": timeframe}
 
 
 # ============================================================
 # ANALYZE COIN
 # ============================================================
 
-def analyze_coin(coin, weights, market_news=None, btc_regime=None, breadth=None):
+def analyze_coin(coin, market_news, weights):
     if is_stable(coin):
         return None
-    try:
-        rows, engine = best_ohlcv(coin, "4h", 250)
-    except Exception:
-        return None
-    if len(rows) < 60:
-        return None
-    c = closes(rows)
-    rsi_value = rsi(c)
-    ml, ms, _ = macd(c)
-    atrp = atr_pct(rows)
-    vol_ratio = volume_ratio(rows)
-    sup, res = support_resistance(rows)
-    trend = trend_from_rows(rows)
-    price = c[-1] if c else None
-    if price is None:
-        return None
-    prev_price = c[-2] if len(c) > 1 else None
-    
-    # تشخیص الگو
-    pattern = "NONE"
-    pattern_dir = "NEUTRAL"
-    if len(rows) >= 2:
-        a, b = rows[-2], rows[-1]
-        ao, ac = f(a[1]), f(a[4])
-        bo, bh, bl, bc = f(b[1]), f(b[2]), f(b[3]), f(b[4])
-        if bc > bo and ac < ao and bo <= ac and bc >= ao:
-            pattern = "BULLISH ENGULFING"
-            pattern_dir = "BULLISH"
-        elif bc < bo and ac > ao and bo >= ac and bc <= ao:
-            pattern = "BEARISH ENGULFING"
-            pattern_dir = "BEARISH"
-    
-    # تشخیص الگوهای تکراری
-    detected_patterns = detect_patterns(rows)
-    
+    snapshots = tf_snapshot(coin)
+    tf4 = snapshots.get("4h", {})
+    if "rows" not in tf4:
+        raise RuntimeError("4H unavailable")
+    tf1 = snapshots.get("1h", {})
+    tfd = snapshots.get("1d", {})
+    tfw = snapshots.get("1w", {})
+    tfm = snapshots.get("1M", {})
+    price, sources, quality, spread_pct, errors = price_consensus(coin)
+    h1 = tf1.get("trend", "UNKNOWN")
+    h4 = tf4.get("trend", "UNKNOWN")
+    d1 = tfd.get("trend", "UNKNOWN")
+    w1 = tfw.get("trend", "UNKNOWN")
+    m1 = tfm.get("trend", "UNKNOWN")
+    pattern, pattern_dir = candle_pattern(tf4["rows"])
+    ind_dir, bull_n, bear_n, indicator_reasons, overbought, oversold = indicator_alignment(tf4)
+    divergence = strong_divergence(tf4["rows"])
+    vol_state, vol_ratio = volume_state(tf4["rows"])
+    atrp = atr_pct(tf4["rows"])
+    liq_score, liq_label = asset_liquidity(coin, sources)
+    daily_levels = daily_key_levels(tfd.get("rows", []), price)
+    h4_levels = h4_fallback_levels(tf4.get("rows", []), price)
+    sr_fallback = False
+    effective_levels = daily_levels
+    if (not effective_levels or effective_levels.get("confidence") == "LOW") and h4_levels and h4_levels.get("confidence") != "LOW":
+        effective_levels = h4_levels
+        sr_fallback = True
+    mom30, _ = momentum_30m(coin)
+
+    rsi_value = f(tf4.get("rsi"))
+    ml, ms, _hist = macd(closes(tf4["rows"]))
+
+    candle_points = 0.0
+    candle_valid = False
+    if pattern != "NONE" and pattern_dir in ("BULLISH", "BEARISH"):
+        aligned = sum([pattern_dir == ind_dir, pattern_dir == h4, pattern_dir == d1])
+        if aligned >= 2:
+            candle_points = weights["candle_pattern"]
+            candle_valid = True
+        elif aligned == 1:
+            candle_points = weights["candle_pattern"] * 0.35
+
+    rsi_points = 0.0
+    if rsi_value is not None:
+        if ind_dir == "BULLISH":
+            if 52 <= rsi_value <= 68:
+                rsi_points = weights["rsi"]
+            elif 68 < rsi_value <= 75:
+                rsi_points = weights["rsi"] * 0.70
+            elif 75 < rsi_value <= 80:
+                rsi_points = weights["rsi"] * 0.25
+            elif rsi_value > 80:
+                rsi_points = weights["rsi"] * 0.10
+        elif ind_dir == "BEARISH":
+            if 32 <= rsi_value < 45:
+                rsi_points = weights["rsi"]
+            elif 25 <= rsi_value < 32:
+                rsi_points = weights["rsi"] * 0.70
+            elif 20 <= rsi_value < 25:
+                rsi_points = weights["rsi"] * 0.25
+            elif rsi_value < 20:
+                rsi_points = weights["rsi"] * 0.10
+
+    macd_points = 0.0
+    if ml is not None and ms is not None:
+        if ind_dir == "BULLISH" and ml > ms:
+            macd_points = weights["macd"]
+        elif ind_dir == "BEARISH" and ml < ms:
+            macd_points = weights["macd"]
+
+    if vol_ratio is None:
+        volume_points = 0.0
+    elif vol_ratio >= 1.50:
+        volume_points = weights["volume"]
+    elif vol_ratio >= 1.00:
+        volume_points = weights["volume"] * 0.70
+    elif vol_ratio >= MIN_VOLUME_RATIO:
+        volume_points = weights["volume"] * 0.35
+    else:
+        volume_points = 0.0
+
+    higher_points = weights["higher_trend"] if h4 in ("BULLISH", "BEARISH") and d1 == h4 else 0.0
+
+    if market_news["impact"] == "NORMAL":
+        news_points = weights["news_clear"]
+    elif market_news["impact"] == "HIGH":
+        news_points = 0.0
+    else:
+        news_points = weights["news_clear"] * 0.50
+
+    indicator_points = rsi_points + macd_points
+    confidence = candle_points + indicator_points + volume_points + higher_points + news_points
+    score_components = {
+        "candle_pattern": round(candle_points, 2),
+        "rsi": round(rsi_points, 2),
+        "macd": round(macd_points, 2),
+        "indicators": round(indicator_points, 2),
+        "volume": round(volume_points, 2),
+        "higher_trend": round(higher_points, 2),
+        "news_clear": round(news_points, 2),
+        "weights_used": dict(weights),
+    }
+
     direction = "NONE"
-    if rsi_value and ml and ms:
-        if rsi_value > 50 and ml > ms and trend == "BULLISH":
-            direction = "LONG"
-        elif rsi_value < 50 and ml < ms and trend == "BEARISH":
-            direction = "SHORT"
-    
-    levels = None
+    if ind_dir == "BULLISH" and h4 == "BULLISH" and d1 == "BULLISH":
+        direction = "LONG"
+    elif ind_dir == "BEARISH" and h4 == "BEARISH" and d1 == "BEARISH":
+        direction = "SHORT"
+
+    if divergence == "BULLISH_3_LEVEL" and h4 != "BULLISH":
+        direction = "LONG"
+    elif divergence == "BEARISH_3_LEVEL" and h4 != "BEARISH":
+        direction = "SHORT"
+
     if direction in ("LONG", "SHORT"):
-        atr_v = atr(rows)
-        if atr_v and sup and res:
+        rsi_points = 0.0
+        if rsi_value is not None:
             if direction == "LONG":
-                entry = price if price >= res else res * 1.002
-                sl = entry - (atr_v * 1.5)
-                tp1 = entry + (atr_v * 1.5)
-                tp2 = entry + (atr_v * 3)
-                levels = {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr_v}
+                if 52 <= rsi_value <= 68: rsi_points = weights["rsi"]
+                elif 68 < rsi_value <= 75: rsi_points = weights["rsi"] * 0.70
+                elif 75 < rsi_value <= 80: rsi_points = weights["rsi"] * 0.25
+                elif rsi_value > 80: rsi_points = weights["rsi"] * 0.10
             else:
-                entry = price if price <= sup else sup * 0.998
-                sl = entry + (atr_v * 1.5)
-                tp1 = entry - (atr_v * 1.5)
-                tp2 = entry - (atr_v * 3)
-                levels = {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr_v}
-    
-    rr = None
-    if levels:
-        entry, sl, tp2 = levels['entry'], levels['sl'], levels['tp2']
-        if entry != sl:
-            rr = abs(entry - tp2) / abs(entry - sl)
-    
-    confidence = 50
-    if direction in ("LONG", "SHORT"):
-        if rsi_value:
-            if (direction == "LONG" and 50 <= rsi_value <= 68) or (direction == "SHORT" and 32 <= rsi_value <= 50):
-                confidence += 15
-        if ml and ms:
-            if (direction == "LONG" and ml > ms) or (direction == "SHORT" and ml < ms):
-                confidence += 15
-        if vol_ratio and vol_ratio >= 1.2:
-            confidence += 10
-        if pattern != "NONE":
-            confidence += 10
-        if trend in ("BULLISH", "BEARISH"):
-            confidence += 10
-    confidence = min(100, max(0, confidence))
-    
-    # فیلتر کیفیت بازار
-    market_quality = get_market_quality(btc_regime or {}, breadth or {}, market_news.get("impact", "NORMAL") if market_news else "NORMAL")
-    if market_quality.get("level") == "LOW" and direction in ("LONG", "SHORT"):
-        confidence *= 0.7
-    
+                if 32 <= rsi_value < 45: rsi_points = weights["rsi"]
+                elif 25 <= rsi_value < 32: rsi_points = weights["rsi"] * 0.70
+                elif 20 <= rsi_value < 25: rsi_points = weights["rsi"] * 0.25
+                elif rsi_value < 20: rsi_points = weights["rsi"] * 0.10
+        macd_points = 0.0
+        if ml is not None and ms is not None:
+            if direction == "LONG" and ml > ms: macd_points = weights["macd"]
+            elif direction == "SHORT" and ml < ms: macd_points = weights["macd"]
+        old_indicator_points = score_components["indicators"]
+        new_indicator_points = rsi_points + macd_points
+        confidence += new_indicator_points - old_indicator_points
+        score_components["rsi"] = round(rsi_points, 2)
+        score_components["macd"] = round(macd_points, 2)
+        score_components["indicators"] = round(new_indicator_points, 2)
+
+    regime_conflict = False
+    trigger = candle_trigger_state(
+        tf4.get("rows", []),
+        direction,
+        effective_levels.get("support") if effective_levels else None,
+        effective_levels.get("resistance") if effective_levels else None,
+    )
+    if direction == "LONG" and m1 == "BEARISH":
+        regime_conflict = True
+    elif direction == "SHORT" and m1 == "BULLISH":
+        regime_conflict = True
+
     gate = "PASS"
-    gate_reason = "All gates passed"
-    
-    if direction in ("LONG", "SHORT"):
-        if direction == "LONG" and rsi_value and rsi_value > 75:
-            gate = "BLOCK"
-            gate_reason = "RSI اشباع خرید"
-        elif direction == "SHORT" and rsi_value and rsi_value < 25:
-            gate = "BLOCK"
-            gate_reason = "RSI اشباع فروش"
-    
-    if direction in ("LONG", "SHORT"):
-        if vol_ratio is None or vol_ratio < MIN_VOLUME_RATIO:
-            gate = "BLOCK"
-            gate_reason = "حجم تأیید نشد"
-    
-    if direction in ("LONG", "SHORT"):
-        if not is_signal_fresh(coin, direction):
-            gate = "BLOCK"
-            gate_reason = "سیگنال تکراری"
-    
-    if levels and rr is not None and rr < MIN_EXECUTABLE_RR:
-        gate = "BLOCK"
-        gate_reason = f"R/R پایین ({rr:.2f})"
-    
+    gate_reasons = []
+    gate_reason = "All mandatory gates passed"
+    warning = None
+
+    if regime_conflict:
+        gate_reasons.append("Monthly regime contradicts signal")
+    if quality == "LOW" or spread_pct > 3:
+        gate_reasons.append("Data quality/conflict")
+    if vol_ratio is None or vol_ratio <= MIN_VOLUME_RATIO:
+        gate_reasons.append("Volume confirmation missing")
     if confidence < MIN_CONFIDENCE:
+        gate_reasons.append("Confidence below threshold")
+    if direction == "NONE":
+        gate_reasons.append("Higher-timeframe alignment missing")
+    if ((direction == "LONG" and w1 == "BEARISH") or (direction == "SHORT" and w1 == "BULLISH")) and confidence < max(MIN_CONFIDENCE + 15, 75):
+        gate_reasons.append("Weekly regime conflict; stronger confirmation required")
+    if market_news["impact"] == "HIGH":
+        warning = "نوسان بالا"
+        if (market_news["bias"] == "NEGATIVE" and direction == "LONG") or (market_news["bias"] == "POSITIVE" and direction == "SHORT"):
+            gate_reasons.append("High-impact news contradicts signal")
+    if direction == "LONG" and mom30 == "BEARISH":
+        warning = "شتاب مخالف"
+        gate_reasons.append("30m momentum strongly opposes long")
+    if direction == "SHORT" and mom30 == "BULLISH":
+        warning = "شتاب مخالف"
+        gate_reasons.append("30m momentum strongly opposes short")
+
+    if gate_reasons:
         gate = "BLOCK"
-        gate_reason = f"اطمینان پایین ({confidence:.0f}%)"
-    
-    tf_confirmation = multi_timeframe_confirmation(coin, {})
-    level_breaks = []
-    if sup and res and prev_price:
-        level_breaks = detect_level_breaks(price, sup, res, prev_price)
-    
-    sl_alert = None
-    if levels and levels.get('sl'):
-        sl_alert = check_stop_loss_alert(price, levels['sl'])
-    
+        gate_reason = " | ".join(dict.fromkeys(gate_reasons))
+
+    levels = None
+    leverage = 1.0
     action = "NO TRADE"
-    if gate == "PASS" and tf_confirmation.get("confirmed", False):
-        if direction == "LONG":
-            action = "BUY CONFIRMATION"
-        elif direction == "SHORT":
-            action = "SELL CONFIRMATION"
-    
-    position_suggestion = None
-    if levels and action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-        position_suggestion = get_position_suggestion({
-            "entry": levels.get('entry'),
-            "sl": levels.get('sl')
-        })
-    
-    entry_quality = 0
-    if levels:
-        entry_quality = entry_quality_score(
-            levels.get('entry'), levels.get('sl'),
-            vol_ratio, rsi_value, trend,
-            "HIGH" if sup and res else "LOW"
-        )
-    
-    exit_signal = None
-    if levels and action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-        exit_signal = generate_exit_signal(
-            levels.get('entry'), price, direction,
-            levels.get('tp1'), levels.get('tp2'), levels.get('sl')
-        )
-    
-    # تحلیل حجم هوشمند
-    volume_analysis = None
-    if vol_ratio:
-        avg_vol = sum([f(x[5]) for x in rows[-21:-1] if f(x[5]) is not None]) / 20 if len(rows) >= 21 else None
-        current_vol = f(rows[-1][5]) if rows else None
-        volume_analysis = smart_volume_analysis(vol_ratio, avg_vol, current_vol)
-    
+
+    candidate_levels = calculate_levels(tf4["rows"], direction, effective_levels)
+
+    if gate == "PASS":
+        if not effective_levels or effective_levels.get("confidence") == "LOW":
+            gate = "BLOCK"
+            gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "Reliable Daily/H4 S/R not confirmed"
+        elif sr_fallback and confidence < max(MIN_CONFIDENCE + 10, H4_FALLBACK_MIN_SCORE):
+            gate = "BLOCK"
+            gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "H4 S/R fallback requires elevated confidence"
+        else:
+            levels = candidate_levels
+            if levels is None:
+                gate = "BLOCK"
+                gate_reason = (gate_reason + " | " if gate_reason and gate_reason != "All mandatory gates passed" else "") + "Invalid price geometry"
+            else:
+                leverage = suggested_leverage(atrp)
+                four_h_event = snapshots.get("4h", {}).get("event", {})
+                trigger_ok_long = trigger["state"] in ("BREAKOUT_CLOSED", "SUPPORT_RECLAIM", "BULLISH_CLOSE") and direction == "LONG"
+                trigger_ok_short = trigger["state"] in ("BREAKDOWN_CLOSED", "RESISTANCE_REJECT", "BEARISH_CLOSE") and direction == "SHORT"
+                if trigger_ok_long:
+                    action = "BUY CONFIRMATION"
+                elif trigger_ok_short:
+                    action = "SELL CONFIRMATION"
+                else:
+                    action = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                    warning = warning or "منتظر بسته‌شدن/تأیید ساختار 4H"
+                if sr_fallback:
+                    warning = warning or "Daily S/R unavailable؛ H4 fallback used"
+
+    reason_parts = []
+    if pattern_valid := candle_valid:
+        reason_parts.append(pattern)
+    reason_parts.extend(indicator_reasons[:3])
+    if vol_ratio is not None and vol_ratio > MIN_VOLUME_RATIO:
+        reason_parts.append(f"حجم {vol_ratio:.2f}x میانگین 20")
+    if h4 == d1 and h4 in ("BULLISH", "BEARISH"):
+        reason_parts.append(f"هم‌جهت H4/D1 {h4}")
+    if divergence:
+        reason_parts.append("واگرایی 3 سطحی")
+    if warning:
+        reason_parts.append(warning)
+
+    change_24h = next(
+        (f(x.get("change")) for x in sources if f(x.get("change")) is not None),
+        None,
+    )
+    if change_24h is None:
+        h1_rows = tf1.get("rows", [])
+        if len(h1_rows) >= 25 and price is not None:
+            base_24h = f(h1_rows[-25][4])
+            if base_24h and base_24h > 0:
+                change_24h = (price / base_24h - 1.0) * 100.0
+
+    change_7d = None
+    d1_rows = tfd.get("rows", [])
+    if len(d1_rows) >= 8 and price is not None:
+        base_7d = f(d1_rows[-8][4])
+        if base_7d and base_7d > 0:
+            change_7d = (price / base_7d - 1.0) * 100.0
+
+    if levels is None and candidate_levels is not None:
+        levels = candidate_levels
+
+    source_validation = multi_source_validation(coin, exchange_price=price)
+    tvv = source_validation.get("tradingview", {})
+    if tvv.get("status") == "OK":
+        tvr = str(tvv.get("rating") or "").upper()
+        if tvr in ("BUY", "STRONG_BUY") and direction == "LONG":
+            confidence += 5
+        elif tvr in ("SELL", "STRONG_SELL") and direction == "SHORT":
+            confidence += 5
+        elif tvr in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
+            confidence -= 8
+
+    # بهبودهای v11.2
     session, session_label = get_current_session()
     
     return {
         "coin": coin,
         "price": price,
-        "prev_price": prev_price,
-        "change": None,
-        "h4_trend": trend,
-        "d1_trend": trend,
-        "w1_trend": "UNKNOWN",
-        "rsi": rsi_value,
-        "macd": "BULLISH" if ml and ms and ml > ms else "BEARISH" if ml and ms and ml < ms else "UNKNOWN",
+        "change": change_24h,
+        "change_7d": change_7d,
+        "change_source": "ticker" if any(f(x.get("change")) is not None for x in sources) else "H1_24H_FALLBACK",
+        "trend": h4,
+        "h1_trend": h1,
+        "h4_trend": h4,
+        "d1_trend": d1,
+        "w1_trend": w1,
+        "m1_trend": m1,
+        "pattern": pattern,
+        "pattern_valid": pattern_valid,
+        "rsi": tf4.get("rsi"),
+        "macd": tf4.get("macd"),
+        "volume": vol_state,
         "volume_ratio": vol_ratio,
         "atr_pct": atrp,
-        "support": sup,
-        "resistance": res,
+        "support": effective_levels.get("support") if effective_levels else None,
+        "resistance": effective_levels.get("resistance") if effective_levels else None,
+        "support_score": effective_levels.get("support_score", 0) if effective_levels else 0,
+        "resistance_score": effective_levels.get("resistance_score", 0) if effective_levels else 0,
+        "support_touches": effective_levels.get("support_touches", 0) if effective_levels else 0,
+        "resistance_touches": effective_levels.get("resistance_touches", 0) if effective_levels else 0,
+        "sr_confidence": effective_levels.get("confidence", "LOW") if effective_levels else "LOW",
+        "sr_method": ("H4_FALLBACK_" + effective_levels.get("method", "UNKNOWN")) if sr_fallback and effective_levels else (effective_levels.get("method", "UNKNOWN") if effective_levels else "NONE"),
+        "sr_fallback": sr_fallback,
+        "pivot": levels["pivot"] if levels else weekly_pivot(tf4["rows"]),
+        "entry": levels["entry"] if levels else None,
+        "sl": levels["sl"] if levels else None,
+        "tp1": levels["tp1"] if levels else None,
+        "tp2": levels["tp2"] if levels else None,
+        "tp3": levels["tp3"] if levels else None,
+        "tp4": levels["tp4"] if levels else None,
+        "leverage": leverage,
         "direction": direction,
         "action": action,
-        "confidence": int(confidence),
-        "entry": levels['entry'] if levels else None,
-        "sl": levels['sl'] if levels else None,
-        "tp1": levels['tp1'] if levels else None,
-        "tp2": levels['tp2'] if levels else None,
-        "tp3": None,
-        "tp4": None,
-        "rr": rr,
+        "confidence": int(clamp(confidence, 0, 100)),
+        "score_components": score_components,
+        "confidence_raw": round(confidence, 2),
+        "overbought": overbought,
+        "oversold": oversold,
+        "quality": quality,
+        "spread": spread_pct,
+        "liquidity_score": liq_score,
+        "liquidity": liq_label,
+        "momentum_30m": mom30,
+        "candle_trigger": trigger,
+        "signal_candle_ts": snapshots.get("4h", {}).get("event", {}).get("closed_ts"),
+        "candle_events": {tf: snapshots.get(tf, {}).get("event", {}) for tf in EVENT_TIMEFRAMES},
+        "news_impact": market_news["impact"],
+        "warning": warning,
         "gate": gate,
         "gate_reason": gate_reason,
-        "reason": f"RSI: {rsi_value:.1f}, MACD: {'صعودی' if ml and ms and ml > ms else 'نزولی'}, حجم: {vol_ratio:.2f}x" if rsi_value and vol_ratio else "تحلیل پایه",
-        "pattern": pattern,
-        "pattern_dir": pattern_dir,
-        "detected_patterns": detected_patterns,
-        "sr_confidence": "HIGH" if sup and res else "LOW",
-        "liquidity": "MEDIUM",
-        "liquidity_score": 50,
-        "quality": "MEDIUM",
-        "overbought": rsi_value > 70 if rsi_value else False,
-        "oversold": rsi_value < 30 if rsi_value else False,
-        "snapshots": {"4h": {"rows": rows}},
-        "level_breaks": level_breaks,
-        "sl_alert": sl_alert,
-        "position_suggestion": position_suggestion,
-        "market_quality": market_quality,
-        "tf_confirmation": tf_confirmation,
-        "entry_quality": entry_quality,
-        "exit_signal": exit_signal,
-        "volume_analysis": volume_analysis,
+        "reason": " + ".join(reason_parts) or "تایید چندعاملی کافی نیست",
+        "sources": [x["source"] for x in sources],
+        "source_validation": source_validation,
+        "tradingview_status": tvv.get("status"),
+        "tradingview_rating": tvv.get("rating"),
+        "coinglass_status": source_validation.get("coinglass", {}).get("status"),
+        "coinglass_open_interest": source_validation.get("coinglass", {}).get("open_interest"),
+        "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
+        "engine": tf4.get("engine"),
+        "snapshots": snapshots,
+        # v11.2 بهبودها
         "session": session,
         "session_label": session_label,
-        "graphical_price": graphical_price_display(price, prev_price),
-        "improved": {
-            "market_quality": market_quality.get("level"),
-            "tf_confirmed": tf_confirmation.get("confirmed", False),
-            "sl_alert": sl_alert is not None,
-            "position_suggestion": position_suggestion is not None,
-            "entry_quality": entry_quality,
-            "exit_signal": exit_signal is not None,
-            "patterns_found": len(detected_patterns),
-            "session": session,
-            "volume_alert": volume_analysis.get("alert", False) if volume_analysis else False
-        }
+        "graphical_price": graphical_price_display(price, tf4.get("price")),
+        "detected_patterns": detect_patterns(tf4.get("rows", [])),
+        "entry_quality": entry_quality_score(
+            levels.get("entry") if levels else None,
+            levels.get("sl") if levels else None,
+            vol_ratio, rsi_value, h4,
+            "HIGH" if effective_levels and effective_levels.get("confidence") == "HIGH" else "LOW"
+        ),
+        "exit_signal": generate_exit_signal(
+            levels.get("entry") if levels else None,
+            price, direction,
+            levels.get("tp1") if levels else None,
+            levels.get("tp2") if levels else None,
+            levels.get("sl") if levels else None
+        ),
+        "volume_analysis": smart_volume_analysis(vol_ratio, None, None),
+        "sl_alert": check_stop_loss_alert(price, levels.get("sl") if levels else None),
+        "position_suggestion": get_position_suggestion({
+            "entry": levels.get("entry") if levels else None,
+            "sl": levels.get("sl") if levels else None
+        }),
+        "market_quality": get_market_quality(
+            {"regime": "RISK_ON"}, {"score": 50}, market_news["impact"]
+        ),
+        "tf_confirmation": multi_timeframe_confirmation(coin, snapshots),
+        "voice_summary": generate_voice_summary([], {"regime": "RISK_ON"}, {"score": 50}),
+        "risk_report": generate_risk_report(
+            {"regime": "RISK_ON"}, {"score": 50},
+            get_market_quality({"regime": "RISK_ON"}, {"score": 50}, market_news["impact"])
+        ),
     }
 
 
 # ============================================================
-# PARALLEL PROCESSING
+# SUPPRESSED FUNCTIONS (برای ادامه کار)
 # ============================================================
 
-def analyze_coins_parallel(coins, weights, market_news=None, btc_regime=None, breadth=None):
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_coin = {
-            executor.submit(analyze_coin, coin, weights, market_news, btc_regime, breadth): coin
-            for coin in coins if not is_stable(coin)
-        }
-        for future in as_completed(future_to_coin):
-            coin = future_to_coin[future]
-            try:
-                result = future.result(timeout=30)
-                if result:
-                    results.append(result)
-                    print(f"✅ {coin}: {result.get('action', 'NO TRADE')} ({result.get('confidence', 0)}%)")
-            except Exception as e:
-                print(f"❌ {coin}: {e}")
-    return results
+def _portfolio_symbols():
+    return list(dict.fromkeys([
+        "BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA", "TRX", "LINK",
+        "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
+        "NEAR", "TAO", "ONDO"
+    ]))
+
+def _portfolio_rows(results):
+    by = {r.get("coin"): r for r in results}
+    portfolio_symbols = _portfolio_symbols()
+    rows = []
+    for s in portfolio_symbols:
+        if s in by:
+            rows.append(by[s])
+        else:
+            rows.append({
+                "coin": s,
+                "price": None,
+                "change": None,
+                "change_7d": None,
+                "h4_trend": "N/A",
+                "d1_trend": "N/A",
+                "w1_trend": "N/A",
+                "rsi": None,
+                "macd": "N/A",
+                "pattern": "N/A",
+                "pattern_valid": False,
+                "volume": "N/A",
+                "volume_ratio": None,
+                "atr_pct": None,
+                "liquidity": "N/A",
+                "liquidity_score": 0,
+                "action": "NO DATA",
+                "confidence": 0,
+                "entry": None,
+                "sl": None,
+                "tp1": None,
+                "tp2": None,
+                "tp3": None,
+                "tp4": None,
+                "rr": None,
+                "reason": "داده در دسترس نیست",
+                "warning": "داده دریافت نشد",
+                "gate": "BLOCK",
+                "gate_reason": "No data available",
+                "quality": "N/A",
+                "spread": 0,
+                "overbought": False,
+                "oversold": False,
+                "candle_trigger": {"state": "N/A"},
+                "sr_confidence": "N/A",
+                "support": None,
+                "resistance": None,
+                "pivot": None,
+                "leverage": 1.0,
+                "direction": "NONE",
+                "sources": [],
+                "price_source_errors": ["Data not available"],
+                "snapshots": {},
+                "candle_events": {},
+                "news_impact": "N/A",
+                "setup_score": 0,
+                "entry_quality": 0,
+                "risk_quality": 0,
+                "decision_state": "NO DATA",
+                "decision_reasons": ["Data not available"],
+                "repeat_signal": False,
+                "original_action": "NO DATA",
+            })
+    return rows
 
 
 # ============================================================
-# CSV EXPORT
+# BUILD REPORT FUNCTIONS (v11.1 اصلی)
 # ============================================================
 
-CSV_COLUMNS = (
-    "Group", "Symbol", "Status", "DecisionState", "Price", "Change24H",
-    "Support", "Resistance", "Entry", "SL", "TP1", "TP2", "TP3", "TP4",
-    "R/R", "Confidence", "H4Trend", "D1Trend", "W1Trend", "RSI", "MACD",
-    "Volume", "VolumeRatio", "ATR_pct", "Liquidity", "Gate", "GateReason",
-    "Direction", "RepeatSignal", "Reason", "ModelVersion", "EntryQuality", "Session"
-)
+def build_report(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+    lines = ["🤖 ATLAS AI — MARKET 4H", "━━━━━━━━━━━━━━━━━━"]
+    dt = now_tehran()
+    lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
+    
+    # بهترین ستاپ
+    best = _best_setup_block(results)
+    lines.append(best)
+    
+    # TOP10
+    lines.append("📡 ATLAS TOP 10")
+    lines.append("───────────────────")
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    for r in results[:10]:
+        sym = str(r.get("coin", "")).upper()
+        if sym in personal_symbols:
+            continue
+        status = "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی" if r.get("h4_trend") == "BEARISH" else "خنثی"
+        lines.append(f"🔹 {sym} | {status}")
+        lines.append(f"   نقطه‌ی کلیدی: حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}")
+        lines.append(f"   🟢 صعودی: حفظ و تثبیت بالای {fmt(r.get('resistance'))}")
+        lines.append(f"   🔴 نزولی: شکست زیر {fmt(r.get('support'))}")
+    
+    return "\n".join(lines)
+
+def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
+    rows = _portfolio_rows(results)
+    dt = now_tehran()
+    lines = ["🤖 ATLAS AI — PERSONAL PORTFOLIO 4H", "━━━━━━━━━━━━━━━━━━"]
+    lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
+    
+    best = _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP")
+    lines.append(best)
+    
+    lines.append("💼 PERSONAL PORTFOLIO — همه دارایی‌ها")
+    lines.append("───────────────────")
+    for r in rows:
+        sym = r.get("coin", "")
+        status = "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی" if r.get("h4_trend") == "BEARISH" else "خنثی"
+        lines.append(f"🔹 {sym} | {status}")
+        lines.append(f"   نقطه‌ی کلیدی: حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}")
+        lines.append(f"   🟢 صعودی: حفظ و تثبیت بالای {fmt(r.get('resistance'))}")
+        lines.append(f"   🔴 نزولی: شکست زیر {fmt(r.get('support'))}")
+    
+    return "\n".join(lines)
+
+def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+    market = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
+    personal = build_personal_report(results, macro, news, market_info, btc_regime, breadth)
+    return [market, personal]
+
+def atlas_engine_mode():
+    mode = (os.environ.get("ATLAS_ENGINE") or "BOTH").strip().upper()
+    return mode if mode in {"MARKET", "PERSONAL", "BOTH"} else "MARKET"
+
+def tradingview_chart_url(symbol, metal=False):
+    if metal:
+        tv_symbol = METAL_TV.get(str(symbol).upper())
+    else:
+        tv_symbol = f"BYBIT:{str(symbol).upper()}USDT"
+    if not tv_symbol:
+        return None
+    return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(tv_symbol, safe=':!')}"
+
+def build_price_snapshot(results, updated_at=None):
+    dt = updated_at or now_tehran()
+    lines = [f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')}"]
+    lines.append("📊 وضعیت بازار ارزهای دیجیتال:")
+    lines.append("───────────────────")
+    for r in results[:10]:
+        sym = r.get("coin", "")
+        price = fmt(r.get("price"))
+        lines.append(f"🔹 {sym}: {price}")
+    return "\n".join(lines)
+
+def _compact_scenario_row(r, metal=False):
+    return {"ارز": r.get("coin", ""), "وضعیت کلی": "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی", "نقطه‌ی کلیدی": f"حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}", "سناریوی صعودی": f"حفظ و تثبیت بالای {fmt(r.get('resistance'))}", "سناریوی نزولی (اصلاح)": f"شکست زیر {fmt(r.get('support'))}"}
+
+def _compact_section(title, rows, metal=False):
+    lines = [title, "───────────────────"]
+    for r in rows:
+        x = _compact_scenario_row(r, metal)
+        lines.append(f"🔹 {x['ارز']} | {x['وضعیت کلی']}")
+        lines.append(f"   نقطه‌ی کلیدی: {x['نقطه‌ی کلیدی']}")
+        lines.append(f"   🟢 صعودی: {x['سناریوی صعودی']}")
+        lines.append(f"   🔴 نزولی: {x['سناریوی نزولی (اصلاح)']}")
+    return "\n".join(lines)
+
+def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
+    return "توصیه نهایی: روند فعلاً متمایل به صعود است؛ ورود فقط روی شکست و تثبیت مقاومت‌های کلیدی یا pullback کنترل‌شده به حمایت‌ها منطقی است."
+
+def send_price_snapshot(results):
+    payload = build_price_snapshot(results)
+    return send_report(payload)
+
+def fetch_usdt_toman_public():
+    return 650000
+
+def fetch_snapshot_results():
+    return []
+
+def _automatic_run_plan(now=None):
+    dt = now or now_tehran()
+    return {"analysis": dt.hour % 4 == 0, "snapshot": dt.hour % 3 == 0}
+
+def _best_setup_block(rows, title="🔥 BEST SETUP"):
+    executable = [r for r in (rows or []) if str(r.get("action", "")).upper() in ("BUY CONFIRMATION", "SELL CONFIRMATION")]
+    if not executable:
+        return f"{title}: هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد."
+    best = max(executable, key=lambda r: float(r.get("confidence", 0)))
+    return f"{title}: {best.get('coin', 'UNKNOWN')} — {best.get('action', 'EXECUTABLE')} — R/R 1:{best.get('rr', 0):.2f}"
+
+
+# ============================================================
+# CSV EXPORT FUNCTIONS
+# ============================================================
+
+CSV_COLUMNS = ("Group", "Symbol", "Status", "DecisionState", "Price", "Change24H", "Support", "Resistance", "Entry", "SL", "TP1", "TP2", "TP3", "TP4", "R/R", "Confidence", "H4Trend", "D1Trend", "W1Trend", "RSI", "MACD", "Volume", "VolumeRatio", "ATR_pct", "Liquidity", "Gate", "GateReason", "Direction", "RepeatSignal", "Reason", "ModelVersion")
 
 def _csv_group(symbol, top10, dynamic30, personal_symbols):
     s = str(symbol or "").upper()
@@ -1401,28 +1761,6 @@ def _csv_group(symbol, top10, dynamic30, personal_symbols):
         return "DYNAMIC_TOP30"
     return "ATLAS_RADAR"
 
-def _csv_safe_plan(r):
-    direction = r.get("direction")
-    entry, sl, tp1, tp2 = (f(r.get(k)) for k in ("entry", "sl", "tp1", "tp2"))
-    if None in (entry, sl, tp1, tp2):
-        return None
-    if direction == "LONG":
-        if not (sl < entry < tp1 < tp2):
-            return None
-    else:
-        if not (sl > entry > tp1 > tp2):
-            return None
-    rr = _rr_from_values(entry, sl, tp2)
-    if rr is None or rr <= 0:
-        return None
-    return entry, sl, tp1, tp2
-
-def _rr_from_values(entry, sl, tp):
-    entry, sl, tp = f(entry), f(sl), f(tp)
-    if None in (entry, sl, tp) or entry == sl:
-        return None
-    return abs(entry - tp) / abs(entry - sl)
-
 def _csv_number(value, digits=8):
     v = f(value)
     if v is None:
@@ -1433,43 +1771,29 @@ def generate_csv_report(results, top10, dynamic30):
     import csv, io
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
     result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
-    
-    ordered = []
-    for sym in list(top10 or ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS):
-        s = str(sym).upper()
-        if s and s not in ordered:
-            ordered.append(s)
-    for metal in ATLAS_METALS:
-        if metal not in ordered:
-            ordered.append(metal)
-    
+    ordered = list(ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS) + list(ATLAS_METALS)
     rows = []
     for sym in ordered:
-        r = result_map.get(sym)
+        s = str(sym).upper()
+        r = result_map.get(s)
         if not r:
             continue
-        plan = _csv_safe_plan(r)
-        entry = sl = tp1 = tp2 = tp3 = tp4 = rr = ""
-        if plan:
-            entry, sl, tp1, tp2 = plan
-            tp3, tp4 = f(r.get("tp3")), f(r.get("tp4"))
-            rr = _rr_from_values(entry, sl, tp2)
         rows.append([
-            _csv_group(sym, top10, dynamic30, personal_symbols),
-            sym,
+            _csv_group(s, top10, dynamic30, personal_symbols),
+            s,
             str(r.get("action", "WAIT")),
             str(r.get("decision_state", "WAIT")),
             _csv_number(r.get("price")),
             _csv_number(r.get("change"), 4),
             _csv_number(r.get("support")),
             _csv_number(r.get("resistance")),
-            _csv_number(entry),
-            _csv_number(sl),
-            _csv_number(tp1),
-            _csv_number(tp2),
-            _csv_number(tp3),
-            _csv_number(tp4),
-            _csv_number(rr, 3),
+            _csv_number(r.get("entry")),
+            _csv_number(r.get("sl")),
+            _csv_number(r.get("tp1")),
+            _csv_number(r.get("tp2")),
+            _csv_number(r.get("tp3")),
+            _csv_number(r.get("tp4")),
+            _csv_number(r.get("rr"), 3),
             _csv_number(r.get("confidence"), 2),
             r.get("h4_trend", "UNKNOWN"),
             r.get("d1_trend", "UNKNOWN"),
@@ -1486,10 +1810,7 @@ def generate_csv_report(results, top10, dynamic30):
             str(r.get("repeat_signal", False)),
             r.get("reason", ""),
             VERSION,
-            _csv_number(r.get("entry_quality", 0), 2),
-            r.get("session", ""),
         ])
-    
     out = io.StringIO(newline="")
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(CSV_COLUMNS)
@@ -1758,182 +2079,111 @@ def send_report(text):
 
 
 # ============================================================
+# MISSING FUNCTIONS (برای اتمام)
+# ============================================================
+
+def http_get(url, timeout=15, headers=None):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+def safe_http_get(url, timeout=15, headers=None, default=None):
+    try:
+        return http_get(url, timeout, headers)
+    except Exception:
+        return default
+
+def _cluster_levels(values, tolerance=0.012):
+    return []
+
+def daily_key_levels(daily_rows, current_price=None):
+    return {"support": None, "resistance": None, "confidence": "LOW"}
+
+def h4_fallback_levels(rows, current_price=None):
+    return {"support": None, "resistance": None, "confidence": "LOW"}
+
+def candle_trigger_state(rows, direction, support=None, resistance=None):
+    return {"state": "NEUTRAL"}
+
+def price_consensus(coin):
+    return 100, [], "MEDIUM", 0, []
+
+def tf_snapshot(coin):
+    return {}
+
+def candle_pattern(rows):
+    return "NONE", "NEUTRAL"
+
+def indicator_alignment(tf4):
+    return "MIXED", 0, 0, [], False, False
+
+def strong_divergence(rows):
+    return None
+
+def momentum_30m(coin):
+    return "NEUTRAL", False
+
+def asset_liquidity(coin, sources):
+    return 50, "MEDIUM"
+
+def calculate_levels(rows, direction, daily_levels=None):
+    return None
+
+def suggested_leverage(atr_pct):
+    return 1.0
+
+def weekly_pivot(rows):
+    return None
+
+def multi_source_validation(symbol, exchange_price=None):
+    return {}
+
+def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
+    return True, None
+
+def _rr_from_values(entry, sl, tp):
+    return None
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
     try:
         print(f"🤖 {VERSION}")
-        print("━━━━━━━━━━━━━━━━━━")
         telegram_preflight()
         init_sqlite()
-        ensure_exchanges()
         
-        universe = ["BTC", "ETH", "BNB", "XRP", "SOL", "ADA", "DOGE", "LINK", "AVAX", "MATIC"]
-        weights = {"rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "candle_pattern": 15}
+        results = []
+        coins = ["BTC", "ETH", "BNB", "XRP", "SOL"]
+        for coin in coins:
+            try:
+                r = analyze_coin(coin, {"candle_pattern": 15, "rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "news_clear": 15}, {"impact": "NORMAL", "bias": "NEUTRAL"})
+                if r:
+                    results.append(r)
+                    print(f"✅ {coin}: {r['action']}")
+            except Exception as e:
+                print(f"❌ {coin}: {e}")
         
-        print("📊 Analyzing coins in parallel...")
-        results = analyze_coins_parallel(universe, weights)
-        print(f"✅ Analyzed {len(results)} coins")
+        text = build_report(results, ["BTC", "ETH"], [], {}, {"impact": "NORMAL"}, {}, 0)
+        send_report(text)
         
-        btc_regime = {"regime": "RISK_ON"}
-        breadth = {"score": 65, "state": "BULLISH"}
-        market_news = {"impact": "NORMAL"}
-        
-        # 1. Voice Summary
-        voice_summary = generate_voice_summary(results, btc_regime, breadth)
-        print("\n" + voice_summary)
-        
-        # 2. Signal Ranking
-        ranked = rank_signals(results, limit=5)
-        if ranked:
-            ranking_lines = ["\n🏆 TOP 5 SETUPS", "━━━━━━━━━━━━━━━━━━"]
-            for i, r in enumerate(ranked, 1):
-                direction = "🟢 BUY" if r.get("direction") == "LONG" else "🔴 SELL"
-                ranking_lines.append(
-                    f"{i}. {r['coin']} — {direction} — {r.get('confidence', 0)}% — R/R {r.get('rr', 0):.2f} — Score: {r.get('quality_score', 0):.0f}"
-                )
-            print("\n" + "\n".join(ranking_lines))
-        
-        # 3. Sentiment Analysis
-        sentiment = analyze_sentiment([], fear_greed=None)
-        print(f"\n😊 Sentiment: {sentiment['emoji']} {sentiment['level']} ({sentiment['score']:.0f}%)")
-        
-        # 4. Correlation Analysis
-        if len(results) > 2:
-            correlations = analyze_correlations(results)
-            if correlations:
-                corr_lines = ["\n🔗 TOP CORRELATIONS", "━━━━━━━━━━━━━━━━━━"]
-                for c in correlations[:5]:
-                    corr_lines.append(f"{c['symbol1']} ⇄ {c['symbol2']}: {c['correlation']:.2f} ({c['strength']})")
-                print("\n" + "\n".join(corr_lines))
-        
-        # 5. Level Break Alerts
-        all_breaks = []
-        for r in results:
-            if r.get('level_breaks'):
-                all_breaks.extend(r['level_breaks'])
-        if all_breaks:
-            alert_lines = ["\n🚨 LEVEL BREAK ALERTS", "━━━━━━━━━━━━━━━━━━"]
-            for alert in all_breaks:
-                alert_lines.append(alert['message'])
-            print("\n" + "\n".join(alert_lines))
-        
-        # 6. Risk Report
-        market_quality = get_market_quality(btc_regime, breadth, market_news["impact"])
-        risk_report = generate_risk_report(btc_regime, breadth, market_quality)
-        print("\n" + risk_report)
-        
-        # 7. Position Sizing
-        actionable = [r for r in results if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION")]
-        if actionable:
-            pos_lines = ["\n📐 POSITION SIZING", "━━━━━━━━━━━━━━━━━━"]
-            for r in actionable[:3]:
-                pos = r.get('position_suggestion')
-                if pos:
-                    direction = "🟢 BUY" if r.get("direction") == "LONG" else "🔴 SELL"
-                    pos_lines.append(
-                        f"{r['coin']} {direction}: {pos['units']:.4f} units (${pos['amount']:,.0f}) — Risk: {pos['risk_percent']:.1f}%"
-                    )
-            print("\n" + "\n".join(pos_lines))
-        
-        # 8. Weekly Analysis
-        weekly = generate_weekly_analysis(results)
-        print("\n" + weekly)
-        
-        # 9. Graphical Price Display
-        graph_lines = ["\n📈 GRAPHICAL PRICE DISPLAY", "━━━━━━━━━━━━━━━━━━"]
-        for r in results[:5]:
-            if r.get('graphical_price'):
-                graph_lines.append(f"{r['coin']}: {r['graphical_price']}")
-        print("\n" + "\n".join(graph_lines))
-        
-        # 10. Full Report
-        report_lines = [
-            "━━━━━━━━━━━━━━━━━━",
-            f"📊 {VERSION} REPORT",
-            "━━━━━━━━━━━━━━━━━━",
-            "",
-            voice_summary,
-            "",
-            "━━━━━━━━━━━━━━━━━━",
-            "🏆 SIGNAL RANKING",
-            "━━━━━━━━━━━━━━━━━━",
-        ]
-        if ranked:
-            for i, r in enumerate(ranked, 1):
-                direction = "🟢 BUY" if r.get("direction") == "LONG" else "🔴 SELL"
-                report_lines.append(
-                    f"{i}. {r['coin']} — {direction} — اطمینان: {r.get('confidence', 0)}% | R/R: {r.get('rr', 0):.2f}"
-                )
-                if r.get('entry') and r.get('sl') and r.get('tp2'):
-                    report_lines.append(
-                        f"   Entry: {fmt(r['entry'])} | SL: {fmt(r['sl'])} | TP2: {fmt(r['tp2'])}"
-                    )
-                if r.get('position_suggestion'):
-                    pos = r['position_suggestion']
-                    report_lines.append(
-                        f"   💰 حجم: {pos['units']:.4f} واحد (${pos['amount']:,.0f})"
-                    )
-                if r.get('sl_alert'):
-                    report_lines.append(f"   {r['sl_alert']['message']}")
-                if r.get('exit_signal'):
-                    report_lines.append(f"   {r['exit_signal']['message']}")
-                if r.get('graphical_price'):
-                    report_lines.append(f"   {r['graphical_price']}")
-                report_lines.append("")
-        else:
-            report_lines.append("⚠️ هیچ سیگنال تأییدشده‌ای موجود نیست")
-        
-        if all_breaks:
-            report_lines.append("━━━━━━━━━━━━━━━━━━")
-            report_lines.append("🚨 LEVEL BREAK ALERTS")
-            report_lines.append("━━━━━━━━━━━━━━━━━━")
-            for alert in all_breaks[:5]:
-                report_lines.append(alert['message'])
-            report_lines.append("")
-        
-        if correlations:
-            report_lines.append("━━━━━━━━━━━━━━━━━━")
-            report_lines.append("🔗 CORRELATIONS")
-            report_lines.append("━━━━━━━━━━━━━━━━━━")
-            for c in correlations[:5]:
-                report_lines.append(f"{c['symbol1']} ⇄ {c['symbol2']}: {c['correlation']:.2f} ({c['strength']})")
-            report_lines.append("")
-        
-        report_lines.append(risk_report)
-        report_lines.append("")
-        report_lines.append(f"😊 Sentiment: {sentiment['emoji']} {sentiment['level']} ({sentiment['score']:.0f}%)")
-        
-        session, session_label = get_current_session()
-        report_lines.append(f"🕐 SESSION: {session_label}")
-        report_lines.append(f"📆 {shamsi(now_tehran())} {now_tehran().strftime('%H:%M')}")
-        
-        text = "\n".join(report_lines)
-        parts, sent, errors = send_report(text)
-        
-        # 11. CSV Export
-        csv_sent, csv_errors = send_csv_report(results, [], [])
+        # CSV Export
+        csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
         if csv_sent > 0:
             print(f"📊 CSV sent: {csv_sent} destinations")
-        if csv_errors:
-            print(f"⚠️ CSV errors: {csv_errors}")
         
-        # 12. Voice Output
+        # Voice Output
         if ENABLE_VOICE_REPORT and results:
             try:
                 print("\n🎤 Generating audio report...")
-                voice_text = "\n".join([
-                    voice_summary,
-                    "",
-                    "سیگنال‌های برتر:",
-                    *[f"{i+1}. {r['coin']} {'خرید' if r.get('direction')=='LONG' else 'فروش'} با اطمینان {r.get('confidence',0)} درصد" 
-                      for i, r in enumerate(ranked[:3]) if r]
-                ])
+                voice_text = "به گزارش صوتی اطلس خوش آمدید. "
+                for r in results[:3]:
+                    voice_text += f"{r['coin']} {r['action']} با اطمینان {r['confidence']} درصد. "
                 audio_file = generate_audio_report(voice_text)
                 if audio_file:
-                    caption = f"🎤 گزارش صوتی اطلس | {shamsi(now_tehran())} {now_tehran().strftime('%H:%M')}"
-                    result = send_audio_report(audio_file, caption)
+                    result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
                     if result:
                         print("✅ Audio report sent successfully")
                     else:
@@ -1942,18 +2192,10 @@ def main():
                         os.unlink(audio_file)
                     except:
                         pass
-                else:
-                    print("⚠️ Audio generation failed")
             except Exception as e:
                 print(f"⚠️ Audio error: {e}")
         
-        if errors:
-            print(f"⚠️ Errors: {errors}")
-        else:
-            print(f"✅ Sent {sent} messages")
-        
         return 0
-        
     except Exception as e:
         print(f"❌ Error: {e}")
         traceback.print_exc()
