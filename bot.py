@@ -150,13 +150,12 @@ def get_current_session(dt=None):
 
 
 # ============================================================
-# VOICE SUMMARY & OUTPUT
+# VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
 # ============================================================
 
-def generate_voice_summary(results):
-    """تولید خلاصه صوتی از نتایج"""
+def generate_voice_summary(results, news=None, btc_regime=None):
+    """تولید خلاصه صوتی کامل از نتایج با اخبار و سیگنال‌ها"""
     if not results:
-        print("⚠️ generate_voice_summary: results is empty")
         return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
     
     print(f"📝 generate_voice_summary: processing {len(results)} items")
@@ -164,19 +163,23 @@ def generate_voice_summary(results):
     # دریافت سشن فعلی
     session, session_label, session_multiplier = get_current_session()
     
-    # تحلیل قیمت‌ها
-    prices = []
+    # تحلیل قیمت‌ها و سیگنال‌ها
     up_count = 0
     down_count = 0
     stable_count = 0
     changes = []
+    buy_signals = []
+    sell_signals = []
+    watch_signals = []
     
     for r in results:
         price = f(r.get("price"))
         change = f(r.get("change")) or f(r.get("change24"))
         symbol = r.get("coin", "")
+        action = str(r.get("action") or "").upper()
+        confidence = r.get("confidence", 0)
+        
         if price:
-            prices.append(price)
             if change is not None:
                 changes.append((symbol, change))
                 if change > 0.5:
@@ -185,15 +188,35 @@ def generate_voice_summary(results):
                     down_count += 1
                 else:
                     stable_count += 1
+        
+        # جمع‌آوری سیگنال‌ها
+        if action in ("BUY CONFIRMATION", "BUY"):
+            buy_signals.append((symbol, confidence, r.get("rr", 0)))
+        elif action in ("SELL CONFIRMATION", "SELL"):
+            sell_signals.append((symbol, confidence, r.get("rr", 0)))
+        elif action in ("BULLISH WATCH", "BEARISH WATCH"):
+            watch_signals.append((symbol, action, confidence))
     
-    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}, changes={len(changes)}")
+    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
+    print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
     
     # تولید متن صوتی
     lines = [
         "به گزارش صوتی اطلس خوش آمدید.",
-        f"گزارش لحظه‌ای بازار ارزهای دیجیتال در سشن {session_label}.",
+        f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
     ]
     
+    # ===== وضعیت کلی بازار از بیت‌کوین =====
+    if btc_regime:
+        regime = btc_regime.get("regime", "UNKNOWN")
+        if regime == "RISK_ON":
+            lines.append("بازار در حالت ریسک‌پذیر قرار دارد و تمایل به صعود دارد.")
+        elif regime == "RISK_OFF":
+            lines.append("بازار در حالت ریسک‌گریز قرار دارد و احتیاط بیشتری نیاز است.")
+        else:
+            lines.append("بازار در حالت خنثی قرار دارد.")
+    
+    # ===== آمار صعودی/نزولی =====
     if up_count > 0:
         lines.append(f"{up_count} ارز صعودی هستند.")
     if down_count > 0:
@@ -201,7 +224,7 @@ def generate_voice_summary(results):
     if stable_count > 0:
         lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
     
-    # بهترین و بدترین عملکرد
+    # ===== بهترین و بدترین عملکرد =====
     if changes:
         best = max(changes, key=lambda x: x[1])
         worst = min(changes, key=lambda x: x[1])
@@ -210,12 +233,56 @@ def generate_voice_summary(results):
         if worst[1] < 0:
             lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
     
-    # قیمت تتر
+    # ===== سیگنال‌های خرید =====
+    if buy_signals:
+        buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
+        lines.append(buy_text)
+    
+    # ===== سیگنال‌های فروش =====
+    if sell_signals:
+        sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
+        lines.append(sell_text)
+    
+    # ===== سیگنال‌های در انتظار =====
+    if watch_signals:
+        watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
+        lines.append(watch_text)
+    
+    # ===== اخبار =====
+    if news:
+        bias = news.get("bias", "")
+        impact = news.get("impact", "")
+        if bias == "POSITIVE":
+            lines.append("اخبار بازار عمدتاً مثبت است.")
+        elif bias == "NEGATIVE":
+            lines.append("اخبار بازار عمدتاً منفی است.")
+        elif bias == "MIXED/LIMITED":
+            lines.append("اخبار بازار مختلط است.")
+        
+        if impact == "HIGH":
+            lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
+        
+        # چند خبر مهم
+        items = news.get("items", [])[:3]
+        if items:
+            headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
+            if headlines:
+                lines.append("خبرهای مهم: " + "، ".join(headlines))
+    
+    # ===== قیمت تتر =====
     usdt = fetch_usdt_toman_public()
     if usdt:
         lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
     
-    lines.append("این پیام به صورت خودکار هر ۳ ساعت بروزرسانی می‌شود.")
+    # ===== جمع‌بندی نهایی =====
+    if buy_signals:
+        lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
+    elif watch_signals:
+        lines.append("توصیه: در حال حاضر در جایگاه ناظر باشید و منتظر تأیید سیگنال‌ها بمانید.")
+    else:
+        lines.append("توصیه: فعلاً در جایگاه ناظر باشید و منتظر شکل‌گیری سیگنال معتبر بمانید.")
+    
+    lines.append("این پیام به صورت خودکار هر ۴ ساعت بروزرسانی می‌شود.")
     
     result = " ".join(lines)
     print(f"📝 Voice text length: {len(result)} characters")
@@ -331,12 +398,12 @@ def text_to_speech_persian(text, voice="female"):
         return None
 
 
-def generate_audio_report(results, filename="audio_report.mp3"):
-    """تولید فایل صوتی از گزارش"""
+def generate_audio_report(results, news=None, btc_regime=None, filename="audio_report.mp3"):
+    """تولید فایل صوتی کامل از گزارش با اخبار و سیگنال‌ها"""
     if not results:
         return None
     
-    audio_text = generate_voice_summary(results)
+    audio_text = generate_voice_summary(results, news, btc_regime)
     
     if len(audio_text) < 50:
         audio_text = generate_voice_summary_from_snapshot(results)
@@ -5145,16 +5212,19 @@ def main():
             all_errors.extend(snapshot_errors)
 
         # ============================================================
-        # Voice Output - ارسال گزارش صوتی
+        # Voice Output - ارسال گزارش صوتی کامل با اخبار و سیگنال‌ها
         # ============================================================
         if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
             try:
                 print("\n🎤 Generating audio report...")
                 voice_data = analysis_results if analysis_results else snapshot_results
                 if voice_data:
-                    audio_file = generate_audio_report(voice_data)
+                    # ارسال اخبار و وضعیت بازار به تابع صوتی
+                    news_data = news if 'news' in locals() else None
+                    btc_data = btc_regime if 'btc_regime' in locals() else None
+                    audio_file = generate_audio_report(voice_data, news_data, btc_data)
                     if audio_file:
-                        result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
+                        result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
                         if result:
                             print("✅ Audio report sent successfully")
                         try:
