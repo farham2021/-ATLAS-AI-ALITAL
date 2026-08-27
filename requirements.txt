@@ -1,1 +1,8 @@
+# ATLAS v11.1 — Core Requirements
 ccxt>=4.5.0
+
+# Voice Output — gTTS (Google Text-to-Speech)
+gTTS>=2.3.0
+
+# Voice Output — Edge TTS (Microsoft Azure Neural Voices)
+edge-tts>=6.0.0
