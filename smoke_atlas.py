@@ -79,6 +79,9 @@ checks = {
     "voice output": "send_audio_report" in s and "ATLAS_ENABLE_VOICE" in s,
     "session support": "get_current_session" in s and "MARKET_SESSIONS" in s and "multiplier" in s,
     "session in snapshot": "سشن فعلی" in s and "ضریب کیفیت" in s,
+    # New confidence and volume ratio checks
+    "min confidence 55": "MIN_CONFIDENCE = float(os.environ.get(\"ATLAS_MIN_CONFIDENCE\", \"55\"))" in s,
+    "min volume ratio 0.60": "MIN_VOLUME_RATIO = float(os.environ.get(\"ATLAS_MIN_VOLUME_RATIO\", \"0.60\"))" in s,
 }
 for name, ok in checks.items():
     if not ok:
