@@ -1182,7 +1182,7 @@ def candle_event(coin, timeframe, rows):
 
 
 # ============================================================
-# ANALYZE COIN
+# ANALYZE COIN (تابع اصلی)
 # ============================================================
 
 def analyze_coin(coin, market_news, weights):
@@ -1519,7 +1519,7 @@ def analyze_coin(coin, market_news, weights):
         # v11.2 بهبودها
         "session": session,
         "session_label": session_label,
-        "graphical_price": graphical_price_display(price, tf4.get("price")),
+        "graphical_price": graphical_price_display(price, None),
         "detected_patterns": detect_patterns(tf4.get("rows", [])),
         "entry_quality": entry_quality_score(
             levels.get("entry") if levels else None,
@@ -1553,7 +1553,7 @@ def analyze_coin(coin, market_news, weights):
 
 
 # ============================================================
-# SUPPRESSED FUNCTIONS (برای ادامه کار)
+# SUPPRESSED FUNCTIONS
 # ============================================================
 
 def _portfolio_symbols():
@@ -1637,11 +1637,9 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     dt = now_tehran()
     lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
     
-    # بهترین ستاپ
     best = _best_setup_block(results)
     lines.append(best)
     
-    # TOP10
     lines.append("📡 ATLAS TOP 10")
     lines.append("───────────────────")
     personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
@@ -1678,6 +1676,10 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
     
     return "\n".join(lines)
 
+def personal_report(*args, **kwargs):
+    """Alias for build_personal_report"""
+    return build_personal_report(*args, **kwargs)
+
 def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     market = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
     personal = build_personal_report(results, macro, news, market_info, btc_regime, breadth)
@@ -1708,7 +1710,13 @@ def build_price_snapshot(results, updated_at=None):
     return "\n".join(lines)
 
 def _compact_scenario_row(r, metal=False):
-    return {"ارز": r.get("coin", ""), "وضعیت کلی": "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی", "نقطه‌ی کلیدی": f"حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}", "سناریوی صعودی": f"حفظ و تثبیت بالای {fmt(r.get('resistance'))}", "سناریوی نزولی (اصلاح)": f"شکست زیر {fmt(r.get('support'))}"}
+    return {
+        "ارز": r.get("coin", ""),
+        "وضعیت کلی": "صعودی" if r.get("h4_trend") == "BULLISH" else "نزولی",
+        "نقطه‌ی کلیدی": f"حمایت {fmt(r.get('support'))} | مقاومت {fmt(r.get('resistance'))}",
+        "سناریوی صعودی": f"حفظ و تثبیت بالای {fmt(r.get('resistance'))}",
+        "سناریوی نزولی (اصلاح)": f"شکست زیر {fmt(r.get('support'))}"
+    }
 
 def _compact_section(title, rows, metal=False):
     lines = [title, "───────────────────"]
@@ -1800,7 +1808,7 @@ def generate_csv_report(results, top10, dynamic30):
             r.get("w1_trend", "UNKNOWN"),
             _csv_number(r.get("rsi"), 2),
             r.get("macd", ""),
-            "",  # Volume
+            "",
             _csv_number(r.get("volume_ratio"), 3),
             _csv_number(r.get("atr_pct"), 3),
             r.get("liquidity", ""),
@@ -2159,7 +2167,7 @@ def main():
         coins = ["BTC", "ETH", "BNB", "XRP", "SOL"]
         for coin in coins:
             try:
-                r = analyze_coin(coin, {"candle_pattern": 15, "rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "news_clear": 15}, {"impact": "NORMAL", "bias": "NEUTRAL"})
+                r = analyze_coin(coin, {"impact": "NORMAL", "bias": "NEUTRAL"}, {"candle_pattern": 15, "rsi": 15, "macd": 15, "volume": 15, "higher_trend": 20, "news_clear": 15})
                 if r:
                     results.append(r)
                     print(f"✅ {coin}: {r['action']}")
