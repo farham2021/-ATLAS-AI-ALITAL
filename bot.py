@@ -1726,6 +1726,40 @@ def _portfolio_rows(results):
 # BUILD REPORT FUNCTIONS (v11.2 اصلی)
 # ============================================================
 
+def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regime=None):
+    """Short final recommendation, derived from current engine state."""
+    rows = [r for r in (results or []) if isinstance(r, dict)]
+    rsi_vals = [f(r.get("rsi")) for r in rows if f(r.get("rsi")) is not None]
+    overbought = sum(1 for x in rsi_vals if x >= 70)
+    bullish = sum(1 for r in rows if str(r.get("h4_trend") or "").upper() == "BULLISH")
+    bearish = sum(1 for r in rows if str(r.get("h4_trend") or "").upper() == "BEARISH")
+    regime = str(btc_regime or "").upper()
+    if not rows:
+        return "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید جهت بازار و شکل‌گیری سطوح حمایتی معتبر بمانید."
+
+    if overbought >= max(3, len(rsi_vals) // 4) and bearish >= bullish * 0.35:
+        return (
+            "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر یک اصلاح قیمت "
+            "(pullback) به سطوح حمایتی کلیدی باشید. با توجه به اینکه بخشی از شاخص‌ها "
+            "نشان از اشباع خرید و کاهش قدرت دارند، هرگونه ورود جدید در قیمت‌های فعلی "
+            "ریسک بالایی دارد. منتظر شفاف‌تر شدن جهت بازار باشید."
+        )
+    if regime == "BEARISH" or bearish > bullish:
+        return (
+            "توصیه نهایی: فعلاً HOLD باشید و از ورود عجولانه خودداری کنید. "
+            "ابتدا تثبیت قیمت روی حمایت‌های کلیدی و تغییر تأییدشده ساختار روند را انتظار بکشید."
+        )
+    if bullish > bearish * 1.5 and overbought < max(3, len(rsi_vals) // 3):
+        return (
+            "توصیه نهایی: روند فعلاً متمایل به صعود است؛ ورود فقط روی شکست و تثبیت "
+            "مقاومت‌های کلیدی یا pullback کنترل‌شده به حمایت‌ها منطقی است. از تعقیب قیمت "
+            "پس از جهش‌های تند خودداری کنید."
+        )
+    return (
+        "توصیه نهایی: فعلاً در جایگاه ناظر (HOLD) باشید و منتظر تأیید شفاف‌تر جهت بازار "
+        "یا یک pullback به سطوح حمایتی کلیدی بمانید. ورود در شرایط نامطمئن ریسک بهینه‌ای ندارد."
+    )
+
 def _compact_scenario_row(r, metal=False):
     return {
         "ارز": r.get("coin", ""),
