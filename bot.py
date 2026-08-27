@@ -1985,7 +1985,7 @@ def _best_setup_block(rows, title="🔥 BEST SETUP"):
     if not executable:
         return f"{title}: هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد."
     best = max(executable, key=lambda r: float(r.get("confidence", 0)))
-    return f"{title}: {best.get('coin', 'UNKNOWN')} — {best.get('action', 'EXECUTABLE')} — R/R 1:{best.get('rr', 0):.
+    return f"{title}: {best.get('coin', 'UNKNOWN')} — {best.get('action', 'EXECUTABLE')} — R/R 1:{best.get('rr', 0):.2f}"
 
 def _snapshot_previous_prices():
     """دریافت قیمت‌های قبلی از دیتابیس"""
