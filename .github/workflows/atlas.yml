@@ -53,7 +53,7 @@ jobs:
       ATLAS_ENABLE_VOICE: "true"
       ATLAS_VOICE_TYPE: "female"
       ATLAS_VOICE_LANGUAGE: "fa"
-      ATLAS_AUTO_SEND_VOICE: "true"
+      ATLAS_AUTO_SEND_VOICE: "1"
       # Image Table Settings
       ATLAS_ENABLE_IMAGE_TABLE: "true"
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
