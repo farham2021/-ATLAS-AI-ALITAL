@@ -101,8 +101,8 @@ BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", 
 SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "4"))
 MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
 
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11.sqlite3")
-CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11_2.sqlite3")
+CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog_v11_2.txt")
 MAX_WORKERS = int(os.environ.get("ATLAS_MAX_WORKERS", "5"))
 CACHE_TTL = int(os.environ.get("ATLAS_CACHE_TTL", "300"))
 
@@ -277,7 +277,8 @@ def is_ambiguous_symbol(symbol):
 
 
 # ============================================================
-# SMART CACHING# ============================================================
+# SMART CACHING
+# ============================================================
 
 _cache = {}
 _cache_timestamps = {}
@@ -457,6 +458,8 @@ def atr(rows, n=14):
     for i in range(1, len(rows)):
         h, l, pc = f(rows[i][2]), f(rows[i][3]), f(rows[i - 1][4])
         tr.append(max(h - l, abs(h - pc), abs(l - pc)))
+        if None in tr:
+            return None
     return sum(tr[-n:]) / n
 
 def atr_pct(rows, n=14):
@@ -516,11 +519,11 @@ def generate_voice_summary(results, btc_regime, breadth):
     
     lines.append(f"📈 تعداد سیگنال‌ها: {len(actionable)} (خرید: {len(buys)} | فروش: {len(sells)})")
     
-    regime = btc_regime.get("regime", "UNKNOWN")
+    regime = btc_regime.get("regime", "UNKNOWN") if btc_regime else "UNKNOWN"
     regime_emoji = "🟢" if regime == "RISK_ON" else "🔴" if regime == "RISK_OFF" else "🟡"
     lines.append(f"{regime_emoji} وضعیت بازار: {regime}")
     
-    if breadth:
+    if breadth and isinstance(breadth, dict):
         lines.append(f"📊 وسعت بازار: {breadth.get('score', 0):.1f}% صعودی")
     
     return "\n".join(lines)
@@ -531,25 +534,45 @@ def generate_voice_summary(results, btc_regime, breadth):
 # ============================================================
 
 def get_market_quality(btc_regime, breadth, news_impact):
+    """محاسبه کیفیت بازار"""
     score = 50
-    if btc_regime.get("regime") == "RISK_ON":
+    
+    # تأثیر رژیم BTC
+    if btc_regime and btc_regime.get("regime") == "RISK_ON":
         score += 20
-    elif btc_regime.get("regime") == "RISK_OFF":
+    elif btc_regime and btc_regime.get("regime") == "RISK_OFF":
         score -= 20
-    if breadth:
+    
+    # تأثیر وسعت بازار
+    if breadth and isinstance(breadth, dict):
         if breadth.get("score", 50) >= 65:
             score += 15
         elif breadth.get("score", 50) <= 35:
             score -= 15
+    
+    # تأثیر اخبار
     if news_impact == "HIGH":
         score -= 25
     elif news_impact == "NORMAL":
         score += 5
+    
     score = max(0, min(100, score))
+    
+    # تعیین سطح
+    if score >= 70:
+        level = "HIGH"
+        emoji = "🟢"
+    elif score >= 50:
+        level = "MEDIUM"
+        emoji = "🟡"
+    else:
+        level = "LOW"
+        emoji = "🔴"
+    
     return {
         "score": score,
-        "level": "HIGH" if score >= 70 else "MEDIUM" if score >= 50 else "LOW",
-        "emoji": "🟢" if score >= 70 else "🟡" if score >= 50 else "🔴"
+        "level": level,
+        "emoji": emoji
     }
 
 
@@ -588,28 +611,49 @@ def graphical_price_display(price, prev_price, max_bars=8):
 
 
 # ============================================================
-# 5. RISK REPORT (گزارش ریسک بازار)
+# 5. RISK REPORT (گزارش ریسک بازار) - اصلاح شده
 # ============================================================
 
 def generate_risk_report(btc_regime, breadth, market_quality, portfolio_risk=0):
+    """تولید گزارش ریسک بازار"""
     lines = ["━━━━━━━━━━━━━━━━━━", "🛡️ گزارش ریسک بازار", "━━━━━━━━━━━━━━━━━━"]
     
-    regime = btc_regime.get("regime", "UNKNOWN")
+    # رژیم BTC
+    regime = btc_regime.get("regime", "UNKNOWN") if btc_regime else "UNKNOWN"
     regime_emoji = "🟢" if regime == "RISK_ON" else "🔴" if regime == "RISK_OFF" else "🟡"
     lines.append(f"{regime_emoji} رژیم بازار: {regime}")
     
-    lines.append(f"📊 کیفیت بازار: {market_quality['emoji']} {market_quality['level']} ({market_quality['score']:.0f}%)")
+    # کیفیت بازار - با بررسی وجود کلیدها
+    if market_quality and isinstance(market_quality, dict):
+        level = market_quality.get("level", "MEDIUM")
+        score = market_quality.get("score", 50)
+        emoji = market_quality.get("emoji", "🟡")
+        lines.append(f"{emoji} کیفیت بازار: {level} ({score:.0f}%)")
+    else:
+        lines.append("🟡 کیفیت بازار: نامشخص")
     
-    if breadth:
+    # وسعت بازار
+    if breadth and isinstance(breadth, dict):
         breadth_score = breadth.get("score", 50)
         breadth_emoji = "🟢" if breadth_score >= 65 else "🔴" if breadth_score <= 35 else "🟡"
         lines.append(f"{breadth_emoji} وسعت بازار: {breadth_score:.1f}% صعودی")
     
-    if portfolio_risk > 0:
+    # ریسک پرتفوی
+    if portfolio_risk and portfolio_risk > 0:
         risk_emoji = "🟢" if portfolio_risk <= 3 else "🟡" if portfolio_risk <= 6 else "🔴"
         lines.append(f"{risk_emoji} ریسک پرتفوی: {portfolio_risk:.1f}%")
     
-    status = "✅ ریسک قابل قبول" if market_quality["level"] != "LOW" else "⚠️ ریسک بالا - احتیاط"
+    # وضعیت نهایی
+    if market_quality and isinstance(market_quality, dict):
+        if market_quality.get("level") == "LOW":
+            status = "⚠️ ریسک بالا - احتیاط"
+        elif market_quality.get("level") == "HIGH":
+            status = "✅ ریسک قابل قبول"
+        else:
+            status = "🟡 ریسک متوسط"
+    else:
+        status = "🟡 وضعیت نامشخص"
+    
     lines.append(f"📌 وضعیت: {status}")
     
     return "\n".join(lines)
@@ -1171,7 +1215,7 @@ def analyze_coin(coin, weights, market_news=None, btc_regime=None, breadth=None)
     
     # فیلتر کیفیت بازار
     market_quality = get_market_quality(btc_regime or {}, breadth or {}, market_news.get("impact", "NORMAL") if market_news else "NORMAL")
-    if market_quality["level"] == "LOW" and direction in ("LONG", "SHORT"):
+    if market_quality.get("level") == "LOW" and direction in ("LONG", "SHORT"):
         confidence *= 0.7
     
     gate = "PASS"
@@ -1299,7 +1343,7 @@ def analyze_coin(coin, weights, market_news=None, btc_regime=None, breadth=None)
         "session_label": session_label,
         "graphical_price": graphical_price_display(price, prev_price),
         "improved": {
-            "market_quality": market_quality["level"],
+            "market_quality": market_quality.get("level"),
             "tf_confirmed": tf_confirmation.get("confirmed", False),
             "sl_alert": sl_alert is not None,
             "position_suggestion": position_suggestion is not None,
