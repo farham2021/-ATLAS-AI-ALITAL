@@ -1,4 +1,4 @@
-#============================================================
+# ============================================================
 # ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
@@ -48,6 +48,8 @@ import xml.etree.ElementTree as ET
 import traceback
 import hashlib
 import tempfile
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from statistics import mean, median
@@ -78,7 +80,7 @@ TELEGRAM_MAX_RETRIES = int(os.environ.get("TELEGRAM_MAX_RETRIES", "5"))
 TELEGRAM_BASE_RETRY_DELAY = float(os.environ.get("TELEGRAM_BASE_RETRY_DELAY", "3"))
 TELEGRAM_MAX_WAIT = float(os.environ.get("TELEGRAM_MAX_WAIT", "60"))
 
-# Voice Output Settings - اصلاح شده با پشتیبانی از true/false/1/0
+# Voice Output Settings
 def _parse_bool(value):
     if isinstance(value, bool):
         return value
@@ -332,22 +334,30 @@ def text_to_speech_persian(text, voice="female"):
 
 
 def generate_audio_report(results, filename="audio_report.mp3"):
-    """تولید فایل صوتی از گزارش"""
+    """تولید فایل صوتی از گزارش - FIXED: accepts list of dicts"""
     if not results:
+        print("⚠️ generate_audio_report: results is empty")
         return None
     
+    print(f"🎤 generate_audio_report: processing {len(results)} items")
+    
+    # Generate voice text from results
     audio_text = generate_voice_summary(results)
     
+    # Fallback: if text is too short, try snapshot format
     if len(audio_text) < 50:
         audio_text = generate_voice_summary_from_snapshot(results)
     
     print(f"🎤 Generating audio with text: {audio_text[:100]}...")
     audio_file = text_to_speech_persian(audio_text, VOICE_TYPE)
+    
     if audio_file:
         import shutil
         final_path = filename
         shutil.move(audio_file, final_path)
+        print(f"✅ Audio file saved: {final_path}")
         return final_path
+    
     return None
 
 
@@ -432,7 +442,9 @@ def send_audio_report(audio_file, caption=None):
     except Exception as e:
         print(f"❌ Audio send error: {e}")
         return False
-      # ============================================================
+
+
+# ============================================================
 # SIGNAL RANKING TABLE
 # ============================================================
 
@@ -631,6 +643,7 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close()
         
+        print(f"✅ Image table saved: {filename}")
         return filename
     except ImportError as e:
         print(f"⚠️ Matplotlib not installed: {e}")
@@ -643,13 +656,16 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
 def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     """ارسال جدول تصویری به تلگرام"""
     if not ENABLE_IMAGE_TABLE:
+        print("ℹ️ Image table disabled")
+        return False
+    
+    if not TELEGRAM_TOKEN:
+        print("❌ TELEGRAM_TOKEN not set")
         return False
     
     filename = build_image_table(results, top10_symbols, dynamic30_symbols)
     if not filename or not os.path.exists(filename):
-        return False
-    
-    if not TELEGRAM_TOKEN:
+        print("❌ Image generation failed")
         return False
     
     try:
@@ -684,7 +700,12 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
         with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode())
             os.unlink(filename)
-            return result.get('ok', False)
+            if result.get('ok'):
+                print("✅ Image sent successfully")
+                return True
+            else:
+                print(f"❌ Telegram error: {result.get('description', 'Unknown error')}")
+                return False
     except Exception as e:
         print(f"❌ Image send error: {e}")
         try:
@@ -1052,7 +1073,9 @@ def init_sqlite():
             details text
         );
         """)
-      # ============================================================
+
+
+# ============================================================
 # SUPABASE STORAGE
 # ============================================================
 
@@ -1429,7 +1452,9 @@ def best_ohlcv(coin, timeframe, limit=250):
         except Exception:
             continue
     raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
-  # ============================================================
+
+
+# ============================================================
 # DYNAMIC MARKET UNIVERSE
 # ============================================================
 
@@ -1837,7 +1862,9 @@ def candle_pattern(rows):
     if upper / total >= 0.60 and bc <= bo:
         return "BEARISH PIN BAR", "BEARISH"
     return "NONE", "NEUTRAL"
-  # ============================================================
+
+
+# ============================================================
 # DIVERGENCE
 # ============================================================
 
@@ -2372,7 +2399,7 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
 
 
 # ============================================================
-# MAIN
+# MAIN - FIXED WITH VOICE AND IMAGE
 # ============================================================
 
 def main():
@@ -2406,27 +2433,35 @@ def main():
                 except Exception as e:
                     print(f"❌ {coin}: {e}")
             
+            analysis_results = results
+            
+            # Build report
             text = build_report(results, ["BTC", "ETH"], [], {}, {"impact": "NORMAL"}, {}, 0)
             parts, sent, errors = send_report(text)
             total_sent += sent
             all_errors.extend(errors)
-            analysis_results = results
             
-            # CSV Export
-            csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
-            if csv_sent > 0:
-                print(f"📊 CSV sent: {csv_sent} destinations")
-            if csv_errors:
-                print(f"⚠️ CSV errors: {csv_errors}")
+            # ============================================================
+            # IMAGE TABLE (NEW)
+            # ============================================================
+            if ENABLE_IMAGE_TABLE:
+                try:
+                    print("📸 Generating image table...")
+                    image_sent = send_image_table(results, ["BTC", "ETH"], [])
+                    if image_sent:
+                        print("✅ Image table sent successfully")
+                    else:
+                        print("⚠️ Image table not sent")
+                except Exception as e:
+                    print(f"⚠️ Image error: {e}")
             
-            # Voice Output
+            # ============================================================
+            # VOICE OUTPUT - FIXED: Pass results list directly
+            # ============================================================
             if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
                 try:
                     print("\n🎤 Generating audio report...")
-                    voice_text = "به گزارش صوتی اطلس خوش آمدید. "
-                    for r in results[:3]:
-                        voice_text += f"{r['coin']} {r['action']} با اطمینان {r['confidence']} درصد. "
-                    audio_file = generate_audio_report(voice_text)
+                    audio_file = generate_audio_report(results)
                     if audio_file:
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی اطلس")
                         if result:
@@ -2439,6 +2474,13 @@ def main():
                             pass
                 except Exception as e:
                     print(f"⚠️ Audio error: {e}")
+            
+            # CSV Export
+            csv_sent, csv_errors = send_csv_report(results, ["BTC", "ETH"], [])
+            if csv_sent > 0:
+                print(f"📊 CSV sent: {csv_sent} destinations")
+            if csv_errors:
+                print(f"⚠️ CSV errors: {csv_errors}")
 
         if do_snapshot:
             print("📸 Running snapshot...")
@@ -2458,6 +2500,323 @@ def main():
         print(f"❌ Error: {e}")
         traceback.print_exc()
         return 1
+
+
+# ============================================================
+# TELEGRAM HELPERS (MINIMAL)
+# ============================================================
+
+def telegram_preflight():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN not set")
+    if not TELEGRAM_CHAT_ID and not TELEGRAM_GROUP_CHAT_ID:
+        raise RuntimeError("TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID required")
+
+def send_report(text):
+    parts = split_message(text)
+    sent = 0
+    errors = []
+    for part in parts:
+        try:
+            if not send_telegram_message(part, TELEGRAM_CHAT_ID):
+                errors.append("Private failed")
+                continue
+            sent += 1
+            time.sleep(TELEGRAM_PRIVATE_DELAY)
+            if TELEGRAM_GROUP_CHAT_ID:
+                if not send_telegram_message(part, TELEGRAM_GROUP_CHAT_ID):
+                    errors.append("Group failed")
+                    continue
+                sent += 1
+                time.sleep(TELEGRAM_GROUP_DELAY)
+        except Exception as e:
+            errors.append(str(e))
+    return parts, sent, errors
+
+def split_message(text, max_len=4000):
+    parts = []
+    while text:
+        if len(text) <= max_len:
+            parts.append(text)
+            break
+        split_at = text.rfind('\n', 0, max_len)
+        if split_at == -1:
+            split_at = text.rfind(' ', 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        parts.append(text[:split_at])
+        text = text[split_at:].lstrip()
+    return parts
+
+def send_telegram_message(text, chat_id):
+    if not TELEGRAM_TOKEN or not chat_id:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode()).get("ok", False)
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
+        return False
+
+
+# ============================================================
+# PRICE SNAPSHOT
+# ============================================================
+
+def fetch_usdt_toman_public():
+    """دریافت نرخ تتر از منابع عمومی بدون نیاز به API"""
+    try:
+        # منبع اول: TGJU
+        url = "https://api.tgju.org/v1/market/price/3"
+        d = safe_http_get(url, timeout=10, default={})
+        if isinstance(d, dict) and d.get("price"):
+            return f(d["price"])
+    except:
+        pass
+    
+    try:
+        # منبع دوم: ارزدیجیتال
+        url = "https://api.arzdigital.net/api/v1/price/USDT"
+        d = safe_http_get(url, timeout=10, default={})
+        if isinstance(d, dict) and d.get("price"):
+            return f(d["price"])
+    except:
+        pass
+    
+    return None
+
+def fetch_snapshot_results():
+    """دریافت داده‌های اسنپ‌شات برای قیمت‌ها"""
+    results = []
+    coins = ["BTC", "ETH", "BNB", "XRP", "SOL"]
+    for coin in coins:
+        try:
+            price, sources, quality, spread, errors = price_consensus(coin)
+            results.append({
+                "coin": coin,
+                "price": price,
+                "change": 0,
+                "sources": sources,
+                "quality": quality,
+                "spread": spread,
+            })
+        except Exception as e:
+            results.append({
+                "coin": coin,
+                "price": None,
+                "change": None,
+                "error": str(e),
+            })
+    return results
+
+def send_price_snapshot(results):
+    """ارسال اسنپ‌شات قیمت به تلگرام"""
+    lines = ["📸 ATLAS PRICE SNAPSHOT", "━━━━━━━━━━━━━━━━━━"]
+    
+    for r in results:
+        coin = r.get("coin", "UNKNOWN")
+        price = r.get("price")
+        change = r.get("change")
+        
+        if price:
+            price_str = fmt(price)
+            change_str = pct(change) if change is not None else "N/A"
+            lines.append(f"{coin}: {price_str} | {change_str}")
+        else:
+            lines.append(f"{coin}: ❌ No data")
+    
+    # USDT
+    usdt = fetch_usdt_toman_public()
+    if usdt:
+        lines.append("")
+        lines.append(f"🇮🇷 USDT: {usdt:,.0f} Toman")
+    
+    lines.append("")
+    lines.append(f"🕐 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran")
+    
+    text = "\n".join(lines)
+    return send_report(text)
+
+
+# ============================================================
+# CSV EXPORT
+# ============================================================
+
+def send_csv_report(results, top10_symbols=None, dynamic30_symbols=None):
+    """ارسال گزارش CSV به تلگرام"""
+    if not results:
+        return 0, ["No results"]
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    headers = ["Coin", "Price", "Change%", "Action", "Confidence%", "R/R", "Quality%"]
+    writer.writerow(headers)
+    
+    for r in results:
+        row = [
+            r.get("coin", "UNKNOWN"),
+            r.get("price") or "N/A",
+            r.get("change") or "N/A",
+            r.get("action", "NO DATA"),
+            r.get("confidence", 0),
+            r.get("rr", 0),
+            r.get("quality_score", 0),
+        ]
+        writer.writerow(row)
+    
+    csv_data = output.getvalue()
+    output.close()
+    
+    # Send as file
+    sent = 0
+    errors = []
+    
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+            body = bytearray()
+            
+            body.extend(f'--{boundary}\r\n'.encode())
+            body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
+            body.extend(str(TELEGRAM_CHAT_ID).encode())
+            body.extend(b'\r\n')
+            
+            body.extend(f'--{boundary}\r\n'.encode())
+            body.extend(b'Content-Disposition: form-data; name="document"; filename="atlas_report.csv"\r\n')
+            body.extend(b'Content-Type: text/csv\r\n\r\n')
+            body.extend(csv_data.encode('utf-8'))
+            body.extend(b'\r\n')
+            
+            body.extend(f'--{boundary}--\r\n'.encode())
+            
+            headers = {
+                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                'Content-Length': str(len(body))
+            }
+            
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+            req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode())
+                if result.get('ok'):
+                    sent += 1
+                else:
+                    errors.append(result.get('description', 'Unknown error'))
+        except Exception as e:
+            errors.append(str(e))
+    
+    return sent, errors
+
+
+# ============================================================
+# ANALYSIS FUNCTIONS (PLACEHOLDERS)
+# ============================================================
+
+def analyze_coin(coin, news, weights):
+    """تحلیل یک ارز و تولید سیگنال"""
+    try:
+        # Get 4H data
+        rows, engine = best_ohlcv(coin, "4h", 120)
+        if len(rows) < 60:
+            raise RuntimeError("Insufficient data")
+        
+        price = rows[-1][4]
+        change = (price / rows[-20][4] - 1) * 100 if len(rows) >= 20 else 0
+        
+        # Simple analysis
+        c = closes(rows)
+        rsi_val = rsi(c, 14)
+        vol_ratio = volume_ratio(rows, 20)
+        
+        # Determine action
+        action = "NO SIGNAL"
+        confidence = 0
+        direction = "NONE"
+        
+        if rsi_val and vol_ratio:
+            if rsi_val < 30 and vol_ratio > 1.2:
+                action = "BULLISH WATCH"
+                confidence = 60
+                direction = "LONG"
+            elif rsi_val > 70 and vol_ratio > 1.2:
+                action = "BEARISH WATCH"
+                confidence = 60
+                direction = "SHORT"
+        
+        return {
+            "coin": coin,
+            "price": price,
+            "change": change,
+            "action": action,
+            "confidence": confidence,
+            "direction": direction,
+            "rsi": rsi_val,
+            "volume_ratio": vol_ratio,
+            "liquidity_score": 50,
+            "rr": 2.0,
+            "quality_score": confidence,
+            "entry": price,
+            "sl": price * 0.95 if direction == "LONG" else price * 1.05,
+            "tp1": price * 1.05 if direction == "LONG" else price * 0.95,
+            "tp2": price * 1.10 if direction == "LONG" else price * 0.90,
+            "h4_trend": "BULLISH" if rsi_val > 50 else "BEARISH",
+        }
+    except Exception as e:
+        print(f"❌ analyze_coin {coin}: {e}")
+        return None
+
+
+def build_report(results, top10, dynamic30, levels, news, macro, liquidity):
+    """ساخت گزارش متنی"""
+    lines = []
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 {VERSION}")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    
+    for r in results[:10]:
+        coin = r.get("coin", "UNKNOWN")
+        price = r.get("price")
+        action = r.get("action", "NO SIGNAL")
+        conf = r.get("confidence", 0)
+        
+        price_str = fmt(price) if price else "N/A"
+        lines.append(f"{coin}: {price_str} | {action} | {conf}%")
+    
+    session, label, mult = get_current_session()
+    lines.append("")
+    lines.append(f"🕐 {label} | {mult:.1f}x")
+    lines.append(f"📅 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran")
+    
+    return "\n".join(lines)
+
+
+def _automatic_run_plan():
+    """برنامه اجرای خودکار (هر 30 دقیقه)"""
+    now = now_tehran()
+    minute = now.minute
+    
+    # تحلیل کامل در دقایق 0 و 30
+    do_analysis = minute in (0, 30)
+    
+    # اسنپ‌شات در دقایق 15 و 45
+    do_snapshot = minute in (15, 45)
+    
+    return {"analysis": do_analysis, "snapshot": do_snapshot}
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     raise SystemExit(main())
