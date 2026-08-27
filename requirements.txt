@@ -6,3 +6,6 @@ gTTS>=2.3.0
 
 # Voice Output — Edge TTS (Microsoft Azure Neural Voices)
 edge-tts>=6.0.0
+
+Pillow>=10.0.0
+matplotlib>=3.7.0
