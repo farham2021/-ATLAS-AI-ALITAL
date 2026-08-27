@@ -1,4 +1,4 @@
-name: ATLAS v11.1 — Unified Two-Engine + Trade Geometry + Dynamic CSV + Dashboard + 3H Snapshot
+name: ATLAS v11.2 — Enhanced Decision Engine
 
 on:
   workflow_dispatch:
@@ -11,51 +11,101 @@ on:
         description: "AUTO / BOTH / ANALYSIS / SNAPSHOT"
         required: false
         default: "BOTH"
+      enable_voice:
+        description: "Enable voice output"
+        required: false
+        default: "true"
   schedule:
-    # Unified hourly scheduler. The bot itself decides:
-    # - analytical engines every 4 hours
-    # - Price Snapshot every 3 hours
-    # - both at overlap hours
-    # Telegram analytical output is compact table-style; full technical analysis remains internal.
+    # Unified hourly scheduler
+    # Analysis every 4 hours (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+    # Snapshot every 3 hours
     - cron: "0 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: atlas-v11-${{ github.ref }}
+  group: atlas-v11-2-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   atlas:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    
     env:
+      # ============================================================
+      # GENERAL
+      # ============================================================
       PYTHONUNBUFFERED: "1"
-      ATLAS_VERSION: "11.1"
+      ATLAS_VERSION: "11.2"
       ATLAS_ENGINE: ${{ github.event.inputs.engine || 'BOTH' }}
       ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
-      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
-      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
       ATLAS_TIMEFRAME: "4H"
       ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
       ATLAS_TRADINGVIEW_INTERVAL: "240"
+      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+      ATLAS_SQLITE_FILE: "atlas_v11_2.sqlite3"
+      ATLAS_CHANGELOG: "changelog_v11_2.txt"
+      
+      # ============================================================
+      # TELEGRAM (از GitHub Secrets)
+      # ============================================================
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+      
+      # ============================================================
+      # VOICE OUTPUT (خروجی صوتی فارسی)
+      # ============================================================
+      ATLAS_ENABLE_VOICE: ${{ github.event.inputs.enable_voice || '1' }}
+      ATLAS_VOICE_TYPE: "female"
+      ATLAS_VOICE_LANGUAGE: "fa"
+      ATLAS_AUTO_SEND_VOICE: "1"
+      
+      # ============================================================
+      # PERFORMANCE (عملکرد و سرعت)
+      # ============================================================
+      ATLAS_MAX_WORKERS: "5"
+      ATLAS_CACHE_TTL: "300"
+      ATLAS_REQUEST_SLEEP_SECONDS: "0.50"
+      
+      # ============================================================
+      # FILTERS (فیلترهای ورود)
+      # ============================================================
+      ATLAS_MIN_VOLUME_RATIO: "1.20"
+      ATLAS_SIGNAL_MEMORY_HOURS: "4"
+      ATLAS_MIN_CONFIDENCE: "60"
+      ATLAS_MIN_WATCH_CONFIDENCE: "55"
+      ATLAS_MIN_EXECUTABLE_RR: "2.0"
+      
+      # ============================================================
+      # RISK MANAGEMENT (مدیریت ریسک)
+      # ============================================================
       RISK_PER_TRADE_PCT: "1.5"
       MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
-      ATLAS_MIN_CONFIDENCE: "60"
       ATLAS_MAX_LEVERAGE: "10"
-      ATLAS_MIN_EXECUTABLE_RR: "2.0"
-      ATLAS_MIN_WATCH_CONFIDENCE: "55"
+      
+      # ============================================================
+      # BACKTEST (بک‌تست)
+      # ============================================================
       ATLAS_BACKTEST_DAYS: "180"
       ATLAS_SIGNAL_HORIZON_BARS: "36"
       ATLAS_BACKTEST_IMPROVEMENT: "10"
       ATLAS_BACKTEST_REFRESH_HOURS: "24"
+      
+      # ============================================================
+      # OTHER
+      # ============================================================
       ATLAS_CANDLE_EVENT_DEDUP: "1"
-      ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
-      ATLAS_CHANGELOG: "changelog.txt"
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+      ATLAS_BTC_REGIME_CACHE_MINUTES: "30"
+      ATLAS_MARKET_BREADTH_MIN_SAMPLES: "8"
+      ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+      
+      # ============================================================
+      # API KEYS (از GitHub Secrets)
+      # ============================================================
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
@@ -79,25 +129,23 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --upgrade ccxt
+          python -m pip install --upgrade ccxt gtts edge-tts python-dotenv
 
       - name: Verify source
         run: |
           set -euo pipefail
           test -f bot.py
-          test -f smoke_atlas.py
           python -m py_compile bot.py
-          python -m py_compile smoke_atlas.py
 
-      - name: Run v11 smoke test
+      - name: Run v11.2 unit tests
+        run: |
+          set -euo pipefail
+          python test_v11_2.py
+
+      - name: Run smoke test
         run: |
           set -euo pipefail
           python smoke_atlas.py
-
-      - name: Run v11 export unit test
-        run: |
-          set -euo pipefail
-          python test_v11_1.py
 
       - name: Validate Telegram
         run: |
@@ -105,7 +153,7 @@ jobs:
           test -n "$TELEGRAM_TOKEN"
           test -n "$TELEGRAM_CHAT_ID" || test -n "$TELEGRAM_GROUP_CHAT_ID"
 
-      - name: Run ATLAS v11.1
+      - name: Run ATLAS v11.2
         run: |
           set -euo pipefail
           python bot.py
@@ -129,4 +177,3 @@ jobs:
               con.close()
           PY
           fi
-
