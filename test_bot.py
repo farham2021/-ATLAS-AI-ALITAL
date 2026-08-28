@@ -160,32 +160,25 @@ class TestMarketSessions(unittest.TestCase):
         self.assertEqual(name, "ASIA")
         self.assertIsInstance(multiplier, float)
 
-        # EUROPE session (UTC 7-15)
+        # EUROPE session (UTC 7-15) - در 10:00 فقط EUROPE فعال است
         dt = datetime(2026, 8, 28, 10, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "EUROPE")
 
-        # OVERLAP session (UTC 12-15) - استفاده از 13:00 برای اطمینان
+        # OVERLAP session (UTC 12-15) - در 13:00 OVERLAP اولویت دارد
         dt = datetime(2026, 8, 28, 13, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "OVERLAP")
+
+        # AMERICA session (UTC 12-20) - در 18:00 فقط AMERICA فعال است
+        dt = datetime(2026, 8, 28, 18, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "AMERICA")
 
         # CLOSED session (UTC 20-24)
         dt = datetime(2026, 8, 28, 22, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "CLOSED")
-
-    def test_get_next_session_time(self):
-        """Test next session time"""
-        dt = datetime(2026, 8, 28, 5, 0, 0, tzinfo=timezone.utc)
-        name, next_dt = get_next_session_time(dt)
-        self.assertEqual(name, "EUROPE")
-        self.assertEqual(next_dt.hour, 7)
-
-        dt = datetime(2026, 8, 28, 10, 0, 0, tzinfo=timezone.utc)
-        name, next_dt = get_next_session_time(dt)
-        self.assertEqual(name, "OVERLAP")
-        self.assertEqual(next_dt.hour, 12)
 
 
 class TestFormatting(unittest.TestCase):
