@@ -112,6 +112,73 @@ VOICE_LANGUAGE = os.environ.get("ATLAS_VOICE_LANGUAGE", "fa")
 ENABLE_IMAGE_TABLE = _parse_bool(os.environ.get("ATLAS_ENABLE_IMAGE_TABLE", "1"))
 
 # ============================================================
+# MULTI-SOURCE VALIDATION LAYER
+# ============================================================
+TRADINGVIEW_CONFIRMATION_URL = os.environ.get("TRADINGVIEW_CONFIRMATION_URL", "").strip()
+TRADINGVIEW_CHART_EXCHANGE = os.environ.get("ATLAS_TRADINGVIEW_EXCHANGE", "BYBIT").strip().upper() or "BYBIT"
+TRADINGVIEW_INTERVAL = os.environ.get("ATLAS_TRADINGVIEW_INTERVAL", "240").strip() or "240"
+
+CRYPTOBUBBLES_API_URL = os.environ.get("CRYPTOBUBBLES_API_URL", "").strip()
+EASYTRADER_API_URL = os.environ.get("EASYTRADER_API_URL", "").strip()
+OMPFINEX_API_URL = os.environ.get("OMPFINEX_API_URL", "").strip()
+BITUNIX_API_URL = os.environ.get("BITUNIX_API_URL", "").strip()
+TABTRADER_API_URL = os.environ.get("TABTRADER_API_URL", "").strip()
+KCEX_API_URL = os.environ.get("KCEX_API_URL", "").strip()
+
+SECONDARY_ENDPOINTS = {
+    "CryptoBubbles": CRYPTOBUBBLES_API_URL,
+    "EasyTrader": EASYTRADER_API_URL,
+    "OMPFinex": OMPFINEX_API_URL,
+    "Bitunix": BITUNIX_API_URL,
+    "TabTrader": TABTRADER_API_URL,
+    "KCEX": KCEX_API_URL,
+}
+
+# ============================================================
+# RISK & TRADE SETTINGS
+# ============================================================
+RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
+MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
+MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "55"))
+MAX_LEVERAGE = float(os.environ.get("ATLAS_MAX_LEVERAGE", "10"))
+
+# ============================================================
+# BACKTEST SETTINGS
+# ============================================================
+BACKTEST_DAYS = int(os.environ.get("ATLAS_BACKTEST_DAYS", "180"))
+SIGNAL_HORIZON_BARS = int(os.environ.get("ATLAS_SIGNAL_HORIZON_BARS", "36"))
+MIN_BACKTEST_IMPROVEMENT = float(os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10"))
+BACKTEST_REFRESH_HOURS = float(os.environ.get("ATLAS_BACKTEST_REFRESH_HOURS", "24"))
+
+# ============================================================
+# TECHNICAL SETTINGS
+# ============================================================
+MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.60"))
+H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
+REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
+
+# ============================================================
+# TRADE GEOMETRY SETTINGS
+# ============================================================
+MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
+MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
+TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
+
+# ============================================================
+# CACHE & MEMORY SETTINGS
+# ============================================================
+BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
+SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
+MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
+
+# ============================================================
+# DATABASE & LOGGING
+# ============================================================
+DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11.sqlite3")
+CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
+
+# ============================================================
 # RUN MODE & ENGINE MODE - با پیش‌فرض‌های صحیح
 # ============================================================
 def get_run_mode():
@@ -154,7 +221,6 @@ def get_next_session_time(dt=None):
     hour = dt.hour
     current_session, _, _ = get_current_session(dt)
     
-    # لیست سشن‌ها به ترتیب
     sessions = [
         ("ASIA", 0, 8),
         ("EUROPE", 7, 15),
@@ -162,7 +228,6 @@ def get_next_session_time(dt=None):
         ("AMERICA", 12, 20),
     ]
     
-    # پیدا کردن سشن بعدی
     for name, open_hour, close_hour in sessions:
         if current_session != name and hour < open_hour:
             next_dt = dt.replace(hour=open_hour, minute=0, second=0, microsecond=0)
@@ -170,8 +235,8 @@ def get_next_session_time(dt=None):
                 next_dt = next_dt + timedelta(days=1)
             return name, next_dt
     
-    # اگر سشن بعدی در روز بعد باشد
     return "ASIA", dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
 
 # ============================================================
 # COINGECKO IDS MAPPING
@@ -231,10 +296,8 @@ def generate_voice_summary(results, news=None, btc_regime=None):
     
     print(f"📝 generate_voice_summary: processing {len(results)} items")
     
-    # دریافت سشن فعلی
     session, session_label, session_multiplier = get_current_session()
     
-    # تحلیل قیمت‌ها و سیگنال‌ها
     up_count = 0
     down_count = 0
     stable_count = 0
@@ -260,7 +323,6 @@ def generate_voice_summary(results, news=None, btc_regime=None):
                 else:
                     stable_count += 1
         
-        # جمع‌آوری سیگنال‌ها
         if action in ("BUY CONFIRMATION", "BUY"):
             buy_signals.append((symbol, confidence, r.get("rr", 0)))
         elif action in ("SELL CONFIRMATION", "SELL"):
@@ -271,13 +333,11 @@ def generate_voice_summary(results, news=None, btc_regime=None):
     print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
     print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
     
-    # تولید متن صوتی
     lines = [
         "به گزارش صوتی اطلس خوش آمدید.",
         f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
     ]
     
-    # ===== وضعیت کلی بازار از بیت‌کوین =====
     if btc_regime:
         regime = btc_regime.get("regime", "UNKNOWN")
         if regime == "RISK_ON":
@@ -287,7 +347,6 @@ def generate_voice_summary(results, news=None, btc_regime=None):
         else:
             lines.append("بازار در حالت خنثی قرار دارد.")
     
-    # ===== آمار صعودی/نزولی =====
     if up_count > 0:
         lines.append(f"{up_count} ارز صعودی هستند.")
     if down_count > 0:
@@ -295,7 +354,6 @@ def generate_voice_summary(results, news=None, btc_regime=None):
     if stable_count > 0:
         lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
     
-    # ===== بهترین و بدترین عملکرد =====
     if changes:
         best = max(changes, key=lambda x: x[1])
         worst = min(changes, key=lambda x: x[1])
@@ -304,22 +362,18 @@ def generate_voice_summary(results, news=None, btc_regime=None):
         if worst[1] < 0:
             lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
     
-    # ===== سیگنال‌های خرید =====
     if buy_signals:
         buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
         lines.append(buy_text)
     
-    # ===== سیگنال‌های فروش =====
     if sell_signals:
         sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
         lines.append(sell_text)
     
-    # ===== سیگنال‌های در انتظار =====
     if watch_signals:
         watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
         lines.append(watch_text)
     
-    # ===== اخبار =====
     if news:
         bias = news.get("bias", "")
         impact = news.get("impact", "")
@@ -333,19 +387,16 @@ def generate_voice_summary(results, news=None, btc_regime=None):
         if impact == "HIGH":
             lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
         
-        # چند خبر مهم
         items = news.get("items", [])[:3]
         if items:
             headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
             if headlines:
                 lines.append("خبرهای مهم: " + "، ".join(headlines))
     
-    # ===== قیمت تتر =====
     usdt = fetch_usdt_toman_public()
     if usdt:
         lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
     
-    # ===== جمع‌بندی نهایی =====
     if buy_signals:
         lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
     elif watch_signals:
@@ -365,10 +416,8 @@ def generate_voice_summary_from_snapshot(results):
     if not results:
         return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
     
-    # دریافت سشن فعلی
     session, session_label, session_multiplier = get_current_session()
     
-    # تحلیل قیمت‌ها
     up_count = 0
     down_count = 0
     stable_count = 0
@@ -390,7 +439,6 @@ def generate_voice_summary_from_snapshot(results):
                 else:
                     stable_count += 1
     
-    # تولید متن صوتی
     lines = [
         "به گزارش صوتی اطلس خوش آمدید.",
         f"گزارش لحظه‌ای بازار ارزهای دیجیتال در سشن {session_label}.",
@@ -403,7 +451,6 @@ def generate_voice_summary_from_snapshot(results):
     if stable_count > 0:
         lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
     
-    # بهترین و بدترین عملکرد
     if changes:
         best = max(changes, key=lambda x: x[1])
         worst = min(changes, key=lambda x: x[1])
@@ -412,7 +459,6 @@ def generate_voice_summary_from_snapshot(results):
         if worst[1] < 0:
             lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
     
-    # قیمت تتر
     usdt = fetch_usdt_toman_public()
     if usdt:
         lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
@@ -425,7 +471,6 @@ def generate_voice_summary_from_snapshot(results):
 def text_to_speech_persian(text, voice="female"):
     """تبدیل متن فارسی به صدا - اولویت: Edge TTS → gTTS → Google Translate"""
     
-    # مسیر اول: Edge TTS
     try:
         import edge_tts
         import asyncio
@@ -442,7 +487,6 @@ def text_to_speech_persian(text, voice="female"):
     except:
         pass
     
-    # مسیر دوم: gTTS
     try:
         from gtts import gTTS
         tts = gTTS(text=text, lang="fa", slow=False)
@@ -452,7 +496,6 @@ def text_to_speech_persian(text, voice="female"):
     except:
         pass
     
-    # مسیر سوم: Google Translate
     try:
         text_encoded = urllib.parse.quote(text)
         url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl=fa&client=tw-ob"
@@ -504,7 +547,6 @@ def send_audio_report(audio_file, caption=None):
     with open(audio_file, 'rb') as f:
         audio_data = f.read()
     
-    # لیست مقاصد
     destinations = []
     if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
         destinations.append({
@@ -1031,7 +1073,6 @@ def coinmarketcap_quote(symbol):
         return {"status":"UNAVAILABLE","reason":"CMC response unavailable"}
 
 def coingecko_quote(symbol):
-    # Uses the existing ID map when available; no guessed market data.
     try:
         cgid = COINGECKO_IDS.get(symbol.upper())
     except Exception:
@@ -1389,7 +1430,6 @@ def _portfolio_rows(results):
         if s in by:
             rows.append(by[s])
         else:
-            # Asset not in results, create a NO DATA row
             rows.append({
                 "coin": s,
                 "price": None,
@@ -2123,14 +2163,12 @@ def calculate_levels(rows, direction, daily_levels=None):
         return None
 
     if direction == "LONG":
-        # Entry is either current price after a confirmed close, or a breakout trigger.
         entry = price if price >= res else res * 1.002
         sl = min(sup * 0.995, entry - 1.5 * atr_v)
         risk = entry - sl
         if risk <= 0:
             return None
 
-        # Real structural targets. Never manufacture four targets.
         higher = [x for x in above if x > entry * 1.003]
         tp1 = higher[0] if higher else entry + 1.25 * risk
         tp2 = higher[1] if len(higher) > 1 else max(entry + 2.0 * risk, tp1 + 0.5 * risk)
@@ -2168,7 +2206,6 @@ def calculate_levels(rows, direction, daily_levels=None):
         if tp4 is not None and (tp3 is None or tp4 >= tp3):
             tp4 = None
 
-    # Structural sanity + deterministic trade geometry gate.
     valid, _reason = _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None)
     if not valid:
         return None
@@ -2408,8 +2445,6 @@ def analyze_coin(coin, market_news, weights):
     leverage = 1.0
     action = "NO TRADE"
 
-    # Always calculate a valid candidate plan for the complete personal report.
-    # A candidate plan is NOT a trade approval; the decision gate still controls action.
     candidate_levels = calculate_levels(tf4["rows"], direction, effective_levels)
 
     if gate == "PASS":
@@ -2484,31 +2519,18 @@ def analyze_coin(coin, market_news, weights):
         elif tvr in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
             confidence -= 8
 
-    # ============================================================
-    # اعمال ضریب سشن بازار روی کانفیدنس
-    # ============================================================
     session, session_label, session_multiplier = get_current_session()
     
-    # ذخیره کانفیدنس اصلی برای گزارش
     confidence_raw = confidence
-    
-    # اعمال ضریب سشن
     confidence = confidence * session_multiplier
     
-    # اگر در سشن کم‌نقدینگی هستیم، هشدار اضافه کن
     if session in ("ASIA", "CLOSED"):
         warning = warning or f"سشن {session_label} — نقدینگی کمتر، احتیاط بیشتر"
     
-    # اگر در همپوشانی هستیم، یک امتیاز مثبت به دلیل نقدینگی بالا
     if session == "OVERLAP":
         if "همپوشانی سشن — نقدینگی بالا" not in str(reason_parts):
             reason_parts.append("همپوشانی سشن — نقدینگی بالا")
 
-    # ============================================================
-    # INVALIDATION & NO-TRADE ENGINE INTEGRATION
-    # ============================================================
-    
-    # ایجاد دیکشنری موقت برای بررسی
     temp_result = {
         "coin": coin,
         "price": price,
@@ -2580,13 +2602,9 @@ def analyze_coin(coin, market_news, weights):
         "btc_regime": btc_market_regime(),
     }
 
-    # Note: core.invalidation import is kept for compatibility, but we simplified the logic
-    # to avoid missing module errors.
-
     # Simple invalidation logic inline
     signal_id = hashlib.md5(f"{coin}|{direction}|{temp_result.get('signal_candle_ts', 0)}".encode()).hexdigest()[:10]
     
-    # Contradiction detection
     contradictions = []
     contradiction_status = "LOW"
     if direction == "LONG" and overbought:
@@ -2608,7 +2626,6 @@ def analyze_coin(coin, market_news, weights):
         gate = "BLOCK"
         gate_reason = f"High contradiction: {', '.join(contradictions[:3])}"
 
-    # No-Trade check inline
     no_trade_reasons = []
     should_trade = True
     
@@ -2628,7 +2645,6 @@ def analyze_coin(coin, market_news, weights):
         should_trade = False
         no_trade_reasons.append(f"High spread: {spread_pct:.2f}%")
     
-    # Check if signal is repeat
     repeat_signal = False
     if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
         with sqlite_conn() as c:
@@ -2724,7 +2740,6 @@ def analyze_coin(coin, market_news, weights):
         "session": session,
         "session_label": session_label,
         "session_multiplier": session_multiplier,
-        # Invalidation & No-Trade fields
         "signal_id": signal_id,
         "contradiction_status": contradiction_status,
         "contradictions": contradictions,
@@ -3980,7 +3995,6 @@ def asset_block(r, metal=False, detail=False):
     rsi_text = f"{rsi_v:.1f}" if rsi_v is not None else "N/A"
     atr_text = f"{atr_v:.2f}%" if atr_v is not None else "N/A"
 
-    # دریافت سشن فعلی
     session, session_label, session_multiplier = get_current_session()
 
     lines = [
@@ -4017,7 +4031,6 @@ def asset_block(r, metal=False, detail=False):
     lines.append(f"Reason: {_compact_reason(r)}")
     warning = r.get("warning")
     if warning and "نوسان بالا" in str(warning):
-        # Only show this warning when ATR actually crosses the configured high-volatility threshold.
         if atr_v is None or atr_v < float(os.environ.get("ATLAS_HIGH_ATR_PCT", "4.0")):
             warning = None
     if warning:
@@ -4025,7 +4038,6 @@ def asset_block(r, metal=False, detail=False):
     if tv:
         lines.append(f"📊 Chart: {tv}")
     
-    # Invalidation & No-Trade fields
     if r.get("signal_id"):
         lines.append(f"🆔 Signal: {r.get('signal_id')}")
     if r.get("contradiction_status") == "HIGH_CONTRADICTION":
@@ -4084,7 +4096,6 @@ def dynamic_top8(results, dynamic30, exclude_symbols=None):
         coin = str(r.get("coin") or "").upper()
         if coin not in allowed or is_stable(coin) or is_ambiguous_symbol(coin):
             continue
-        # Dynamic section is for meaningful market candidates, not stablecoins/data junk.
         if not r.get("price") or r.get("action") == "NO DATA":
             continue
         r = _ensure_candidate_plan(dict(r))
@@ -4121,7 +4132,6 @@ def _metal_analysis(name):
         if (direction=="LONG" and rsi_v is not None and 50<=rsi_v<=68) or (direction=="SHORT" and rsi_v is not None and 32<=rsi_v<=50): conf += 10
         if levels: conf += 10
         rr=_rr_from_values((levels or {}).get("entry"),(levels or {}).get("sl"),(levels or {}).get("tp2")) if levels else None
-        # دریافت سشن برای فلزات
         session, session_label, session_multiplier = get_current_session()
         return {"coin":name,"price":price,"change":None,"h4_trend":trend,"d1_trend":trend,"w1_trend":"UNKNOWN","rsi":rsi_v,"macd":macd_state,"atr_pct":atrp,"support":support,"resistance":resistance,"direction":direction,"action":action,"confidence":min(int(conf),100),"entry":(levels or {}).get("entry"),"sl":(levels or {}).get("sl"),"tp1":(levels or {}).get("tp1"),"tp2":(levels or {}).get("tp2"),"tp3":(levels or {}).get("tp3"),"tp4":(levels or {}).get("tp4"),"rr":rr,"reason":"روند 4H + MACD + ساختار قیمت","snapshots":{"4h":{"rows":rows}},"session":session,"session_label":session_label,"session_multiplier":session_multiplier}
     except Exception as e:
@@ -4156,7 +4166,6 @@ def _compact_scenario_row(r, metal=False):
     tp1 = f(r.get("tp1"))
     tp2 = f(r.get("tp2"))
 
-    # دریافت سشن فعلی
     session, session_label, session_multiplier = get_current_session()
 
     if action in ("BUY", "BUY CONFIRMATION"):
@@ -4170,8 +4179,6 @@ def _compact_scenario_row(r, metal=False):
     else:
         status = "WAIT"
 
-    # Keep the uploaded table's wording style: short, decision-oriented,
-    # and without RSI/MACD/ATR/confidence/news details.
     if h4 == "BULLISH" and d1 == "BULLISH":
         if symbol == "BTC":
             overall = "صعودی اما در حال تثبیت"
@@ -4223,7 +4230,6 @@ def _compact_scenario_row(r, metal=False):
     if sl is not None:
         bear += f"، حد ریسک {fmt(sl)}"
 
-    # For metals the same table structure is used; no separate verbose block.
     return {
         "ارز": symbol,
         "وضعیت کلی": overall,
@@ -4252,7 +4258,6 @@ def _compact_section(title, rows, metal=False):
             f"   🟢 صعودی: {x['سناریوی صعودی']}\n"
             f"   🔴 نزولی: {x['سناریوی نزولی (اصلاح)']}"
         )
-    # اضافه کردن سشن به انتهای بخش
     session, session_label, session_multiplier = get_current_session()
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
@@ -4289,7 +4294,6 @@ def _compact_dashboard_table(title, rows):
     lines=[title,"───────────────────",header,sep]
     for row in data:
         lines.append("  ".join(str(v).ljust(widths[i]) for i,v in enumerate(row)))
-    # اضافه کردن سشن به انتهای جدول
     session, session_label, session_multiplier = get_current_session()
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
@@ -4828,7 +4832,6 @@ def report():
     global _LAST_TOP10, _LAST_DYNAMIC30
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
-    # Governance: backtest MUST pass before self-healing can change weights.
     backtest_ok, bt = mandatory_backtest_gate(universe)
     if backtest_ok:
         self_diagnostic()
@@ -4854,15 +4857,11 @@ def report():
             append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
         time.sleep(REQUEST_SLEEP_SECONDS)
 
-    # v9: market regime and breadth are calculated after the raw radar scan,
-    # then the decision engine converts technical confirmations into actual
-    # trade candidates. The existing 4-hour cadence is intentionally unchanged.
     btc_regime = btc_market_regime()
     breadth = market_breadth(results)
     results = apply_decision_engine(results, btc_regime, breadth)
 
     for r in results:
-        # Only genuinely executable decisions become open trade signals.
         r["action"] = r.get("decision_state", r.get("action"))
         store_signal(r)
     text = build_report(results, top10, dynamic30, macro, news, market_info, unavailable, btc_regime, breadth)
@@ -4923,7 +4922,6 @@ def _parse_usdt_toman_page(url, html):
     compact = re.sub(r"\s+", " ", html or "")
     values = []
 
-    # Wallex publishes the current USDT/Toman quote directly in تومان.
     wallex_patterns = (
         r"قیمت تتر به تومان برابر است با:\s*</?[^>]*>\s*([0-9۰-۹][0-9۰-۹,٬]*)",
         r"آخرین قیمت تتر.*?([0-9۰-۹][0-9۰-۹,٬]{4,})\s*تومان",
@@ -4941,7 +4939,6 @@ def _parse_usdt_toman_page(url, html):
         if values:
             return median(values)
 
-    # Excoino exposes its local quote in ریال; convert to تومان exactly once.
     for m in re.finditer(r"USDT.{0,900}?([0-9][0-9,]{5,})\s*ریال.{0,120}?([0-9][0-9,]{5,})\s*ریال", compact, re.I):
         try:
             a = float(m.group(1).replace(",", "")) / 10.0
@@ -4952,7 +4949,6 @@ def _parse_usdt_toman_page(url, html):
         if vals:
             return median(vals)
 
-    # Generic تومان/IRT/IRR patterns for public exchange pages.
     generic = (
         r"(?:USDT|Tether|تتر).{0,250}?([0-9][0-9,]{4,})\s*(?:تومان|IRT)",
         r"(?:USDT|Tether|تتر).{0,250}?([0-9][0-9,]{5,})\s*IRR",
@@ -4983,7 +4979,6 @@ def fetch_usdt_toman_public():
             append_changelog("USDT_PUBLIC_SOURCE", None, None, f"{url}: {e}")
     if not candidates:
         return None
-    # Median protects the snapshot from one stale/abnormal public page.
     return round(median([x[0] for x in candidates]), 0)
 
 def fetch_snapshot_results():
@@ -5058,7 +5053,6 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
     dt = updated_at or now_tehran()
     
-    # اگر previous_prices ارسال نشده، از دیتابیس بخوان
     if previous_prices is None:
         previous_prices = _snapshot_previous_prices()
     
@@ -5072,7 +5066,6 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         "───────────────────",
     ]
     
-    # شمارش فلش‌ها برای دیباگ
     arrow_stats = {"⬆️": 0, "⬇️": 0, "➡️": 0}
     
     for sym in SNAPSHOT_SYMBOLS:
@@ -5088,7 +5081,6 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         arrow_stats[arrow] = arrow_stats.get(arrow, 0) + 1
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
     
-    # اضافه کردن آمار فلش‌ها برای دیباگ
     print(f"📊 Arrow stats: ⬆️={arrow_stats.get('⬆️', 0)}, ⬇️={arrow_stats.get('⬇️', 0)}, ➡️={arrow_stats.get('➡️', 0)}")
     
     lines.append("───────────────────")
@@ -5280,7 +5272,6 @@ def build_full_table_report(results, top10_symbols=None, dynamic30_symbols=None)
     dt = now_tehran()
     session, session_label, session_multiplier = get_current_session()
     
-    # هدر
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append(f"🤖 ATLAS AI — {VERSION}")
     lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
@@ -5288,7 +5279,6 @@ def build_full_table_report(results, top10_symbols=None, dynamic30_symbols=None)
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
-    # بخش‌های مختلف
     lines.extend(build_best_setup_section(results))
     lines.append("")
     
@@ -5337,7 +5327,6 @@ def build_table_top10(results):
     
     lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
     
-    # پیش‌بینی کلی
     bullish = sum(1 for r in sorted_results if "BULL" in str(r.get("action")).upper())
     bearish = sum(1 for r in sorted_results if "BEAR" in str(r.get("action")).upper())
     if bullish > bearish * 1.5:
@@ -5383,7 +5372,6 @@ def build_table_personal(results):
     
     lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘")
     
-    # آمار پورتفولیو
     bullish = sum(1 for r in personal_rows if "BULL" in str(r.get("action")).upper())
     bearish = sum(1 for r in personal_rows if "BEAR" in str(r.get("action")).upper())
     lines.append(f"📌 آمار: {bullish} ارز صعودی، {bearish} ارز نزولی، {len(personal_rows) - bullish - bearish} ارز در انتظار")
@@ -5506,7 +5494,6 @@ def build_market_summary(results):
     lines.append(f"🔴 نزولی: {bearish} ({bearish/total*100:.1f}%)" if total > 0 else "🔴 نزولی: 0")
     lines.append(f"⚪ در انتظار: {waiting} ({waiting/total*100:.1f}%)" if total > 0 else "⚪ در انتظار: 0")
     
-    # بهترین و بدترین تغییرات
     changes = [(r.get("coin"), r.get("change")) for r in results if r.get("change") is not None]
     if changes:
         best = max(changes, key=lambda x: x[1] or -999)
@@ -5514,7 +5501,6 @@ def build_market_summary(results):
         lines.append(f"🏆 بهترین: {best[0]} {best[1]:+.2f}%")
         lines.append(f"📉 بدترین: {worst[0]} {worst[1]:+.2f}%")
     
-    # BTC وضعیت
     btc_regime = btc_market_regime()
     lines.append(f"🎯 BTC Regime: {btc_regime.get('regime', 'UNKNOWN')}")
     
@@ -5528,7 +5514,6 @@ def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=No
     lines.append("📊 ATLAS SIGNAL RANKING")
     lines.append("━━━━━━━━━━━━━━━━━━")
     
-    # مرتب‌سازی بر اساس کیفیت سیگنال
     signal_rows = []
     for r in results:
         action = str(r.get("action") or "").upper()
@@ -5570,7 +5555,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         import matplotlib.pyplot as plt
         import matplotlib.font_manager as fm
         
-        # تنظیم فونت
         try:
             font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
             if os.path.exists(font_path):
@@ -5581,7 +5565,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         except:
             plt.rcParams['font.family'] = 'sans-serif'
         
-        # آماده‌سازی داده‌ها
         signals = []
         for r in results:
             action = str(r.get("action") or "").upper()
@@ -5595,7 +5578,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                 r["quality_score"] = min(100, quality_score)
                 signals.append(r)
         
-        # اگر سیگنال نبود، از TOP قیمت استفاده کن
         if not signals:
             signals = sorted(
                 [r for r in results if r.get("price") is not None],
@@ -5608,7 +5590,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         signals.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
         top_signals = signals[:10]
         
-        # ساخت جدول
         fig, ax = plt.subplots(figsize=(14, 10))
         ax.axis('off')
         
@@ -5706,7 +5687,6 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     with open(filename, 'rb') as f:
         image_data = f.read()
     
-    # لیست مقاصد
     destinations = []
     if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
         destinations.append({
@@ -5837,10 +5817,8 @@ def main():
             btc_regime = btc_market_regime()
             breadth = market_breadth(results)
             
-            # گزارش کامل جدولی با تمام بخش‌ها
             full_table_report = build_full_table_report(results, top10, dynamic30)
             
-            # گزارش‌های قبلی (برای سازگاری)
             outputs = build_two_engine_reports(
                 results, top10, dynamic30, macro, news, market_info,
                 unavailable, btc_regime, breadth
@@ -5849,7 +5827,6 @@ def main():
             outputs.append(full_table_report)
             outputs.append(build_v11_intelligence_report(results, v11_portfolio))
             
-            # اضافه کردن جدول رتبه‌بندی سیگنال‌ها
             signal_ranking = build_signal_ranking_table(results, top10, dynamic30)
             outputs.append(signal_ranking)
             
@@ -5859,7 +5836,6 @@ def main():
                 all_errors.extend(errors)
                 print(payload)
             
-            # ارسال جدول تصویری به همه مقاصد
             image_sent = send_image_table(results, top10, dynamic30)
             if image_sent:
                 print("✅ Image table sent successfully to all destinations")
@@ -5880,9 +5856,6 @@ def main():
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
 
-        # ============================================================
-        # Voice Output
-        # ============================================================
         if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
             try:
                 print("\n🎤 Generating audio report...")
