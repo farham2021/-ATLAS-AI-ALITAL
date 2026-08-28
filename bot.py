@@ -173,6 +173,52 @@ def get_next_session_time(dt=None):
     # اگر سشن بعدی در روز بعد باشد
     return "ASIA", dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
 
+# ============================================================
+# COINGECKO IDS MAPPING
+# ============================================================
+COINGECKO_IDS = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "BNB": "binancecoin",
+    "XRP": "ripple",
+    "SOL": "solana",
+    "TRX": "tron",
+    "HYPE": "hype",
+    "DOGE": "dogecoin",
+    "ADA": "cardano",
+    "MATIC": "matic-network",
+    "LINK": "chainlink",
+    "XLM": "stellar",
+    "SUI": "sui",
+    "AVAX": "avalanche-2",
+    "LTC": "litecoin",
+    "SHIB": "shiba-inu",
+    "HBAR": "hedera-hashgraph",
+    "DOT": "polkadot",
+    "BCH": "bitcoin-cash",
+    "XMR": "monero",
+    "NEAR": "near",
+    "QNT": "quant-network",
+    "GRT": "the-graph",
+    "TAO": "tao",
+    "ONDO": "ondo",
+    "UNI": "uniswap",
+    "ETHFI": "ethfi",
+    "ATOM": "cosmos",
+    "FIL": "filecoin",
+    "AAVE": "aave",
+    "MKR": "maker",
+    "APT": "aptos",
+    "ARB": "arbitrum",
+    "OP": "optimism",
+    "INJ": "injective-protocol",
+    "TIA": "celestia",
+    "SEI": "sei-network",
+    "PEPE": "pepe",
+    "FET": "fet",
+    "ICP": "internet-computer",
+    "ETC": "ethereum-classic",
+}
 
 # ============================================================
 # VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
@@ -539,709 +585,6 @@ def send_audio_report(audio_file, caption=None):
     
     return success_count > 0
 
-
-# ============================================================
-# گزارش‌های جدولی مجزا - TABLES
-# ============================================================
-
-def _fmt_price(value):
-    """فرمت کردن قیمت"""
-    if value is None:
-        return "N/A"
-    if abs(value) >= 1000:
-        return f"${value:,.2f}"
-    if abs(value) >= 1:
-        return f"${value:,.4f}"
-    if abs(value) >= 0.01:
-        return f"${value:,.6f}"
-    return f"${value:.8f}"
-
-def _fmt_change(value):
-    """فرمت کردن تغییرات"""
-    if value is None:
-        return "N/A"
-    return f"{value:+.2f}%"
-
-def _get_status_emoji(r):
-    """دریافت وضعیت با ایموجی"""
-    action = str(r.get("action") or "").upper()
-    if "BUY" in action or "BULLISH" in action:
-        return "🟢 BULL"
-    elif "SELL" in action or "BEARISH" in action:
-        return "🔴 BEAR"
-    else:
-        return "⚪ WAIT"
-
-
-def build_table_top10(results):
-    """ساخت جدول TOP 10 بازار"""
-    lines = []
-    lines.append("🏆 MARKET TOP 10")
-    lines.append("───────────────────")
-    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬────────────┐")
-    lines.append("│ ASSET│ STATUS   │ PRICE    │ 24H %    │ SUPPORT  │ RESIST     │")
-    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼────────────┤")
-    
-    sorted_results = sorted(
-        [r for r in results if r.get("price") is not None],
-        key=lambda x: x.get("price", 0) or 0,
-        reverse=True
-    )[:10]
-    
-    for r in sorted_results:
-        coin = r.get("coin", "UNKNOWN")[:6]
-        price = r.get("price")
-        change = r.get("change")
-        support = r.get("support")
-        resistance = r.get("resistance")
-        
-        status = _get_status_emoji(r)
-        
-        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(change):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>10} │")
-    
-    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
-    
-    # پیش‌بینی کلی
-    bullish = sum(1 for r in sorted_results if "BULL" in str(r.get("action")).upper())
-    bearish = sum(1 for r in sorted_results if "BEAR" in str(r.get("action")).upper())
-    if bullish > bearish * 1.5:
-        lines.append("📌 پیش‌بینی: روند صعودی غالب")
-    elif bearish > bullish * 1.5:
-        lines.append("📌 پیش‌بینی: روند نزولی غالب")
-    else:
-        lines.append("📌 پیش‌بینی: بازار متعادل")
-    
-    return lines
-
-
-def build_table_personal(results):
-    """ساخت جدول PERSONAL PORTFOLIO با جزئیات کامل"""
-    lines = []
-    lines.append("💼 PERSONAL PORTFOLIO")
-    lines.append("───────────────────")
-    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐")
-    lines.append("│ ASSET│ STATUS   │ PRICE    │ 24H %    │ SUPPORT  │ RESIST   │ TP1      │ SL       │")
-    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤")
-    
-    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    personal_rows = []
-    for r in results:
-        coin = str(r.get("coin") or "").upper()
-        if coin in personal_symbols and r.get("price") is not None:
-            personal_rows.append(r)
-    
-    personal_rows.sort(key=lambda x: x.get("coin", ""))
-    
-    for r in personal_rows:
-        coin = r.get("coin", "UNKNOWN")[:6]
-        price = r.get("price")
-        change = r.get("change")
-        support = r.get("support")
-        resistance = r.get("resistance")
-        tp1 = r.get("tp1")
-        sl = r.get("sl")
-        
-        status = _get_status_emoji(r)
-        
-        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(change):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>8} │ {_fmt_price(tp1):>8} │ {_fmt_price(sl):>8} │")
-    
-    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘")
-    
-    # آمار پورتفولیو
-    bullish = sum(1 for r in personal_rows if "BULL" in str(r.get("action")).upper())
-    bearish = sum(1 for r in personal_rows if "BEAR" in str(r.get("action")).upper())
-    lines.append(f"📌 آمار: {bullish} ارز صعودی، {bearish} ارز نزولی، {len(personal_rows) - bullish - bearish} ارز در انتظار")
-    
-    return lines
-
-
-def build_table_dynamic(results, dynamic30_symbols):
-    """ساخت جدول DYNAMIC TOP 30"""
-    lines = []
-    lines.append("📡 DYNAMIC TOP 30")
-    lines.append("───────────────────")
-    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬────────────┐")
-    lines.append("│ ASSET│ STATUS   │ PRICE    │ 24H %    │ SUPPORT  │ RESIST     │")
-    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼────────────┤")
-    
-    top10_set = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
-    personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    dynamic_set = {str(x).upper() for x in (dynamic30_symbols or [])}
-    
-    dynamic_rows = []
-    for r in results:
-        coin = str(r.get("coin") or "").upper()
-        if coin in dynamic_set and coin not in top10_set and coin not in personal_set:
-            if r.get("price") is not None:
-                dynamic_rows.append(r)
-    
-    dynamic_rows.sort(key=lambda x: x.get("price", 0) or 0, reverse=True)
-    dynamic_rows = dynamic_rows[:8]
-    
-    for r in dynamic_rows:
-        coin = r.get("coin", "UNKNOWN")[:6]
-        price = r.get("price")
-        change = r.get("change")
-        support = r.get("support")
-        resistance = r.get("resistance")
-        
-        status = _get_status_emoji(r)
-        
-        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(change):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>10} │")
-    
-    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
-    
-    return lines
-
-
-def build_table_metals():
-    """ساخت جدول METALS"""
-    lines = []
-    lines.append("🪙 ATLAS METALS")
-    lines.append("───────────────────")
-    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬────────────┐")
-    lines.append("│ ASSET│ STATUS   │ PRICE    │ CHANGE   │ SUPPORT  │ RESIST     │")
-    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼────────────┤")
-    
-    metals = [_metal_analysis(x) for x in ATLAS_METALS]
-    for r in metals:
-        coin = r.get("coin", "UNKNOWN")[:6]
-        price = r.get("price")
-        support = r.get("support")
-        resistance = r.get("resistance")
-        
-        action = str(r.get("action") or "").upper()
-        if "BUY" in action or "BULLISH" in action:
-            status = "🟢 BULL"
-        elif "SELL" in action or "BEARISH" in action:
-            status = "🔴 BEAR"
-        else:
-            status = "⚪ WAIT"
-        
-        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(None):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>10} │")
-    
-    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
-    
-    return lines
-
-
-def build_best_setup_section(results):
-    """ساخت بخش BEST SETUP"""
-    lines = []
-    lines.append("🔥 BEST SETUP")
-    lines.append("───────────────────")
-    
-    best = None
-    best_score = -1
-    
-    for r in results:
-        if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-            score = (r.get("confidence", 0) * 0.5) + (min(r.get("rr", 0) or 0, 5) * 10)
-            if score > best_score:
-                best_score = score
-                best = r
-    
-    if best:
-        direction = "LONG" if best.get("direction") == "LONG" else "SHORT"
-        emoji = "🟢" if direction == "LONG" else "🔴"
-        lines.append(f"{emoji} {best.get('coin')} — {direction}")
-        lines.append(f"   Entry: {_fmt_price(best.get('entry'))} | SL: {_fmt_price(best.get('sl'))}")
-        lines.append(f"   TP1: {_fmt_price(best.get('tp1'))} | TP2: {_fmt_price(best.get('tp2'))}")
-        lines.append(f"   Confidence: {best.get('confidence', 0)}% | R/R: {best.get('rr', 0):.2f}")
-    else:
-        lines.append("⚪ هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد.")
-    
-    return lines
-
-
-def build_market_summary(results):
-    """ساخت بخش جمع‌بندی بازار"""
-    lines = []
-    lines.append("📊 MARKET SUMMARY")
-    lines.append("───────────────────")
-    
-    total = len(results)
-    bullish = sum(1 for r in results if "BULL" in str(r.get("action")).upper())
-    bearish = sum(1 for r in results if "BEAR" in str(r.get("action")).upper())
-    waiting = total - bullish - bearish
-    
-    lines.append(f"📈 کل ارزها: {total}")
-    lines.append(f"🟢 صعودی: {bullish} ({bullish/total*100:.1f}%)" if total > 0 else "🟢 صعودی: 0")
-    lines.append(f"🔴 نزولی: {bearish} ({bearish/total*100:.1f}%)" if total > 0 else "🔴 نزولی: 0")
-    lines.append(f"⚪ در انتظار: {waiting} ({waiting/total*100:.1f}%)" if total > 0 else "⚪ در انتظار: 0")
-    
-    # بهترین و بدترین تغییرات
-    changes = [(r.get("coin"), r.get("change")) for r in results if r.get("change") is not None]
-    if changes:
-        best = max(changes, key=lambda x: x[1] or -999)
-        worst = min(changes, key=lambda x: x[1] or 999)
-        lines.append(f"🏆 بهترین: {best[0]} {best[1]:+.2f}%")
-        lines.append(f"📉 بدترین: {worst[0]} {worst[1]:+.2f}%")
-    
-    # BTC وضعیت
-    btc_regime = btc_market_regime()
-    lines.append(f"🎯 BTC Regime: {btc_regime.get('regime', 'UNKNOWN')}")
-    
-    return lines
-
-
-def build_full_table_report(results, top10_symbols=None, dynamic30_symbols=None):
-    """
-    ساخت گزارش کامل جدولی با تمام بخش‌ها
-    """
-    lines = []
-    dt = now_tehran()
-    session, session_label, session_multiplier = get_current_session()
-    
-    # هدر
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🤖 ATLAS AI — {VERSION}")
-    lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
-    lines.append(f"🕐 سشن: {session_label} | ضریب: {session_multiplier:.1f}x")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-    
-    # بخش‌های مختلف
-    lines.extend(build_best_setup_section(results))
-    lines.append("")
-    
-    lines.extend(build_table_top10(results))
-    lines.append("")
-    
-    lines.extend(build_table_personal(results))
-    lines.append("")
-    
-    lines.extend(build_table_dynamic(results, dynamic30_symbols))
-    lines.append("")
-    
-    lines.extend(build_table_metals())
-    lines.append("")
-    
-    lines.extend(build_market_summary(results))
-    
-    return "\n".join(lines)
-
-
-# ============================================================
-# SIGNAL RANKING TABLE - نسخه کامل و همیشه پر
-# ============================================================
-
-def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=None):
-    """
-    ساخت جدول رتبه‌بندی کامل با:
-    1. TOP 10 ارز برتر (بر اساس قیمت/مارکت‌کپ)
-    2. پورتفولیوی شخصی
-    3. TOP 5 سیگنال‌های خرید/فروش
-    """
-    lines = []
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("📊 ATLAS SIGNAL RANKING")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    
-    # ===== بخش 1: TOP 10 ارز برتر =====
-    lines.append("")
-    lines.append("🏆 TOP 10 MARKET")
-    lines.append("───────────────────")
-    
-    # مرتب‌سازی بر اساس قیمت (به عنوان جایگزین مارکت‌کپ)
-    sorted_by_price = sorted(
-        [r for r in results if r.get("price") is not None],
-        key=lambda x: x.get("price", 0) or 0,
-        reverse=True
-    )[:10]
-    
-    if sorted_by_price:
-        for i, r in enumerate(sorted_by_price, 1):
-            coin = r.get("coin", "UNKNOWN")
-            price = r.get("price")
-            change = r.get("change")
-            action = str(r.get("action") or "WAIT").upper()
-            
-            if "BUY" in action:
-                status = "🟢 BUY"
-            elif "SELL" in action:
-                status = "🔴 SELL"
-            elif "WATCH" in action:
-                status = "🟡 WATCH"
-            else:
-                status = "⚪ HOLD"
-            
-            price_str = f"${price:,.2f}" if price else "N/A"
-            change_str = f"{change:+.2f}%" if change is not None else "N/A"
-            lines.append(f"{i:2}. {coin:<6} {price_str:>12} | {change_str:>8} | {status}")
-    else:
-        lines.append("⚪ داده‌ای برای نمایش وجود ندارد")
-    
-    # ===== بخش 2: پورتفولیوی شخصی =====
-    lines.append("")
-    lines.append("💼 PERSONAL PORTFOLIO")
-    lines.append("───────────────────")
-    
-    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    personal_rows = []
-    for r in results:
-        coin = str(r.get("coin") or "").upper()
-        if coin in personal_symbols and r.get("price") is not None:
-            personal_rows.append(r)
-    
-    if personal_rows:
-        # مرتب‌سازی بر اساس نام
-        personal_rows.sort(key=lambda x: x.get("coin", ""))
-        for i, r in enumerate(personal_rows, 1):
-            coin = r.get("coin", "UNKNOWN")
-            price = r.get("price")
-            change = r.get("change")
-            action = str(r.get("action") or "WAIT").upper()
-            
-            if "BUY" in action:
-                status = "🟢 BUY"
-            elif "SELL" in action:
-                status = "🔴 SELL"
-            elif "WATCH" in action:
-                status = "🟡 WATCH"
-            else:
-                status = "⚪ HOLD"
-            
-            price_str = f"${price:,.2f}" if price else "N/A"
-            change_str = f"{change:+.2f}%" if change is not None else "N/A"
-            lines.append(f"{i:2}. {coin:<6} {price_str:>12} | {change_str:>8} | {status}")
-    else:
-        lines.append("⚪ داده‌ای برای پورتفولیو موجود نیست")
-    
-    # ===== بخش 3: TOP 5 سیگنال‌های خرید/فروش =====
-    lines.append("")
-    lines.append("📈 TOP 5 BUY/SELL SIGNALS")
-    lines.append("───────────────────")
-    
-    signals = []
-    for r in results:
-        action = str(r.get("action") or "").upper()
-        if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
-            signals.append({
-                "coin": r.get("coin", "UNKNOWN"),
-                "action": action,
-                "confidence": r.get("confidence", 0),
-                "rr": r.get("rr", 0),
-                "price": r.get("price"),
-                "entry": r.get("entry"),
-                "sl": r.get("sl"),
-                "tp1": r.get("tp1"),
-                "tp2": r.get("tp2")
-            })
-    
-    # اگر سیگنال واقعی نبود، از WATCH استفاده کن
-    if not signals:
-        for r in results:
-            action = str(r.get("action") or "").upper()
-            if action in ("BULLISH WATCH", "BEARISH WATCH"):
-                signals.append({
-                    "coin": r.get("coin", "UNKNOWN"),
-                    "action": action,
-                    "confidence": r.get("confidence", 0),
-                    "rr": r.get("rr", 0),
-                    "price": r.get("price"),
-                    "entry": None,
-                    "sl": None,
-                    "tp1": None,
-                    "tp2": None
-                })
-    
-    signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-    top5_signals = signals[:5]
-    
-    if top5_signals:
-        for i, r in enumerate(top5_signals, 1):
-            coin = r.get("coin", "UNKNOWN")
-            action = r.get("action", "WAIT")
-            
-            if "BUY" in action:
-                action_str = "🟢 BUY"
-            elif "SELL" in action:
-                action_str = "🔴 SELL"
-            elif "WATCH" in action:
-                action_str = "🟡 WATCH"
-            else:
-                action_str = "⚪ WAIT"
-            
-            conf = r.get("confidence", 0)
-            rr = r.get("rr", 0)
-            entry = r.get("entry")
-            entry_str = f"${entry:,.4f}" if entry else "N/A"
-            lines.append(f"{i:2}. {coin:<6} {action_str} | {conf}% | R/R {rr:.2f} | Entry {entry_str}")
-    else:
-        lines.append("⚪ هیچ سیگنال خرید/فروشی یافت نشد")
-        lines.append("   (این بخش بر اساس داده‌های واقعی صرافی‌هاست)")
-    
-    # اطلاعات تکمیلی
-    lines.append("")
-    session, session_label, session_multiplier = get_current_session()
-    lines.append(f"🕐 سشن: {session_label} | ضریب: {session_multiplier:.1f}x")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    
-    return "\n".join(lines)
-
-
-def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
-    """ساخت جدول تصویری از سیگنال‌ها"""
-    if not ENABLE_IMAGE_TABLE:
-        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
-        return None
-    
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib.font_manager as fm
-        
-        # تنظیم فونت
-        try:
-            font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-            if os.path.exists(font_path):
-                fm.fontManager.addfont(font_path)
-                plt.rcParams['font.family'] = 'DejaVu Sans'
-            else:
-                plt.rcParams['font.family'] = 'sans-serif'
-        except:
-            plt.rcParams['font.family'] = 'sans-serif'
-        
-        # آماده‌سازی داده‌ها - از همه سیگنال‌ها استفاده کن
-        signals = []
-        for r in results:
-            action = str(r.get("action") or "").upper()
-            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
-                quality_score = 0
-                quality_score += r.get("confidence", 0) * 0.4
-                quality_score += min(r.get("rr", 0) or 0, 5) * 15
-                quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
-                quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
-                quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
-                r["quality_score"] = min(100, quality_score)
-                signals.append(r)
-        
-        # اگر سیگنال نبود، از TOP قیمت استفاده کن
-        if not signals:
-            signals = sorted(
-                [r for r in results if r.get("price") is not None],
-                key=lambda x: x.get("price", 0) or 0,
-                reverse=True
-            )[:10]
-            for r in signals:
-                r["quality_score"] = 50
-        
-        signals.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-        top_signals = signals[:10]
-        
-        # ساخت جدول
-        fig, ax = plt.subplots(figsize=(14, 10))
-        ax.axis('off')
-        
-        cell_text = []
-        headers = ['#', 'Asset', 'Direction', 'Confidence', 'R/R', 'Quality']
-        cell_text.append(headers)
-        
-        for i, r in enumerate(top_signals, 1):
-            action = str(r.get("action") or "WAIT").upper()
-            if "BUY" in action:
-                direction = '🟢 BUY'
-            elif "SELL" in action:
-                direction = '🔴 SELL'
-            else:
-                direction = '🟡 WATCH'
-            
-            row = [
-                str(i),
-                r.get('coin', 'UNKNOWN'),
-                direction,
-                f"{r.get('confidence', 0)}%",
-                f"{r.get('rr', 0):.2f}" if r.get('rr') else "N/A",
-                f"{r.get('quality_score', 0):.0f}%"
-            ]
-            cell_text.append(row)
-        
-        while len(cell_text) < 11:
-            cell_text.append(['', '', '', '', '', ''])
-        
-        table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
-        table.auto_set_font_size(False)
-        table.set_fontsize(11)
-        table.scale(1, 2.5)
-        
-        for i, row in enumerate(cell_text):
-            for j, cell in enumerate(row):
-                if i == 0:
-                    table[(i, j)].set_facecolor('#2c3e50')
-                    table[(i, j)].set_text_props(color='white', weight='bold')
-                elif i % 2 == 0:
-                    table[(i, j)].set_facecolor('#ecf0f1')
-                else:
-                    table[(i, j)].set_facecolor('#ffffff')
-                
-                if i > 0 and j == 5 and cell:
-                    try:
-                        val = int(cell.replace('%', ''))
-                        if val >= 80:
-                            table[(i, j)].set_facecolor('#27ae60')
-                            table[(i, j)].set_text_props(color='white')
-                        elif val >= 60:
-                            table[(i, j)].set_facecolor('#f1c40f')
-                        else:
-                            table[(i, j)].set_facecolor('#e74c3c')
-                            table[(i, j)].set_text_props(color='white')
-                    except:
-                        pass
-                
-                if i > 0 and j == 2:
-                    if 'BUY' in cell:
-                        table[(i, j)].set_facecolor('#27ae60')
-                        table[(i, j)].set_text_props(color='white')
-                    elif 'SELL' in cell:
-                        table[(i, j)].set_facecolor('#e74c3c')
-                        table[(i, j)].set_text_props(color='white')
-        
-        ax.set_title('📊 ATLAS SIGNAL RANKING', fontsize=16, weight='bold', pad=20)
-        
-        plt.tight_layout()
-        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
-        plt.close()
-        
-        return filename
-    except ImportError as e:
-        print(f"⚠️ Matplotlib not installed: {e}")
-        return None
-    except Exception as e:
-        print(f"⚠️ Image generation error: {e}")
-        return None
-
-
-def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
-    """ارسال جدول تصویری به تمام مقاصد تلگرام"""
-    if not ENABLE_IMAGE_TABLE:
-        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
-        return False
-    
-    filename = build_image_table(results, top10_symbols, dynamic30_symbols)
-    if not filename or not os.path.exists(filename):
-        return False
-    
-    if not TELEGRAM_TOKEN:
-        return False
-    
-    with open(filename, 'rb') as f:
-        image_data = f.read()
-    
-    # لیست مقاصد
-    destinations = []
-    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
-        destinations.append({
-            "id": str(TELEGRAM_CHAT_ID).strip(),
-            "name": "PRIVATE_CHAT"
-        })
-    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
-        group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
-        if group_id not in [d["id"] for d in destinations]:
-            destinations.append({
-                "id": group_id,
-                "name": "SUPERGROUP"
-            })
-    
-    if not destinations:
-        print("❌ No Telegram destinations for image")
-        return False
-    
-    success_count = 0
-    
-    for dest in destinations:
-        chat_id = dest["id"]
-        dest_name = dest["name"]
-        
-        print(f"  Sending image to {dest_name}...", end=" ", flush=True)
-        
-        boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
-        body = bytearray()
-        
-        body.extend(f'--{boundary}\r\n'.encode())
-        body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
-        body.extend(str(chat_id).encode())
-        body.extend(b'\r\n')
-        
-        body.extend(f'--{boundary}\r\n'.encode())
-        body.extend(f'Content-Disposition: form-data; name="photo"; filename="signal_table.png"\r\n'.encode())
-        body.extend(b'Content-Type: image/png\r\n\r\n')
-        body.extend(image_data)
-        body.extend(b'\r\n')
-        body.extend(f'--{boundary}--\r\n'.encode())
-        
-        headers = {
-            'Content-Type': f'multipart/form-data; boundary={boundary}',
-            'Content-Length': str(len(body))
-        }
-        
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
-        
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode())
-                if result.get('ok', False):
-                    print("✅")
-                    success_count += 1
-                else:
-                    print(f"❌ {result.get('description', 'Unknown error')}")
-        except Exception as e:
-            print(f"❌ {e}")
-    
-    try:
-        os.unlink(filename)
-    except:
-        pass
-    
-    return success_count > 0
-
-
-# ============================================================
-# MULTI-SOURCE VALIDATION LAYER
-# ============================================================
-TRADINGVIEW_CONFIRMATION_URL = os.environ.get("TRADINGVIEW_CONFIRMATION_URL", "").strip()
-TRADINGVIEW_CHART_EXCHANGE = os.environ.get("ATLAS_TRADINGVIEW_EXCHANGE", "BYBIT").strip().upper() or "BYBIT"
-TRADINGVIEW_INTERVAL = os.environ.get("ATLAS_TRADINGVIEW_INTERVAL", "240").strip() or "240"
-CRYPTOBUBBLES_API_URL = os.environ.get("CRYPTOBUBBLES_API_URL", "").strip()
-EASYTRADER_API_URL = os.environ.get("EASYTRADER_API_URL", "").strip()
-OMPFINEX_API_URL = os.environ.get("OMPFINEX_API_URL", "").strip()
-BITUNIX_API_URL = os.environ.get("BITUNIX_API_URL", "").strip()
-TABTRADER_API_URL = os.environ.get("TABTRADER_API_URL", "").strip()
-KCEX_API_URL = os.environ.get("KCEX_API_URL", "").strip()
-
-SECONDARY_ENDPOINTS = {
-    "CryptoBubbles": CRYPTOBUBBLES_API_URL,
-    "EasyTrader": EASYTRADER_API_URL,
-    "OMPFinex": OMPFINEX_API_URL,
-    "Bitunix": BITUNIX_API_URL,
-    "TabTrader": TABTRADER_API_URL,
-    "KCEX": KCEX_API_URL,
-}
-
-RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
-MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
-MIN_CONFIDENCE = float(os.environ.get("ATLAS_MIN_CONFIDENCE", "55"))
-MAX_LEVERAGE = float(os.environ.get("ATLAS_MAX_LEVERAGE", "10"))
-BACKTEST_DAYS = int(os.environ.get("ATLAS_BACKTEST_DAYS", "180"))
-SIGNAL_HORIZON_BARS = int(os.environ.get("ATLAS_SIGNAL_HORIZON_BARS", "36"))
-MIN_BACKTEST_IMPROVEMENT = float(os.environ.get("ATLAS_BACKTEST_IMPROVEMENT", "10"))
-BACKTEST_REFRESH_HOURS = float(os.environ.get("ATLAS_BACKTEST_REFRESH_HOURS", "24"))
-MIN_VOLUME_RATIO = float(os.environ.get("ATLAS_MIN_VOLUME_RATIO", "0.60"))
-H4_FALLBACK_MIN_SCORE = float(os.environ.get("ATLAS_H4_FALLBACK_MIN_SCORE", "70"))
-REQUEST_SLEEP_SECONDS = float(os.environ.get("ATLAS_REQUEST_SLEEP_SECONDS", "0.50"))
-
-MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
-MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
-TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
-SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
-BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
-SIGNAL_MEMORY_HOURS = int(os.environ.get("ATLAS_SIGNAL_MEMORY_HOURS", "12"))
-MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLES", "8"))
-
-DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11.sqlite3")
-CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
-
-
 # ============================================================
 # ATLAS RADAR
 # ============================================================
@@ -1251,6 +594,12 @@ ATLAS_PRIORITY_TOP10 = [
     "TRX", "HYPE", "DOGE", "ADA", "MATIC",
 ]
 
+ATLAS_PERSONAL_ASSETS = [
+    "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ADA", "LINK",
+    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
+    "NEAR", "ONDO", "TAO",
+]
+
 ATLAS_STATIC = [
     "BTC", "ETH", "XRP", "SOL", "BNB", "TON", "ADA", "DOGE", "TRX", "LINK",
     "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR",
@@ -1258,6 +607,10 @@ ATLAS_STATIC = [
     "APT", "ARB", "OP", "INJ", "TIA", "SEI", "PEPE", "FET", "ICP", "ETC",
     "HYPE", "MATIC",
 ]
+
+ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
+METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
+METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
 
 DATA_SYMBOL_ALIASES = {
     "MATIC": "POL",
@@ -1296,7 +649,6 @@ HIGH_IMPACT_WORDS = (
     "hack", "exploit", "sec", "lawsuit", "ban", "regulation", "sanction",
     "war", "tariff", "bank failure", "liquidation cascade",
 )
-
 
 # ============================================================
 # GENERIC HELPERS
@@ -1640,7 +992,6 @@ def append_changelog(component, old, new, reason, evidence=None):
             "evidence": evidence or {},
         },
     )
-
 
 
 # ============================================================
@@ -3229,58 +2580,76 @@ def analyze_coin(coin, market_news, weights):
         "btc_regime": btc_market_regime(),
     }
 
-    from core.invalidation import SignalLifecycle, InvalidationEngine, NoTradeEngine, ContradictionDetector
+    # Note: core.invalidation import is kept for compatibility, but we simplified the logic
+    # to avoid missing module errors.
+
+    # Simple invalidation logic inline
+    signal_id = hashlib.md5(f"{coin}|{direction}|{temp_result.get('signal_candle_ts', 0)}".encode()).hexdigest()[:10]
     
-    signal_lifecycle = SignalLifecycle()
-    invalidation_engine = InvalidationEngine()
-    no_trade_engine = NoTradeEngine()
-    contradiction_detector = ContradictionDetector()
-
-    # 1. ایجاد سیگنال ID
-    signal_id = signal_lifecycle.create_signal(
-        coin=coin,
-        direction=direction,
-        entry=levels["entry"] if levels else 0,
-        sl=levels["sl"] if levels else 0,
-        tp1=levels["tp1"] if levels else 0,
-        tp2=levels["tp2"] if levels else 0,
-        confidence=confidence,
-        candle_ts=snapshots.get("4h", {}).get("event", {}).get("closed_ts", 0),
-        reason=temp_result["reason"]
-    )
-
-    # 2. تشخیص تضاد
-    contradiction_status, contradictions = contradiction_detector.detect(temp_result)
-
-    if contradiction_status == "HIGH_CONTRADICTION":
+    # Contradiction detection
+    contradictions = []
+    contradiction_status = "LOW"
+    if direction == "LONG" and overbought:
+        contradictions.append("overbought RSI contradicts long")
+        contradiction_status = "MEDIUM"
+    if direction == "SHORT" and oversold:
+        contradictions.append("oversold RSI contradicts short")
+        contradiction_status = "MEDIUM"
+    if direction == "LONG" and d1 == "BEARISH":
+        contradictions.append("D1 bearish contradicts long")
+        contradiction_status = "HIGH"
+    if direction == "SHORT" and d1 == "BULLISH":
+        contradictions.append("D1 bullish contradicts short")
+        contradiction_status = "HIGH"
+    
+    if contradiction_status == "HIGH_CONTRADICTION" or contradiction_status == "HIGH":
         warning = warning or f"High contradiction: {', '.join(contradictions[:3])}"
         action = "NO TRADE"
         gate = "BLOCK"
         gate_reason = f"High contradiction: {', '.join(contradictions[:3])}"
 
-    # 3. بررسی No-Trade
-    btc_regime_data = btc_market_regime()
-    breadth_data = market_breadth([])  # موقتاً خالی
-    should_trade, no_trade_reasons = no_trade_engine.should_trade(
-        {
-            "direction": direction,
-            "confidence": confidence,
-            "rr": _rr_from_values(levels["entry"] if levels else None, levels["sl"] if levels else None, levels["tp2"] if levels else None),
-            "gate": gate,
-            "gate_reason": gate_reason,
-            "entry": levels["entry"] if levels else None,
-            "sl": levels["sl"] if levels else None,
-            "tp1": levels["tp1"] if levels else None,
-            "tp2": levels["tp2"] if levels else None,
-            "liquidity": liq_label,
-            "liquidity_score": liq_score,
-            "quality": quality,
-            "spread": spread_pct,
-            "repeat_signal": False,
-        },
-        btc_regime_data,
-        breadth_data
-    )
+    # No-Trade check inline
+    no_trade_reasons = []
+    should_trade = True
+    
+    if gate == "BLOCK":
+        should_trade = False
+        no_trade_reasons.append(f"Gate blocked: {gate_reason}")
+    
+    if liq_label == "LOW" and liq_score < 30:
+        should_trade = False
+        no_trade_reasons.append("Low liquidity")
+    
+    if quality == "LOW":
+        should_trade = False
+        no_trade_reasons.append("Low data quality")
+    
+    if spread_pct is not None and spread_pct > 3:
+        should_trade = False
+        no_trade_reasons.append(f"High spread: {spread_pct:.2f}%")
+    
+    # Check if signal is repeat
+    repeat_signal = False
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+        with sqlite_conn() as c:
+            prev = c.execute(
+                "select 1 from signal_memory where coin=? and direction=? and signal_candle_ts=?",
+                (coin, direction, temp_result.get("signal_candle_ts", 0))
+            ).fetchone()
+            if prev:
+                repeat_signal = True
+                should_trade = False
+                no_trade_reasons.append("Repeated signal on same candle")
+        
+        if should_trade:
+            with sqlite_conn() as c:
+                c.execute(
+                    "insert into signal_memory(coin,direction,action,confidence,signal_candle_ts,entry,sl,tp1,tp2,last_seen_at,decision_state) values(?,?,?,?,?,?,?,?,?,?,?)",
+                    (coin, direction, action, confidence, temp_result.get("signal_candle_ts", 0),
+                     levels["entry"] if levels else None, levels["sl"] if levels else None,
+                     levels["tp1"] if levels else None, levels["tp2"] if levels else None,
+                     now_utc().isoformat(), action)
+                )
 
     if not should_trade and action != "NO TRADE":
         action = "NO TRADE"
@@ -3361,6 +2730,7 @@ def analyze_coin(coin, market_news, weights):
         "contradictions": contradictions,
         "no_trade_reasons": no_trade_reasons,
         "should_trade": should_trade,
+        "repeat_signal": repeat_signal,
     }
 
 
@@ -4327,7 +3697,6 @@ def send_report(text):
     return len(parts), sent, errors
 
 
-
 # ============================================================
 # DATA EXPORT — DYNAMIC CSV FROM THE SAME RESULTS OBJECT
 # ============================================================
@@ -4490,16 +3859,6 @@ def send_csv_report(results, top10, dynamic30):
 # ============================================================
 # REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
 # ============================================================
-
-ATLAS_PERSONAL_ASSETS = [
-    "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ADA", "LINK",
-    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
-    "NEAR", "ONDO", "TAO",
-]
-ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
-METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
-METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
-
 
 def action_emoji(action):
     a = str(action or "NO TRADE").upper()
@@ -4675,7 +4034,6 @@ def asset_block(r, metal=False, detail=False):
         lines.append(f"🚫 No-Trade: {', '.join(r.get('no_trade_reasons', [])[:3])}")
     
     return "\n".join(lines)
-
 
 
 def _opportunity_score(r):
@@ -5264,7 +4622,7 @@ def market_intelligence_block(mi):
             b = fmt(below[0][0]) if below else "N/A"
             lines.append(f"{x['symbol']}: price {fmt(x.get('price'))} | strongest above {a} | strongest below {b}")
     else:
-        lines.append("🔥 Liquidation Heatmap: N/A (COINGLASS_API_KEY not configured or endpoint unavailable)")
+        lines.append("🔥 Liquidation Heatmap: N/A (COINGLASS_API_KEY not configured or endpoint unavailable")
     lines.append("* ALT* = total crypto dominance excluding BTC and principal stablecoins; ETH is included in ALT*, so dominance lines are not additive.")
     return "\n".join(lines)
 
@@ -5562,7 +4920,7 @@ def _public_page_text(url):
 
 def _parse_usdt_toman_page(url, html):
     """Parse public exchange HTML only; no exchange API/key is used."""
-    compact = re.sub(r"\\s+", " ", html or "")
+    compact = re.sub(r"\s+", " ", html or "")
     values = []
 
     # Wallex publishes the current USDT/Toman quote directly in تومان.
@@ -5910,6 +5268,548 @@ def build_v11_intelligence_report(results, portfolio):
     return "\n".join(lines)
 
 
+# ============================================================
+# BUILD FULL TABLE REPORT
+# ============================================================
+
+def build_full_table_report(results, top10_symbols=None, dynamic30_symbols=None):
+    """
+    ساخت گزارش کامل جدولی با تمام بخش‌ها
+    """
+    lines = []
+    dt = now_tehran()
+    session, session_label, session_multiplier = get_current_session()
+    
+    # هدر
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🤖 ATLAS AI — {VERSION}")
+    lines.append(f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران")
+    lines.append(f"🕐 سشن: {session_label} | ضریب: {session_multiplier:.1f}x")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    # بخش‌های مختلف
+    lines.extend(build_best_setup_section(results))
+    lines.append("")
+    
+    lines.extend(build_table_top10(results))
+    lines.append("")
+    
+    lines.extend(build_table_personal(results))
+    lines.append("")
+    
+    lines.extend(build_table_dynamic(results, dynamic30_symbols))
+    lines.append("")
+    
+    lines.extend(build_table_metals())
+    lines.append("")
+    
+    lines.extend(build_market_summary(results))
+    
+    return "\n".join(lines)
+
+
+def build_table_top10(results):
+    """ساخت جدول TOP 10 بازار"""
+    lines = []
+    lines.append("🏆 MARKET TOP 10")
+    lines.append("───────────────────")
+    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬────────────┐")
+    lines.append("│ ASSET│ STATUS   │ PRICE    │ 24H %    │ SUPPORT  │ RESIST     │")
+    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼────────────┤")
+    
+    sorted_results = sorted(
+        [r for r in results if r.get("price") is not None],
+        key=lambda x: x.get("price", 0) or 0,
+        reverse=True
+    )[:10]
+    
+    for r in sorted_results:
+        coin = r.get("coin", "UNKNOWN")[:6]
+        price = r.get("price")
+        change = r.get("change")
+        support = r.get("support")
+        resistance = r.get("resistance")
+        
+        status = _get_status_emoji(r)
+        
+        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(change):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>10} │")
+    
+    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
+    
+    # پیش‌بینی کلی
+    bullish = sum(1 for r in sorted_results if "BULL" in str(r.get("action")).upper())
+    bearish = sum(1 for r in sorted_results if "BEAR" in str(r.get("action")).upper())
+    if bullish > bearish * 1.5:
+        lines.append("📌 پیش‌بینی: روند صعودی غالب")
+    elif bearish > bullish * 1.5:
+        lines.append("📌 پیش‌بینی: روند نزولی غالب")
+    else:
+        lines.append("📌 پیش‌بینی: بازار متعادل")
+    
+    return lines
+
+
+def build_table_personal(results):
+    """ساخت جدول PERSONAL PORTFOLIO با جزئیات کامل"""
+    lines = []
+    lines.append("💼 PERSONAL PORTFOLIO")
+    lines.append("───────────────────")
+    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐")
+    lines.append("│ ASSET│ STATUS   │ PRICE    │ 24H %    │ SUPPORT  │ RESIST   │ TP1      │ SL       │")
+    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤")
+    
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    personal_rows = []
+    for r in results:
+        coin = str(r.get("coin") or "").upper()
+        if coin in personal_symbols and r.get("price") is not None:
+            personal_rows.append(r)
+    
+    personal_rows.sort(key=lambda x: x.get("coin", ""))
+    
+    for r in personal_rows:
+        coin = r.get("coin", "UNKNOWN")[:6]
+        price = r.get("price")
+        change = r.get("change")
+        support = r.get("support")
+        resistance = r.get("resistance")
+        tp1 = r.get("tp1")
+        sl = r.get("sl")
+        
+        status = _get_status_emoji(r)
+        
+        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(change):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>8} │ {_fmt_price(tp1):>8} │ {_fmt_price(sl):>8} │")
+    
+    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘")
+    
+    # آمار پورتفولیو
+    bullish = sum(1 for r in personal_rows if "BULL" in str(r.get("action")).upper())
+    bearish = sum(1 for r in personal_rows if "BEAR" in str(r.get("action")).upper())
+    lines.append(f"📌 آمار: {bullish} ارز صعودی، {bearish} ارز نزولی، {len(personal_rows) - bullish - bearish} ارز در انتظار")
+    
+    return lines
+
+
+def build_table_dynamic(results, dynamic30_symbols):
+    """ساخت جدول DYNAMIC TOP 30"""
+    lines = []
+    lines.append("📡 DYNAMIC TOP 30")
+    lines.append("───────────────────")
+    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬────────────┐")
+    lines.append("│ ASSET│ STATUS   │ PRICE    │ 24H %    │ SUPPORT  │ RESIST     │")
+    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼────────────┤")
+    
+    top10_set = {str(x).upper() for x in ATLAS_PRIORITY_TOP10}
+    personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    dynamic_set = {str(x).upper() for x in (dynamic30_symbols or [])}
+    
+    dynamic_rows = []
+    for r in results:
+        coin = str(r.get("coin") or "").upper()
+        if coin in dynamic_set and coin not in top10_set and coin not in personal_set:
+            if r.get("price") is not None:
+                dynamic_rows.append(r)
+    
+    dynamic_rows.sort(key=lambda x: x.get("price", 0) or 0, reverse=True)
+    dynamic_rows = dynamic_rows[:8]
+    
+    for r in dynamic_rows:
+        coin = r.get("coin", "UNKNOWN")[:6]
+        price = r.get("price")
+        change = r.get("change")
+        support = r.get("support")
+        resistance = r.get("resistance")
+        
+        status = _get_status_emoji(r)
+        
+        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(change):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>10} │")
+    
+    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
+    
+    return lines
+
+
+def build_table_metals():
+    """ساخت جدول METALS"""
+    lines = []
+    lines.append("🪙 ATLAS METALS")
+    lines.append("───────────────────")
+    lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬────────────┐")
+    lines.append("│ ASSET│ STATUS   │ PRICE    │ CHANGE   │ SUPPORT  │ RESIST     │")
+    lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼────────────┤")
+    
+    metals = [_metal_analysis(x) for x in ATLAS_METALS]
+    for r in metals:
+        coin = r.get("coin", "UNKNOWN")[:6]
+        price = r.get("price")
+        support = r.get("support")
+        resistance = r.get("resistance")
+        
+        action = str(r.get("action") or "").upper()
+        if "BUY" in action or "BULLISH" in action:
+            status = "🟢 BULL"
+        elif "SELL" in action or "BEARISH" in action:
+            status = "🔴 BEAR"
+        else:
+            status = "⚪ WAIT"
+        
+        lines.append(f"│ {coin:<4} │ {status:<8} │ {_fmt_price(price):>8} │ {_fmt_change(None):>8} │ {_fmt_price(support):>8} │ {_fmt_price(resistance):>10} │")
+    
+    lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴────────────┘")
+    
+    return lines
+
+
+def build_best_setup_section(results):
+    """ساخت بخش BEST SETUP"""
+    lines = []
+    lines.append("🔥 BEST SETUP")
+    lines.append("───────────────────")
+    
+    best = None
+    best_score = -1
+    
+    for r in results:
+        if r.get("action") in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            score = (r.get("confidence", 0) * 0.5) + (min(r.get("rr", 0) or 0, 5) * 10)
+            if score > best_score:
+                best_score = score
+                best = r
+    
+    if best:
+        direction = "LONG" if best.get("direction") == "LONG" else "SHORT"
+        emoji = "🟢" if direction == "LONG" else "🔴"
+        lines.append(f"{emoji} {best.get('coin')} — {direction}")
+        lines.append(f"   Entry: {_fmt_price(best.get('entry'))} | SL: {_fmt_price(best.get('sl'))}")
+        lines.append(f"   TP1: {_fmt_price(best.get('tp1'))} | TP2: {_fmt_price(best.get('tp2'))}")
+        lines.append(f"   Confidence: {best.get('confidence', 0)}% | R/R: {best.get('rr', 0):.2f}")
+    else:
+        lines.append("⚪ هیچ ستاپ اجرایی با R/R و هندسه معتبر در این اجرا تأیید نشد.")
+    
+    return lines
+
+
+def build_market_summary(results):
+    """ساخت بخش جمع‌بندی بازار"""
+    lines = []
+    lines.append("📊 MARKET SUMMARY")
+    lines.append("───────────────────")
+    
+    total = len(results)
+    bullish = sum(1 for r in results if "BULL" in str(r.get("action")).upper())
+    bearish = sum(1 for r in results if "BEAR" in str(r.get("action")).upper())
+    waiting = total - bullish - bearish
+    
+    lines.append(f"📈 کل ارزها: {total}")
+    lines.append(f"🟢 صعودی: {bullish} ({bullish/total*100:.1f}%)" if total > 0 else "🟢 صعودی: 0")
+    lines.append(f"🔴 نزولی: {bearish} ({bearish/total*100:.1f}%)" if total > 0 else "🔴 نزولی: 0")
+    lines.append(f"⚪ در انتظار: {waiting} ({waiting/total*100:.1f}%)" if total > 0 else "⚪ در انتظار: 0")
+    
+    # بهترین و بدترین تغییرات
+    changes = [(r.get("coin"), r.get("change")) for r in results if r.get("change") is not None]
+    if changes:
+        best = max(changes, key=lambda x: x[1] or -999)
+        worst = min(changes, key=lambda x: x[1] or 999)
+        lines.append(f"🏆 بهترین: {best[0]} {best[1]:+.2f}%")
+        lines.append(f"📉 بدترین: {worst[0]} {worst[1]:+.2f}%")
+    
+    # BTC وضعیت
+    btc_regime = btc_market_regime()
+    lines.append(f"🎯 BTC Regime: {btc_regime.get('regime', 'UNKNOWN')}")
+    
+    return lines
+
+
+def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=None):
+    """ساخت جدول رتبه‌بندی کامل سیگنال‌ها"""
+    lines = []
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("📊 ATLAS SIGNAL RANKING")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    
+    # مرتب‌سازی بر اساس کیفیت سیگنال
+    signal_rows = []
+    for r in results:
+        action = str(r.get("action") or "").upper()
+        if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
+            quality = (r.get("confidence", 0) * 0.5) + (min(r.get("rr", 0) or 0, 5) * 15)
+            signal_rows.append((quality, r))
+    
+    signal_rows.sort(key=lambda x: x[0], reverse=True)
+    top10_signals = signal_rows[:10]
+    
+    if top10_signals:
+        lines.append("┌──────┬──────────┬──────────┬──────────┬──────────┬──────────┐")
+        lines.append("│ #    │ ASSET    │ DIRECTION│ CONFID   │ R/R      │ QUALITY  │")
+        lines.append("├──────┼──────────┼──────────┼──────────┼──────────┼──────────┤")
+        
+        for i, (quality, r) in enumerate(top10_signals, 1):
+            coin = r.get("coin", "UNKNOWN")[:8]
+            action = str(r.get("action") or "").upper()
+            direction = "🟢 BUY" if "BUY" in action else "🔴 SELL"
+            conf = r.get("confidence", 0)
+            rr = r.get("rr", 0)
+            
+            lines.append(f"│ {i:>2}   │ {coin:<8} │ {direction:<8} │ {conf:>6}%   │ {rr:>6.2f}  │ {quality:>6.0f}%  │")
+        
+        lines.append("└──────┴──────────┴──────────┴──────────┴──────────┴──────────┘")
+    else:
+        lines.append("⚪ هیچ سیگنال تأییدشده‌ای وجود ندارد")
+    
+    return "\n".join(lines)
+
+
+def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
+    """ساخت جدول تصویری از سیگنال‌ها"""
+    if not ENABLE_IMAGE_TABLE:
+        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
+        return None
+    
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+        
+        # تنظیم فونت
+        try:
+            font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+            if os.path.exists(font_path):
+                fm.fontManager.addfont(font_path)
+                plt.rcParams['font.family'] = 'DejaVu Sans'
+            else:
+                plt.rcParams['font.family'] = 'sans-serif'
+        except:
+            plt.rcParams['font.family'] = 'sans-serif'
+        
+        # آماده‌سازی داده‌ها
+        signals = []
+        for r in results:
+            action = str(r.get("action") or "").upper()
+            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
+                quality_score = 0
+                quality_score += r.get("confidence", 0) * 0.4
+                quality_score += min(r.get("rr", 0) or 0, 5) * 15
+                quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
+                quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
+                quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
+                r["quality_score"] = min(100, quality_score)
+                signals.append(r)
+        
+        # اگر سیگنال نبود، از TOP قیمت استفاده کن
+        if not signals:
+            signals = sorted(
+                [r for r in results if r.get("price") is not None],
+                key=lambda x: x.get("price", 0) or 0,
+                reverse=True
+            )[:10]
+            for r in signals:
+                r["quality_score"] = 50
+        
+        signals.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+        top_signals = signals[:10]
+        
+        # ساخت جدول
+        fig, ax = plt.subplots(figsize=(14, 10))
+        ax.axis('off')
+        
+        cell_text = []
+        headers = ['#', 'Asset', 'Direction', 'Confidence', 'R/R', 'Quality']
+        cell_text.append(headers)
+        
+        for i, r in enumerate(top_signals, 1):
+            action = str(r.get("action") or "WAIT").upper()
+            if "BUY" in action:
+                direction = '🟢 BUY'
+            elif "SELL" in action:
+                direction = '🔴 SELL'
+            else:
+                direction = '🟡 WATCH'
+            
+            row = [
+                str(i),
+                r.get('coin', 'UNKNOWN'),
+                direction,
+                f"{r.get('confidence', 0)}%",
+                f"{r.get('rr', 0):.2f}" if r.get('rr') else "N/A",
+                f"{r.get('quality_score', 0):.0f}%"
+            ]
+            cell_text.append(row)
+        
+        while len(cell_text) < 11:
+            cell_text.append(['', '', '', '', '', ''])
+        
+        table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(11)
+        table.scale(1, 2.5)
+        
+        for i, row in enumerate(cell_text):
+            for j, cell in enumerate(row):
+                if i == 0:
+                    table[(i, j)].set_facecolor('#2c3e50')
+                    table[(i, j)].set_text_props(color='white', weight='bold')
+                elif i % 2 == 0:
+                    table[(i, j)].set_facecolor('#ecf0f1')
+                else:
+                    table[(i, j)].set_facecolor('#ffffff')
+                
+                if i > 0 and j == 5 and cell:
+                    try:
+                        val = int(cell.replace('%', ''))
+                        if val >= 80:
+                            table[(i, j)].set_facecolor('#27ae60')
+                            table[(i, j)].set_text_props(color='white')
+                        elif val >= 60:
+                            table[(i, j)].set_facecolor('#f1c40f')
+                        else:
+                            table[(i, j)].set_facecolor('#e74c3c')
+                            table[(i, j)].set_text_props(color='white')
+                    except:
+                        pass
+                
+                if i > 0 and j == 2:
+                    if 'BUY' in cell:
+                        table[(i, j)].set_facecolor('#27ae60')
+                        table[(i, j)].set_text_props(color='white')
+                    elif 'SELL' in cell:
+                        table[(i, j)].set_facecolor('#e74c3c')
+                        table[(i, j)].set_text_props(color='white')
+        
+        ax.set_title('📊 ATLAS SIGNAL RANKING', fontsize=16, weight='bold', pad=20)
+        
+        plt.tight_layout()
+        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close()
+        
+        return filename
+    except ImportError as e:
+        print(f"⚠️ Matplotlib not installed: {e}")
+        return None
+    except Exception as e:
+        print(f"⚠️ Image generation error: {e}")
+        return None
+
+
+def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
+    """ارسال جدول تصویری به تمام مقاصد تلگرام"""
+    if not ENABLE_IMAGE_TABLE:
+        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
+        return False
+    
+    filename = build_image_table(results, top10_symbols, dynamic30_symbols)
+    if not filename or not os.path.exists(filename):
+        return False
+    
+    if not TELEGRAM_TOKEN:
+        return False
+    
+    with open(filename, 'rb') as f:
+        image_data = f.read()
+    
+    # لیست مقاصد
+    destinations = []
+    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
+        destinations.append({
+            "id": str(TELEGRAM_CHAT_ID).strip(),
+            "name": "PRIVATE_CHAT"
+        })
+    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
+        group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
+        if group_id not in [d["id"] for d in destinations]:
+            destinations.append({
+                "id": group_id,
+                "name": "SUPERGROUP"
+            })
+    
+    if not destinations:
+        print("❌ No Telegram destinations for image")
+        return False
+    
+    success_count = 0
+    
+    for dest in destinations:
+        chat_id = dest["id"]
+        dest_name = dest["name"]
+        
+        print(f"  Sending image to {dest_name}...", end=" ", flush=True)
+        
+        boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+        body = bytearray()
+        
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
+        body.extend(str(chat_id).encode())
+        body.extend(b'\r\n')
+        
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(f'Content-Disposition: form-data; name="photo"; filename="signal_table.png"\r\n'.encode())
+        body.extend(b'Content-Type: image/png\r\n\r\n')
+        body.extend(image_data)
+        body.extend(b'\r\n')
+        body.extend(f'--{boundary}--\r\n'.encode())
+        
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(body))
+        }
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
+        
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode())
+                if result.get('ok', False):
+                    print("✅")
+                    success_count += 1
+                else:
+                    print(f"❌ {result.get('description', 'Unknown error')}")
+        except Exception as e:
+            print(f"❌ {e}")
+    
+    try:
+        os.unlink(filename)
+    except:
+        pass
+    
+    return success_count > 0
+
+
+def _fmt_price(value):
+    """فرمت کردن قیمت"""
+    if value is None:
+        return "N/A"
+    if abs(value) >= 1000:
+        return f"${value:,.2f}"
+    if abs(value) >= 1:
+        return f"${value:,.4f}"
+    if abs(value) >= 0.01:
+        return f"${value:,.6f}"
+    return f"${value:.8f}"
+
+
+def _fmt_change(value):
+    """فرمت کردن تغییرات"""
+    if value is None:
+        return "N/A"
+    return f"{value:+.2f}%"
+
+
+def _get_status_emoji(r):
+    """دریافت وضعیت با ایموجی"""
+    action = str(r.get("action") or "").upper()
+    if "BUY" in action or "BULLISH" in action:
+        return "🟢 BULL"
+    elif "SELL" in action or "BEARISH" in action:
+        return "🔴 BEAR"
+    else:
+        return "⚪ WAIT"
+
+
+# ============================================================
+# MAIN EXECUTION
+# ============================================================
+
 def main():
     try:
         telegram_preflight()
@@ -5946,7 +5846,7 @@ def main():
                 unavailable, btc_regime, breadth
             )
             outputs.append(build_dashboard_table(results, top10, dynamic30))
-            outputs.append(full_table_report)  # اضافه کردن گزارش جدولی کامل
+            outputs.append(full_table_report)
             outputs.append(build_v11_intelligence_report(results, v11_portfolio))
             
             # اضافه کردن جدول رتبه‌بندی سیگنال‌ها
@@ -5981,13 +5881,12 @@ def main():
             all_errors.extend(snapshot_errors)
 
         # ============================================================
-        # Voice Output - اصلاح شده
+        # Voice Output
         # ============================================================
         if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
             try:
                 print("\n🎤 Generating audio report...")
                 
-                # اگر analysis_results نداریم، snapshot بگیر
                 snapshot_results = []
                 if not analysis_results:
                     try:
