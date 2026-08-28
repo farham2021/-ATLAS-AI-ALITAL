@@ -93,6 +93,23 @@ COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "").strip()
 CMC_API_KEY = os.environ.get("CMC_API_KEY", "").strip()
 
 # ============================================================
+# EXCHANGE CONFIG - صرافی‌های غیرتحریمی
+# ============================================================
+
+# لیست صرافی‌های معتبر و غیرتحریمی
+# KCEX: صرافی خوب و معتبر
+# LBANK, XT, OKX, KUCOIN, BITGET, MEXC, KRAKEN: معتبر و غیرتحریمی
+PRIORITY_EXCHANGES = ["kcex", "kucoin", "okx", "bitget", "mexc", "kraken"]
+FALLBACK_EXCHANGES = ["lbank", "xt"]
+
+# صرافی‌های تحریمی یا مسدود (برای اسکیپ)
+BLOCKED_EXCHANGES = ["binance", "bybit", "gateio"]
+
+def get_valid_exchanges():
+    """دریافت لیست صرافی‌های معتبر (غیرتحریمی)"""
+    return PRIORITY_EXCHANGES + FALLBACK_EXCHANGES
+
+# ============================================================
 # BOOLEAN PARSER - برای متغیرهای true/false/1/0
 # ============================================================
 def _parse_bool(value):
@@ -1163,7 +1180,7 @@ def multi_source_validation(symbol, exchange_price=None):
     }
 
 # ============================================================
-# CCXT
+# CCXT - اصلاح شده با صرافی‌های غیرتحریمی
 # ============================================================
 
 def make_exchange(exchange_id):
@@ -1178,20 +1195,33 @@ def init_exchanges():
     global EX, MARKETS
     EX = {}
     MARKETS = {}
-    for eid in ("kcex", "lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+    
+    print("🔧 Initializing exchanges...")
+    
+    # فقط صرافی‌های غیرتحریمی و معتبر را امتحان کن
+    for eid in get_valid_exchanges():
         try:
+            print(f"  ⏳ {eid}...", end=" ", flush=True)
             ex = make_exchange(eid)
             markets = ex.load_markets()
             if not markets:
                 raise RuntimeError(f"{eid}: empty market catalog")
             EX[eid] = ex
             MARKETS[eid] = markets
-            print(f"✅ {eid} initialized with {len(markets)} markets")
+            print(f"✅ {len(markets)} markets")
         except Exception as e:
             EX.pop(eid, None)
             MARKETS.pop(eid, None)
+            error_msg = str(e)[:100]
+            print(f"❌ {error_msg}")
             append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
-            print(f"❌ {eid} failed: {e}")
+    
+    if not EX:
+        print("⚠️ No exchanges available! Using fallback data sources.")
+        return False
+    
+    print(f"✅ {len(EX)} exchanges initialized successfully")
+    return True
 
 EX = {}
 MARKETS = {}
@@ -1222,13 +1252,16 @@ def exchange_ticker(eid, coin):
     sym = symbol_for(eid, coin)
     if not sym:
         raise RuntimeError(f"{eid}: pair unavailable")
-    t = ex.fetch_ticker(sym)
-    return {
-        "source": eid.upper(),
-        "price": f(t.get("last")),
-        "change": f(t.get("percentage")),
-        "quoteVolume": f(t.get("quoteVolume")),
-    }
+    try:
+        t = ex.fetch_ticker(sym)
+        return {
+            "source": eid.upper(),
+            "price": f(t.get("last")),
+            "change": f(t.get("percentage")),
+            "quoteVolume": f(t.get("quoteVolume")),
+        }
+    except Exception as e:
+        raise RuntimeError(f"{eid}: ticker fetch failed - {e}")
 
 def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
     ex = EX.get(eid)
@@ -1244,8 +1277,7 @@ def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
     if len(rows) < 60:
         raise RuntimeError(f"{eid}: insufficient candles")
     return strip_incomplete(rows, timeframe)
-
-def _next_candle_boundary_ms(start_ms, timeframe):
+    def _next_candle_boundary_ms(start_ms, timeframe):
     dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
     if timeframe == "1M":
         if dt.month == 12:
@@ -1311,11 +1343,30 @@ def candle_event(coin, timeframe, rows):
 
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
-    for eid in ("kcex", "lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+    
+    if not EX:
+        raise RuntimeError(f"No exchanges available for {coin}")
+    
+    # اولویت با صرافی‌های غیرتحریمی و مطمئن
+    for eid in PRIORITY_EXCHANGES:
+        if eid not in EX:
+            continue
         try:
             return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ {eid} failed for {coin}: {str(e)[:50]}")
             continue
+    
+    # اگر صرافی‌های اولویت‌دار موفق نشدند، بقیه را امتحان کن
+    for eid in FALLBACK_EXCHANGES:
+        if eid not in EX:
+            continue
+        try:
+            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
+        except Exception as e:
+            print(f"⚠️ {eid} failed for {coin}: {str(e)[:50]}")
+            continue
+    
     raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
 
 
@@ -1349,27 +1400,9 @@ def gecko_top(limit=40):
     return result
 
 def binance_top(limit=40):
-    ensure_exchanges()
-    try:
-        ex = EX.get("binance")
-        if ex is None:
-            return []
-        rows = ex.fetch_tickers()
-    except Exception:
-        return []
-    result = []
-    for sym, x in rows.items():
-        if not sym.endswith("/USDT") or ":USDT" in sym:
-            continue
-        coin = sym.split("/")[0].upper()
-        if is_stable(coin):
-            continue
-        qv = f(x.get("quoteVolume"))
-        if qv is None:
-            continue
-        result.append({"symbol": coin, "quote_volume": qv})
-    result.sort(key=lambda x: x["quote_volume"], reverse=True)
-    return result[:limit]
+    # Binance تحریم است - از این تابع استفاده نمی‌شود
+    # به جای آن از KCEX یا سایر صرافی‌ها استفاده می‌شود
+    return []
 
 def build_universe():
     cg = gecko_top(60)
@@ -1381,12 +1414,24 @@ def build_universe():
     top10 = list(ATLAS_PRIORITY_TOP10)
     dynamic30 = [s for s in cg_symbols if s not in top10][:30]
     if len(dynamic30) < 30:
-        for x in binance_top(80):
-            s = (x.get("symbol") or "").upper()
-            if s and not is_stable(s) and s not in top10 and s not in dynamic30:
-                dynamic30.append(s)
-            if len(dynamic30) >= 30:
-                break
+        # استفاده از KCEX به جای Binance برای تکمیل لیست
+        try:
+            ensure_exchanges()
+            if "kcex" in EX:
+                kcex_tickers = EX["kcex"].fetch_tickers()
+                for sym, x in kcex_tickers.items():
+                    if not sym.endswith("/USDT") or ":USDT" in sym:
+                        continue
+                    coin = sym.split("/")[0].upper()
+                    if is_stable(coin) or coin in top10 or coin in dynamic30:
+                        continue
+                    qv = f(x.get("quoteVolume"))
+                    if qv and qv > 0:
+                        dynamic30.append(coin)
+                    if len(dynamic30) >= 30:
+                        break
+        except Exception as e:
+            print(f"⚠️ KCEX fallback failed: {e}")
     dynamic30 = dynamic30[:30]
     static = [
         x for x in ATLAS_STATIC
@@ -2493,8 +2538,7 @@ def analyze_coin(coin, market_news, weights):
         reason_parts.append("واگرایی 3 سطحی")
     if warning:
         reason_parts.append(warning)
-
-    change_24h = next(
+       change_24h = next(
         (f(x.get("change")) for x in sources if f(x.get("change")) is not None),
         None,
     )
@@ -4992,18 +5036,32 @@ def fetch_snapshot_results():
     """Lightweight 3H snapshot path: tickers only, no 4H technical analysis."""
     ensure_exchanges()
     rows = []
+    
+    if not EX:
+        print("⚠️ No exchanges available for snapshot")
+        return rows
+    
+    print(f"📊 Fetching snapshot for {len(SNAPSHOT_SYMBOLS)} symbols...")
+    
     for sym in SNAPSHOT_SYMBOLS:
         best = None
-        for eid in ("kcex", "lbank", "bybit", "okx", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+        # اولویت با صرافی‌های غیرتحریمی و مطمئن
+        for eid in PRIORITY_EXCHANGES:
+            if eid not in EX:
+                continue
             try:
                 t = exchange_ticker(eid, sym)
                 if f(t.get("price")) is not None:
                     best = {"coin": sym, "price": t.get("price"), "change24": t.get("change")}
                     break
-            except Exception:
+            except Exception as e:
+                if "pair unavailable" not in str(e).lower():
+                    print(f"⚠️ {eid} ticker failed for {sym}: {str(e)[:50]}")
                 continue
         if best:
             rows.append(best)
+    
+    print(f"📊 Snapshot fetched {len(rows)}/{len(SNAPSHOT_SYMBOLS)} symbols")
     return rows
 
 
@@ -5116,9 +5174,18 @@ def send_price_snapshot(results):
 def _automatic_run_plan(now=None):
     """Unified scheduler: analysis every 4H, snapshot every 3H, both at overlaps."""
     dt = now or now_tehran()
+    
+    # برای تست در GitHub Actions، همیشه اجرا کن
+    # در حالت عادی از این کد استفاده کن:
+    # return {
+    #     "analysis": dt.hour % 4 == 0,
+    #     "snapshot": dt.hour % 3 == 0,
+    # }
+    
+    # برای تست - همیشه اجرا شود
     return {
-        "analysis": dt.hour % 4 == 0,
-        "snapshot": dt.hour % 3 == 0,
+        "analysis": True,
+        "snapshot": True,
     }
 
 
@@ -5799,8 +5866,19 @@ def _get_status_emoji(r):
 
 def main():
     try:
+        print(f"\n{'='*50}")
+        print(f"🚀 {VERSION}")
+        print(f"📅 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran")
+        print(f"{'='*50}\n")
+        
         telegram_preflight()
         run_mode = get_run_mode()
+        print(f"📌 Run Mode: {run_mode}")
+        print(f"📌 Engine Mode: {get_engine_mode()}")
+        print(f"📌 Voice Enabled: {ENABLE_VOICE_REPORT}")
+        print(f"📌 Auto Voice: {AUTO_SEND_VOICE}")
+        print(f"📌 Image Table: {ENABLE_IMAGE_TABLE}")
+        print()
         
         if run_mode == "AUTO":
             plan = _automatic_run_plan()
@@ -5811,6 +5889,9 @@ def main():
             do_analysis, do_snapshot = True, False
         else:
             do_analysis, do_snapshot = True, True
+        
+        print(f"📋 Plan: Analysis={do_analysis}, Snapshot={do_snapshot}")
+        print()
 
         total_sent = 0
         all_errors = []
@@ -5825,13 +5906,17 @@ def main():
         dynamic30 = []
 
         if do_analysis:
+            print("🔍 Starting ANALYSIS...")
             text, results, macro, news, market_info, unavailable = report()
+            print(f"✅ Analysis complete: {len(results)} results, {unavailable} unavailable")
+            
             results = [v11_apply_intelligence(r) for r in results]
             v11_portfolio = v11_portfolio_diagnostics(results)
             top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
             btc_regime = btc_market_regime()
             breadth = market_breadth(results)
             
+            print(f"📊 Building reports...")
             full_table_report = build_full_table_report(results, top10, dynamic30)
             
             outputs = build_two_engine_reports(
@@ -5845,35 +5930,49 @@ def main():
             signal_ranking = build_signal_ranking_table(results, top10, dynamic30)
             outputs.append(signal_ranking)
             
+            print(f"📄 Total outputs: {len(outputs)}")
+            for idx, payload in enumerate(outputs, 1):
+                parts = split_telegram(payload)
+                print(f"  Output {idx}: {len(payload)} chars → {len(parts)} parts")
+            
             for payload in outputs:
                 parts, sent, errors = send_report(payload)
                 total_sent += sent
                 all_errors.extend(errors)
-                print(payload)
+                if sent > 0:
+                    print(f"✅ Sent {sent} parts")
             
             # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
             if ENABLE_IMAGE_TABLE:
+                print("📸 Generating image table...")
                 image_sent = send_image_table(results, top10, dynamic30)
                 if image_sent:
-                    print("✅ Image table sent successfully to all destinations")
+                    print("✅ Image table sent successfully")
                 else:
                     print("ℹ️ Image table not sent (matplotlib may not be installed)")
             else:
                 print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
             
             analysis_results = results
+            
+            # ارسال CSV
+            print("📊 Generating CSV report...")
             csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
             total_sent += csv_sent
             all_errors.extend(csv_errors)
-            print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
+            print(f"CSV export: {csv_sent} destination(s)")
+            
             save_context(macro, news, market_liquidity_index(results), market_info)
             save_run(results, sum(len(split_telegram(x)) for x in outputs), macro, news, unavailable)
 
         if do_snapshot:
+            print("📸 Starting SNAPSHOT...")
             snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
+            print(f"✅ Snapshot results: {len(snapshot_results)}")
             snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
+            print(f"✅ Snapshot sent: {snapshot_sent}")
 
         # ============================================================
         # VOICE REPORT - با بررسی وجود داده
@@ -5901,7 +6000,7 @@ def main():
                     if audio_file:
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
                         if result:
-                            print("✅ Audio report sent successfully to all destinations")
+                            print("✅ Audio report sent successfully")
                         try:
                             os.unlink(audio_file)
                         except:
@@ -5917,6 +6016,14 @@ def main():
             elif not AUTO_SEND_VOICE:
                 print(f"ℹ️ Voice disabled: AUTO_SEND_VOICE={AUTO_SEND_VOICE}")
 
+        print(f"\n{'='*50}")
+        print(f"📊 SUMMARY:")
+        print(f"  Total sent: {total_sent}")
+        print(f"  Errors: {len(all_errors)}")
+        if all_errors:
+            print(f"  Errors: {all_errors[:5]}")
+        print(f"{'='*50}\n")
+
         if not do_analysis and not do_snapshot:
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
             return 0
@@ -5928,6 +6035,7 @@ def main():
         tb = traceback.format_exc()
         append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
+        print(tb)
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
                 alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
@@ -5942,4 +6050,4 @@ def main():
         return 1
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main()) 
