@@ -1,5 +1,6 @@
 # ATLAS AI v11.1 — Python Dependencies
 # =====================================
+# Python 3.9+ required
 
 # Core
 ccxt>=4.1.0
@@ -17,7 +18,7 @@ urllib3>=2.0.0
 lxml>=4.9.0
 beautifulsoup4>=4.12.0
 
-# Visualization (Optional)
+# Visualization (Optional - for image tables)
 matplotlib>=3.7.0
 pillow>=10.0.0
 
@@ -25,23 +26,19 @@ pillow>=10.0.0
 gTTS>=2.3.0
 edge-tts>=6.0.0
 
-# Testing
+# Testing (Development only)
 pytest>=7.4.0
 pytest-cov>=4.1.0
 pytest-timeout>=2.1.0
 pytest-mock>=3.11.0
-unittest2>=1.1.0
 
-# Code Quality
+# Code Quality (Development only)
 black>=23.0.0
 flake8>=6.0.0
 mypy>=1.0.0
 
-# Database
-sqlite3>=3.0.0  # Built-in
-
-# Environment
-python-dotenv>=1.0.0
-
-# Note: Some dependencies may vary by Python version.
-# Python 3.9+ recommended.
+# =====================================
+# Note: 
+# - sqlite3 is a built-in module, no installation needed
+# - unittest is a built-in module, no installation needed
+# - Python 3.9+ includes sqlite3 by default
