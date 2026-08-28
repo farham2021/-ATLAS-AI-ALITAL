@@ -419,57 +419,107 @@ def generate_audio_report(results, news=None, btc_regime=None, filename="audio_r
 
 
 def send_audio_report(audio_file, caption=None):
-    """ارسال گزارش صوتی به تلگرام - Binary-safe Multipart"""
+    """ارسال گزارش صوتی به تمام مقاصد تلگرام (چت خصوصی + سوپرگروه)"""
     if not os.path.exists(audio_file):
+        print(f"❌ Audio file not found: {audio_file}")
         return False
     if not TELEGRAM_TOKEN:
+        print("❌ TELEGRAM_TOKEN not set")
         return False
     if not AUTO_SEND_VOICE:
+        print("ℹ️ AUTO_SEND_VOICE is disabled")
         return False
     
     with open(audio_file, 'rb') as f:
         audio_data = f.read()
     
-    boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
-    body = bytearray()
+    # لیست مقاصد
+    destinations = []
+    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
+        destinations.append({
+            "id": str(TELEGRAM_CHAT_ID).strip(),
+            "name": "PRIVATE_CHAT"
+        })
+        print(f"✅ Audio destination: PRIVATE_CHAT ({TELEGRAM_CHAT_ID})")
     
-    # chat_id
-    body.extend(f'--{boundary}\r\n'.encode())
-    body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
-    chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
-    if chat_id:
-        body.extend(str(chat_id).encode())
-    body.extend(b'\r\n')
+    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
+        group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
+        # جلوگیری از ارسال تکراری
+        if group_id not in [d["id"] for d in destinations]:
+            destinations.append({
+                "id": group_id,
+                "name": "SUPERGROUP"
+            })
+            print(f"✅ Audio destination: SUPERGROUP ({group_id})")
+        else:
+            print(f"⚠️ SUPERGROUP already in destinations")
     
-    # caption
-    if caption:
-        body.extend(f'--{boundary}\r\n'.encode())
-        body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
-        body.extend(caption.encode('utf-8'))
-        body.extend(b'\r\n')
-    
-    # audio (بایت‌های خام)
-    body.extend(f'--{boundary}\r\n'.encode())
-    body.extend(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"\r\n'.encode())
-    body.extend(b'Content-Type: audio/mpeg\r\n\r\n')
-    body.extend(audio_data)
-    body.extend(b'\r\n')
-    body.extend(f'--{boundary}--\r\n'.encode())
-    
-    headers = {
-        'Content-Type': f'multipart/form-data; boundary={boundary}',
-        'Content-Length': str(len(body))
-    }
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
-    req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return result.get('ok', False)
-    except Exception as e:
-        print(f"❌ Audio send error: {e}")
+    if not destinations:
+        print("❌ No Telegram destinations configured for audio")
         return False
+    
+    print(f"🎤 Sending audio to {len(destinations)} destination(s)")
+    success_count = 0
+    
+    for dest in destinations:
+        chat_id = dest["id"]
+        dest_name = dest["name"]
+        
+        print(f"  Sending audio to {dest_name}...", end=" ", flush=True)
+        
+        boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+        body = bytearray()
+        
+        # chat_id
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
+        body.extend(str(chat_id).encode())
+        body.extend(b'\r\n')
+        
+        # caption
+        if caption:
+            body.extend(f'--{boundary}\r\n'.encode())
+            body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
+            body.extend(caption.encode('utf-8'))
+            body.extend(b'\r\n')
+        
+        # audio (بایت‌های خام)
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"\r\n'.encode())
+        body.extend(b'Content-Type: audio/mpeg\r\n\r\n')
+        body.extend(audio_data)
+        body.extend(b'\r\n')
+        body.extend(f'--{boundary}--\r\n'.encode())
+        
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(body))
+        }
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+        req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
+        
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if result.get('ok', False):
+                    print("✅")
+                    success_count += 1
+                else:
+                    error_msg = result.get('description', 'Unknown error')
+                    print(f"❌ {error_msg}")
+        except urllib.error.HTTPError as e:
+            print(f"❌ HTTP {e.code}: {e.reason}")
+        except Exception as e:
+            print(f"❌ {e}")
+    
+    if success_count > 0:
+        print(f"✅ Audio sent to {success_count}/{len(destinations)} destinations")
+    else:
+        print(f"❌ Audio failed to all {len(destinations)} destinations")
+    
+    return success_count > 0
+
 
 # ============================================================
 # SIGNAL RANKING TABLE
@@ -3662,39 +3712,65 @@ def send_report(text):
     report_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     init_sqlite()
     destinations = []
-    if TELEGRAM_CHAT_ID:
+    
+    # ===== DEBUG =====
+    print(f"🔍 TELEGRAM_CHAT_ID: '{TELEGRAM_CHAT_ID}'")
+    print(f"🔍 TELEGRAM_GROUP_CHAT_ID: '{TELEGRAM_GROUP_CHAT_ID}'")
+    # =================
+    
+    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
+        chat_id_str = str(TELEGRAM_CHAT_ID).strip()
         destinations.append({
-            "id": TELEGRAM_CHAT_ID,
+            "id": chat_id_str,
             "name": "PRIVATE_CHAT",
             "delay": TELEGRAM_PRIVATE_DELAY
         })
-    if TELEGRAM_GROUP_CHAT_ID and TELEGRAM_GROUP_CHAT_ID not in [d["id"] for d in destinations]:
-        destinations.append({
-            "id": TELEGRAM_GROUP_CHAT_ID,
-            "name": "SUPERGROUP",
-            "delay": TELEGRAM_GROUP_DELAY
-        })
+        print(f"✅ Added PRIVATE_CHAT: {chat_id_str}")
+    else:
+        print("⚠️ TELEGRAM_CHAT_ID is empty")
+    
+    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
+        group_id_str = str(TELEGRAM_GROUP_CHAT_ID).strip()
+        existing_ids = [d["id"] for d in destinations]
+        if group_id_str not in existing_ids:
+            destinations.append({
+                "id": group_id_str,
+                "name": "SUPERGROUP",
+                "delay": TELEGRAM_GROUP_DELAY
+            })
+            print(f"✅ Added SUPERGROUP: {group_id_str}")
+        else:
+            print(f"⚠️ SUPERGROUP already in destinations: {group_id_str}")
+    else:
+        print(f"⚠️ TELEGRAM_GROUP_CHAT_ID is empty or invalid: '{TELEGRAM_GROUP_CHAT_ID}'")
+    
     if not destinations:
         msg = "No Telegram destination configured"
         append_changelog("TELEGRAM", None, None, msg)
         return len(parts), 0, [msg]
+    
     sent = 0
     errors = []
     print(f"\n📤 Sending report to {len(destinations)} destination(s)")
+    
     for dest in destinations:
         chat_id = dest["id"]
         dest_name = dest["name"]
         delay = dest["delay"]
+        
         with sqlite_conn() as c:
             already = c.execute(
                 "select 1 from telegram_sent_reports where report_hash=? and destination=?",
                 (report_hash, chat_id),
             ).fetchone()
+        
         if already:
             print(f"⏭️ Skipping {dest_name}: duplicate report detected")
             continue
+        
         print(f"📤 Sending {len(parts)} parts to {dest_name}...")
         dest_success = True
+        
         for i, part in enumerate(parts, 1):
             print(f"  Part {i}/{len(parts)}...", end=" ", flush=True)
             success = send_with_retry(chat_id, part)
@@ -3709,6 +3785,7 @@ def send_report(text):
             if i < len(parts):
                 actual_delay = delay + random.uniform(0, 0.5)
                 time.sleep(actual_delay)
+        
         if dest_success:
             with sqlite_conn() as c:
                 c.execute(
@@ -3718,6 +3795,7 @@ def send_report(text):
             print(f"✅ All {len(parts)} parts sent to {dest_name}")
         else:
             print(f"❌ Failed to send all parts to {dest_name}")
+    
     return len(parts), sent, errors
 
 
