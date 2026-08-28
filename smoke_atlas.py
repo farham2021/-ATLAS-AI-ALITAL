@@ -30,6 +30,8 @@ required = [
     "generate_voice_summary", "text_to_speech_persian", "generate_audio_report", "send_audio_report",
     # Session functions
     "get_current_session",
+    # Invalidation & No-Trade functions
+    "SignalLifecycle", "InvalidationEngine", "NoTradeEngine", "ContradictionDetector",
 ]
 missing = [x for x in required if x not in funcs]
 if missing:
@@ -82,12 +84,17 @@ checks = {
     # New confidence and volume ratio checks
     "min confidence 55": "MIN_CONFIDENCE = float(os.environ.get(\"ATLAS_MIN_CONFIDENCE\", \"55\"))" in s,
     "min volume ratio 0.60": "MIN_VOLUME_RATIO = float(os.environ.get(\"ATLAS_MIN_VOLUME_RATIO\", \"0.60\"))" in s,
+    # Invalidation & No-Trade checks
+    "signal lifecycle": "SignalLifecycle" in s and "create_signal" in s and "invalidate_signal" in s,
+    "no-trade engine": "NoTradeEngine" in s and "should_trade" in s,
+    "contradiction detector": "ContradictionDetector" in s and "HIGH_CONTRADICTION" in s,
+    "signal id in asset block": "signal_id" in s and "🆔 Signal:" in s,
 }
 for name, ok in checks.items():
     if not ok:
         fail(name)
 
 compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot + voice + session smoke test")
+print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot + voice + session + invalidation smoke test")
 for name in checks:
     print("  OK:", name)
