@@ -444,15 +444,12 @@ def send_audio_report(audio_file, caption=None):
     
     if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
         group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
-        # جلوگیری از ارسال تکراری
         if group_id not in [d["id"] for d in destinations]:
             destinations.append({
                 "id": group_id,
                 "name": "SUPERGROUP"
             })
             print(f"✅ Audio destination: SUPERGROUP ({group_id})")
-        else:
-            print(f"⚠️ SUPERGROUP already in destinations")
     
     if not destinations:
         print("❌ No Telegram destinations configured for audio")
@@ -470,20 +467,17 @@ def send_audio_report(audio_file, caption=None):
         boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
         body = bytearray()
         
-        # chat_id
         body.extend(f'--{boundary}\r\n'.encode())
         body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
         body.extend(str(chat_id).encode())
         body.extend(b'\r\n')
         
-        # caption
         if caption:
             body.extend(f'--{boundary}\r\n'.encode())
             body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
             body.extend(caption.encode('utf-8'))
             body.extend(b'\r\n')
         
-        # audio (بایت‌های خام)
         body.extend(f'--{boundary}\r\n'.encode())
         body.extend(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"\r\n'.encode())
         body.extend(b'Content-Type: audio/mpeg\r\n\r\n')
@@ -522,86 +516,154 @@ def send_audio_report(audio_file, caption=None):
 
 
 # ============================================================
-# SIGNAL RANKING TABLE
+# SIGNAL RANKING TABLE - نسخه کامل و همیشه پر
 # ============================================================
 
 def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=None):
     """
-    ساخت جدول رتبه‌بندی سیگنال‌ها با فرمت Telegram
-    شامل: TOP 10 اجرایی + TOP 5 فرصت‌های پتانسیل‌دار
+    ساخت جدول رتبه‌بندی کامل با:
+    1. TOP 10 ارز برتر (بر اساس قیمت/مارکت‌کپ)
+    2. پورتفولیوی شخصی
+    3. TOP 5 سیگنال‌های خرید/فروش
     """
-    # فیلتر کردن سیگنال‌های اجرایی
-    executable = []
-    for r in results:
-        action = str(r.get("action") or "").upper()
-        if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-            # محاسبه امتیاز کیفیت
-            quality_score = 0
-            quality_score += r.get("confidence", 0) * 0.4
-            quality_score += min(r.get("rr", 0) or 0, 5) * 15
-            quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
-            quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
-            quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
-            r["quality_score"] = min(100, quality_score)
-            executable.append(r)
-    
-    # مرتب‌سازی بر اساس کیفیت
-    executable.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-    
-    # TOP 10 اجرایی
-    top10_exec = executable[:10]
-    
-    # TOP 5 فرصت‌های پتانسیل‌دار (از Dynamic 30)
-    opportunities = []
-    dynamic_set = {str(x).upper() for x in (dynamic30_symbols or [])}
-    for r in results:
-        coin = str(r.get("coin") or "").upper()
-        if coin in dynamic_set:
-            if r.get("action") in ("BULLISH WATCH", "BEARISH WATCH"):
-                # امتیاز فرصت
-                opp_score = r.get("confidence", 0) * 0.5
-                opp_score += min(r.get("rr", 0) or 0, 3) * 10
-                opp_score += r.get("liquidity_score", 0) * 0.1
-                r["opp_score"] = opp_score
-                opportunities.append(r)
-    
-    opportunities.sort(key=lambda x: x.get("opp_score", 0), reverse=True)
-    top5_opp = opportunities[:5]
-    
-    # ساخت جدول
     lines = []
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("📊 ATLAS SIGNAL RANKING")
     lines.append("━━━━━━━━━━━━━━━━━━")
     
-    # TOP 10 اجرایی
+    # ===== بخش 1: TOP 10 ارز برتر =====
     lines.append("")
-    lines.append("🎯 TOP 10 EXECUTABLE SIGNALS")
+    lines.append("🏆 TOP 10 MARKET")
     lines.append("───────────────────")
-    if top10_exec:
-        for i, r in enumerate(top10_exec, 1):
+    
+    # مرتب‌سازی بر اساس قیمت (به عنوان جایگزین مارکت‌کپ)
+    sorted_by_price = sorted(
+        [r for r in results if r.get("price") is not None],
+        key=lambda x: x.get("price", 0) or 0,
+        reverse=True
+    )[:10]
+    
+    if sorted_by_price:
+        for i, r in enumerate(sorted_by_price, 1):
             coin = r.get("coin", "UNKNOWN")
-            direction = "🟢 BUY" if r.get("direction") == "LONG" else "🔴 SELL"
+            price = r.get("price")
+            change = r.get("change")
+            action = str(r.get("action") or "WAIT").upper()
+            
+            if "BUY" in action:
+                status = "🟢 BUY"
+            elif "SELL" in action:
+                status = "🔴 SELL"
+            elif "WATCH" in action:
+                status = "🟡 WATCH"
+            else:
+                status = "⚪ HOLD"
+            
+            price_str = f"${price:,.2f}" if price else "N/A"
+            change_str = f"{change:+.2f}%" if change is not None else "N/A"
+            lines.append(f"{i:2}. {coin:<6} {price_str:>12} | {change_str:>8} | {status}")
+    else:
+        lines.append("⚪ داده‌ای برای نمایش وجود ندارد")
+    
+    # ===== بخش 2: پورتفولیوی شخصی =====
+    lines.append("")
+    lines.append("💼 PERSONAL PORTFOLIO")
+    lines.append("───────────────────")
+    
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    personal_rows = []
+    for r in results:
+        coin = str(r.get("coin") or "").upper()
+        if coin in personal_symbols and r.get("price") is not None:
+            personal_rows.append(r)
+    
+    if personal_rows:
+        # مرتب‌سازی بر اساس نام
+        personal_rows.sort(key=lambda x: x.get("coin", ""))
+        for i, r in enumerate(personal_rows, 1):
+            coin = r.get("coin", "UNKNOWN")
+            price = r.get("price")
+            change = r.get("change")
+            action = str(r.get("action") or "WAIT").upper()
+            
+            if "BUY" in action:
+                status = "🟢 BUY"
+            elif "SELL" in action:
+                status = "🔴 SELL"
+            elif "WATCH" in action:
+                status = "🟡 WATCH"
+            else:
+                status = "⚪ HOLD"
+            
+            price_str = f"${price:,.2f}" if price else "N/A"
+            change_str = f"{change:+.2f}%" if change is not None else "N/A"
+            lines.append(f"{i:2}. {coin:<6} {price_str:>12} | {change_str:>8} | {status}")
+    else:
+        lines.append("⚪ داده‌ای برای پورتفولیو موجود نیست")
+    
+    # ===== بخش 3: TOP 5 سیگنال‌های خرید/فروش =====
+    lines.append("")
+    lines.append("📈 TOP 5 BUY/SELL SIGNALS")
+    lines.append("───────────────────")
+    
+    signals = []
+    for r in results:
+        action = str(r.get("action") or "").upper()
+        if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
+            signals.append({
+                "coin": r.get("coin", "UNKNOWN"),
+                "action": action,
+                "confidence": r.get("confidence", 0),
+                "rr": r.get("rr", 0),
+                "price": r.get("price"),
+                "entry": r.get("entry"),
+                "sl": r.get("sl"),
+                "tp1": r.get("tp1"),
+                "tp2": r.get("tp2")
+            })
+    
+    # اگر سیگنال واقعی نبود، از WATCH استفاده کن
+    if not signals:
+        for r in results:
+            action = str(r.get("action") or "").upper()
+            if action in ("BULLISH WATCH", "BEARISH WATCH"):
+                signals.append({
+                    "coin": r.get("coin", "UNKNOWN"),
+                    "action": action,
+                    "confidence": r.get("confidence", 0),
+                    "rr": r.get("rr", 0),
+                    "price": r.get("price"),
+                    "entry": None,
+                    "sl": None,
+                    "tp1": None,
+                    "tp2": None
+                })
+    
+    signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    top5_signals = signals[:5]
+    
+    if top5_signals:
+        for i, r in enumerate(top5_signals, 1):
+            coin = r.get("coin", "UNKNOWN")
+            action = r.get("action", "WAIT")
+            
+            if "BUY" in action:
+                action_str = "🟢 BUY"
+            elif "SELL" in action:
+                action_str = "🔴 SELL"
+            elif "WATCH" in action:
+                action_str = "🟡 WATCH"
+            else:
+                action_str = "⚪ WAIT"
+            
             conf = r.get("confidence", 0)
             rr = r.get("rr", 0)
-            quality = r.get("quality_score", 0)
-            lines.append(f"{i:2}. {coin:<6} {direction} | {conf}% | R/R {rr:.2f} | Q:{quality:.0f}%")
+            entry = r.get("entry")
+            entry_str = f"${entry:,.4f}" if entry else "N/A"
+            lines.append(f"{i:2}. {coin:<6} {action_str} | {conf}% | R/R {rr:.2f} | Entry {entry_str}")
     else:
-        lines.append("⚪ هیچ سیگنال اجرایی یافت نشد")
-    
-    # TOP 5 فرصت‌ها
-    lines.append("")
-    lines.append("🚀 TOP 5 OPPORTUNITIES (Dynamic 30)")
-    lines.append("───────────────────")
-    if top5_opp:
-        for i, r in enumerate(top5_opp, 1):
-            coin = r.get("coin", "UNKNOWN")
-            action = "📈 WATCH" if r.get("action") == "BULLISH WATCH" else "📉 WATCH"
-            conf = r.get("confidence", 0)
-            opp = r.get("opp_score", 0)
-            lines.append(f"{i:2}. {coin:<6} {action} | {conf}% | Score:{opp:.0f}")
-    else:
-        lines.append("⚪ هیچ فرصت پتانسیل‌داری یافت نشد")
+        lines.append("⚪ هیچ سیگنال خرید/فروشی یافت نشد")
+        lines.append("   (این بخش بر اساس داده‌های واقعی صرافی‌هاست)")
     
     # اطلاعات تکمیلی
     lines.append("")
@@ -633,11 +695,11 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         except:
             plt.rcParams['font.family'] = 'sans-serif'
         
-        # آماده‌سازی داده‌ها
-        executable = []
+        # آماده‌سازی داده‌ها - از همه سیگنال‌ها استفاده کن
+        signals = []
         for r in results:
             action = str(r.get("action") or "").upper()
-            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
                 quality_score = 0
                 quality_score += r.get("confidence", 0) * 0.4
                 quality_score += min(r.get("rr", 0) or 0, 5) * 15
@@ -645,46 +707,59 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                 quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
                 quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
                 r["quality_score"] = min(100, quality_score)
-                executable.append(r)
+                signals.append(r)
         
-        executable.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-        top10_exec = executable[:10]
+        # اگر سیگنال نبود، از TOP قیمت استفاده کن
+        if not signals:
+            signals = sorted(
+                [r for r in results if r.get("price") is not None],
+                key=lambda x: x.get("price", 0) or 0,
+                reverse=True
+            )[:10]
+            for r in signals:
+                r["quality_score"] = 50
+        
+        signals.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+        top_signals = signals[:10]
         
         # ساخت جدول
         fig, ax = plt.subplots(figsize=(14, 10))
         ax.axis('off')
         
-        # ایجاد سلول‌های جدول
         cell_text = []
         headers = ['#', 'Asset', 'Direction', 'Confidence', 'R/R', 'Quality']
         cell_text.append(headers)
         
-        for i, r in enumerate(top10_exec, 1):
-            direction = '🟢 BUY' if r.get('direction') == 'LONG' else '🔴 SELL'
+        for i, r in enumerate(top_signals, 1):
+            action = str(r.get("action") or "WAIT").upper()
+            if "BUY" in action:
+                direction = '🟢 BUY'
+            elif "SELL" in action:
+                direction = '🔴 SELL'
+            else:
+                direction = '🟡 WATCH'
+            
             row = [
                 str(i),
                 r.get('coin', 'UNKNOWN'),
                 direction,
                 f"{r.get('confidence', 0)}%",
-                f"{r.get('rr', 0):.2f}",
+                f"{r.get('rr', 0):.2f}" if r.get('rr') else "N/A",
                 f"{r.get('quality_score', 0):.0f}%"
             ]
             cell_text.append(row)
         
-        # اگر کمتر از 10 تا بود، با ردیف‌های خالی پر کن
         while len(cell_text) < 11:
             cell_text.append(['', '', '', '', '', ''])
         
-        # رسم جدول
         table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
         table.auto_set_font_size(False)
         table.set_fontsize(11)
         table.scale(1, 2.5)
         
-        # تنظیم رنگ‌ها
         for i, row in enumerate(cell_text):
             for j, cell in enumerate(row):
-                if i == 0:  # هدر
+                if i == 0:
                     table[(i, j)].set_facecolor('#2c3e50')
                     table[(i, j)].set_text_props(color='white', weight='bold')
                 elif i % 2 == 0:
@@ -692,7 +767,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                 else:
                     table[(i, j)].set_facecolor('#ffffff')
                 
-                # رنگ‌بندی بر اساس کیفیت
                 if i > 0 and j == 5 and cell:
                     try:
                         val = int(cell.replace('%', ''))
@@ -707,7 +781,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                     except:
                         pass
                 
-                # رنگ‌بندی جهت خرید/فروش
                 if i > 0 and j == 2:
                     if 'BUY' in cell:
                         table[(i, j)].set_facecolor('#27ae60')
@@ -716,10 +789,8 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                         table[(i, j)].set_facecolor('#e74c3c')
                         table[(i, j)].set_text_props(color='white')
         
-        # عنوان
         ax.set_title('📊 ATLAS SIGNAL RANKING', fontsize=16, weight='bold', pad=20)
         
-        # ذخیره تصویر
         plt.tight_layout()
         plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close()
@@ -734,7 +805,7 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
 
 
 def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
-    """ارسال جدول تصویری به تلگرام"""
+    """ارسال جدول تصویری به تمام مقاصد تلگرام"""
     if not ENABLE_IMAGE_TABLE:
         print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
         return False
@@ -746,22 +817,44 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     if not TELEGRAM_TOKEN:
         return False
     
-    try:
-        with open(filename, 'rb') as f:
-            image_data = f.read()
+    with open(filename, 'rb') as f:
+        image_data = f.read()
+    
+    # لیست مقاصد
+    destinations = []
+    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
+        destinations.append({
+            "id": str(TELEGRAM_CHAT_ID).strip(),
+            "name": "PRIVATE_CHAT"
+        })
+    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
+        group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
+        if group_id not in [d["id"] for d in destinations]:
+            destinations.append({
+                "id": group_id,
+                "name": "SUPERGROUP"
+            })
+    
+    if not destinations:
+        print("❌ No Telegram destinations for image")
+        return False
+    
+    success_count = 0
+    
+    for dest in destinations:
+        chat_id = dest["id"]
+        dest_name = dest["name"]
+        
+        print(f"  Sending image to {dest_name}...", end=" ", flush=True)
         
         boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
         body = bytearray()
         
-        # chat_id
         body.extend(f'--{boundary}\r\n'.encode())
         body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
-        chat_id = TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID
-        if chat_id:
-            body.extend(str(chat_id).encode())
+        body.extend(str(chat_id).encode())
         body.extend(b'\r\n')
         
-        # photo
         body.extend(f'--{boundary}\r\n'.encode())
         body.extend(f'Content-Disposition: form-data; name="photo"; filename="signal_table.png"\r\n'.encode())
         body.extend(b'Content-Type: image/png\r\n\r\n')
@@ -776,29 +869,29 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
         
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
         req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=60) as response:
-            result = json.loads(response.read().decode())
-            os.unlink(filename)
-            return result.get('ok', False)
-    except Exception as e:
-        print(f"❌ Image send error: {e}")
+        
         try:
-            os.unlink(filename)
-        except:
-            pass
-        return False
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode())
+                if result.get('ok', False):
+                    print("✅")
+                    success_count += 1
+                else:
+                    print(f"❌ {result.get('description', 'Unknown error')}")
+        except Exception as e:
+            print(f"❌ {e}")
+    
+    try:
+        os.unlink(filename)
+    except:
+        pass
+    
+    return success_count > 0
 
 
 # ============================================================
 # MULTI-SOURCE VALIDATION LAYER
 # ============================================================
-# Exchange OHLCV/tickers are the execution-grade market layer.
-# CoinGecko/CMC are independent aggregation cross-checks.
-# CoinGlass is derivatives context.
-# TradingView is confirmation-only and only consumes a real authorized
-# endpoint if supplied; ATLAS never fabricates TradingView values.
-# CryptoBubbles/EasyTrader/OMPFinex/Bitunix/TabTrader/KCEX are optional
-# adapters. They are ignored unless a real endpoint is configured.
 TRADINGVIEW_CONFIRMATION_URL = os.environ.get("TRADINGVIEW_CONFIRMATION_URL", "").strip()
 TRADINGVIEW_CHART_EXCHANGE = os.environ.get("ATLAS_TRADINGVIEW_EXCHANGE", "BYBIT").strip().upper() or "BYBIT"
 TRADINGVIEW_INTERVAL = os.environ.get("ATLAS_TRADINGVIEW_INTERVAL", "240").strip() or "240"
@@ -817,15 +910,6 @@ SECONDARY_ENDPOINTS = {
     "TabTrader": TABTRADER_API_URL,
     "KCEX": KCEX_API_URL,
 }
-
-# ============================================================
-# تنظیمات پیشنهادی برای سیگنال‌های بیشتر
-# ============================================================
-# برای دریافت سیگنال‌های بیشتر می‌توانید مقادیر زیر را کاهش دهید:
-# 1. MIN_CONFIDENCE را از ۶۰ به ۵۵ کاهش دهید
-# 2. MIN_VOLUME_RATIO را از ۰.۸۰ به ۰.۶۰ کاهش دهید
-# 3. در سشن همپوشانی اروپا-آمریکا (ساعت ۱۵:۳۰ تا ۱۸:۳۰ تهران) اجرا کنید
-# ============================================================
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE_PCT", "1.5"))
 MAX_PORTFOLIO_RISK = float(os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
@@ -3713,10 +3797,8 @@ def send_report(text):
     init_sqlite()
     destinations = []
     
-    # ===== DEBUG =====
     print(f"🔍 TELEGRAM_CHAT_ID: '{TELEGRAM_CHAT_ID}'")
     print(f"🔍 TELEGRAM_GROUP_CHAT_ID: '{TELEGRAM_GROUP_CHAT_ID}'")
-    # =================
     
     if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
         chat_id_str = str(TELEGRAM_CHAT_ID).strip()
@@ -5258,7 +5340,7 @@ def main():
             )
             outputs.append(build_dashboard_table(results, top10, dynamic30))
             
-            # اضافه کردن جدول رتبه‌بندی سیگنال‌ها
+            # اضافه کردن جدول رتبه‌بندی سیگنال‌ها - نسخه کامل و همیشه پر
             signal_ranking = build_signal_ranking_table(results, top10, dynamic30)
             outputs.append(signal_ranking)
             
@@ -5268,10 +5350,10 @@ def main():
                 all_errors.extend(errors)
                 print(payload)
             
-            # ارسال جدول تصویری (در صورت وجود matplotlib)
+            # ارسال جدول تصویری به همه مقاصد
             image_sent = send_image_table(results, top10, dynamic30)
             if image_sent:
-                print("✅ Image table sent successfully")
+                print("✅ Image table sent successfully to all destinations")
             else:
                 print("ℹ️ Image table not sent (matplotlib may not be installed)")
             
@@ -5304,7 +5386,7 @@ def main():
                     if audio_file:
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
                         if result:
-                            print("✅ Audio report sent successfully")
+                            print("✅ Audio report sent successfully to all destinations")
                         try:
                             os.unlink(audio_file)
                         except:
