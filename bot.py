@@ -3153,6 +3153,140 @@ def analyze_coin(coin, market_news, weights):
         if "همپوشانی سشن — نقدینگی بالا" not in str(reason_parts):
             reason_parts.append("همپوشانی سشن — نقدینگی بالا")
 
+    # ============================================================
+    # INVALIDATION & NO-TRADE ENGINE INTEGRATION
+    # ============================================================
+    
+    # ایجاد دیکشنری موقت برای بررسی
+    temp_result = {
+        "coin": coin,
+        "price": price,
+        "change": change_24h,
+        "change_7d": change_7d,
+        "change_source": "ticker" if any(f(x.get("change")) is not None for x in sources) else "H1_24H_FALLBACK",
+        "trend": h4,
+        "h1_trend": h1,
+        "h4_trend": h4,
+        "d1_trend": d1,
+        "w1_trend": w1,
+        "m1_trend": m1,
+        "pattern": pattern,
+        "pattern_valid": pattern_valid,
+        "rsi": tf4.get("rsi"),
+        "macd": tf4.get("macd"),
+        "volume": vol_state,
+        "volume_ratio": vol_ratio,
+        "atr_pct": atrp,
+        "support": effective_levels.get("support") if effective_levels else None,
+        "resistance": effective_levels.get("resistance") if effective_levels else None,
+        "support_score": effective_levels.get("support_score", 0) if effective_levels else 0,
+        "resistance_score": effective_levels.get("resistance_score", 0) if effective_levels else 0,
+        "support_touches": effective_levels.get("support_touches", 0) if effective_levels else 0,
+        "resistance_touches": effective_levels.get("resistance_touches", 0) if effective_levels else 0,
+        "sr_confidence": effective_levels.get("confidence", "LOW") if effective_levels else "LOW",
+        "sr_method": ("H4_FALLBACK_" + effective_levels.get("method", "UNKNOWN")) if sr_fallback and effective_levels else (effective_levels.get("method", "UNKNOWN") if effective_levels else "NONE"),
+        "sr_fallback": sr_fallback,
+        "pivot": levels["pivot"] if levels else weekly_pivot(tf4["rows"]),
+        "entry": levels["entry"] if levels else None,
+        "sl": levels["sl"] if levels else None,
+        "tp1": levels["tp1"] if levels else None,
+        "tp2": levels["tp2"] if levels else None,
+        "tp3": levels["tp3"] if levels else None,
+        "tp4": levels["tp4"] if levels else None,
+        "leverage": leverage,
+        "direction": direction,
+        "action": action,
+        "confidence": int(clamp(confidence, 0, 100)),
+        "score_components": score_components,
+        "confidence_raw": round(confidence_raw, 2),
+        "overbought": overbought,
+        "oversold": oversold,
+        "quality": quality,
+        "spread": spread_pct,
+        "liquidity_score": liq_score,
+        "liquidity": liq_label,
+        "momentum_30m": mom30,
+        "candle_trigger": trigger,
+        "signal_candle_ts": snapshots.get("4h", {}).get("event", {}).get("closed_ts"),
+        "candle_events": {tf: snapshots.get(tf, {}).get("event", {}) for tf in EVENT_TIMEFRAMES},
+        "news_impact": market_news["impact"],
+        "warning": warning,
+        "gate": gate,
+        "gate_reason": gate_reason,
+        "reason": " + ".join(reason_parts) or "تایید چندعاملی کافی نیست",
+        "sources": [x["source"] for x in sources],
+        "source_validation": source_validation,
+        "tradingview_status": tvv.get("status"),
+        "tradingview_rating": tvv.get("rating"),
+        "coinglass_status": source_validation.get("coinglass", {}).get("status"),
+        "coinglass_open_interest": source_validation.get("coinglass", {}).get("open_interest"),
+        "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
+        "engine": tf4.get("engine"),
+        "snapshots": snapshots,
+        "session": session,
+        "session_label": session_label,
+        "session_multiplier": session_multiplier,
+        "btc_regime": btc_market_regime(),
+    }
+
+    from core.invalidation import SignalLifecycle, InvalidationEngine, NoTradeEngine, ContradictionDetector
+    
+    signal_lifecycle = SignalLifecycle()
+    invalidation_engine = InvalidationEngine()
+    no_trade_engine = NoTradeEngine()
+    contradiction_detector = ContradictionDetector()
+
+    # 1. ایجاد سیگنال ID
+    signal_id = signal_lifecycle.create_signal(
+        coin=coin,
+        direction=direction,
+        entry=levels["entry"] if levels else 0,
+        sl=levels["sl"] if levels else 0,
+        tp1=levels["tp1"] if levels else 0,
+        tp2=levels["tp2"] if levels else 0,
+        confidence=confidence,
+        candle_ts=snapshots.get("4h", {}).get("event", {}).get("closed_ts", 0),
+        reason=temp_result["reason"]
+    )
+
+    # 2. تشخیص تضاد
+    contradiction_status, contradictions = contradiction_detector.detect(temp_result)
+
+    if contradiction_status == "HIGH_CONTRADICTION":
+        warning = warning or f"High contradiction: {', '.join(contradictions[:3])}"
+        action = "NO TRADE"
+        gate = "BLOCK"
+        gate_reason = f"High contradiction: {', '.join(contradictions[:3])}"
+
+    # 3. بررسی No-Trade
+    btc_regime_data = btc_market_regime()
+    breadth_data = market_breadth([])  # موقتاً خالی
+    should_trade, no_trade_reasons = no_trade_engine.should_trade(
+        {
+            "direction": direction,
+            "confidence": confidence,
+            "rr": _rr_from_values(levels["entry"] if levels else None, levels["sl"] if levels else None, levels["tp2"] if levels else None),
+            "gate": gate,
+            "gate_reason": gate_reason,
+            "entry": levels["entry"] if levels else None,
+            "sl": levels["sl"] if levels else None,
+            "tp1": levels["tp1"] if levels else None,
+            "tp2": levels["tp2"] if levels else None,
+            "liquidity": liq_label,
+            "liquidity_score": liq_score,
+            "quality": quality,
+            "spread": spread_pct,
+            "repeat_signal": False,
+        },
+        btc_regime_data,
+        breadth_data
+    )
+
+    if not should_trade and action != "NO TRADE":
+        action = "NO TRADE"
+        gate = "BLOCK"
+        gate_reason = " | ".join(no_trade_reasons[:5])
+
     return {
         "coin": coin,
         "price": price,
@@ -3218,10 +3352,15 @@ def analyze_coin(coin, market_news, weights):
         "coinglass_funding_rate": source_validation.get("coinglass", {}).get("funding_rate"),
         "engine": tf4.get("engine"),
         "snapshots": snapshots,
-        # سشن‌های بازار
         "session": session,
         "session_label": session_label,
         "session_multiplier": session_multiplier,
+        # Invalidation & No-Trade fields
+        "signal_id": signal_id,
+        "contradiction_status": contradiction_status,
+        "contradictions": contradictions,
+        "no_trade_reasons": no_trade_reasons,
+        "should_trade": should_trade,
     }
 
 
@@ -4526,6 +4665,15 @@ def asset_block(r, metal=False, detail=False):
         lines.append(f"⚠️ {warning}")
     if tv:
         lines.append(f"📊 Chart: {tv}")
+    
+    # Invalidation & No-Trade fields
+    if r.get("signal_id"):
+        lines.append(f"🆔 Signal: {r.get('signal_id')}")
+    if r.get("contradiction_status") == "HIGH_CONTRADICTION":
+        lines.append(f"⚠️ Contradictions: {', '.join(r.get('contradictions', [])[:3])}")
+    if r.get("no_trade_reasons"):
+        lines.append(f"🚫 No-Trade: {', '.join(r.get('no_trade_reasons', [])[:3])}")
+    
     return "\n".join(lines)
 
 
