@@ -5833,14 +5833,25 @@ def main():
             all_errors.extend(snapshot_errors)
 
         # ============================================================
-        # Voice Output - ارسال گزارش صوتی کامل با اخبار و سیگنال‌ها
+        # Voice Output - اصلاح شده
         # ============================================================
         if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
             try:
                 print("\n🎤 Generating audio report...")
+                
+                # اگر analysis_results نداریم، snapshot بگیر
+                snapshot_results = []
+                if not analysis_results:
+                    try:
+                        snapshot_results = fetch_snapshot_results()
+                        print(f"📊 Fetched {len(snapshot_results)} snapshot items for voice")
+                    except Exception as e:
+                        print(f"⚠️ Could not fetch snapshot: {e}")
+                        snapshot_results = []
+                
                 voice_data = analysis_results if analysis_results else snapshot_results
+                
                 if voice_data:
-                    # ارسال اخبار و وضعیت بازار به تابع صوتی
                     news_data = news if 'news' in locals() else None
                     btc_data = btc_regime if 'btc_regime' in locals() else None
                     audio_file = generate_audio_report(voice_data, news_data, btc_data)
