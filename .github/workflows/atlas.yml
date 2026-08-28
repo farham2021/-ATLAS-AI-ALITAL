@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main ]
   schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -89,18 +89,42 @@ jobs:
         echo "COINGLASS_API_KEY=${{ secrets.COINGLASS_API_KEY }}" >> .env
         echo "NEWSAPI_KEY=${{ secrets.NEWSAPI_KEY }}" >> .env
         echo "CRYPTOPANIC_TOKEN=${{ secrets.CRYPTOPANIC_TOKEN }}" >> .env
-        echo "ATLAS_ENABLE_VOICE=${{ vars.ATLAS_ENABLE_VOICE || '1' }}" >> .env
-        echo "ATLAS_AUTO_SEND_VOICE=${{ vars.ATLAS_AUTO_SEND_VOICE || '1' }}" >> .env
-        echo "ATLAS_VOICE_TYPE=${{ vars.ATLAS_VOICE_TYPE || 'female' }}" >> .env
-        echo "ATLAS_ENABLE_IMAGE_TABLE=${{ vars.ATLAS_ENABLE_IMAGE_TABLE || '1' }}" >> .env
-        echo "ATLAS_RUN_MODE=${{ vars.ATLAS_RUN_MODE || 'AUTO' }}" >> .env
-        echo "ATLAS_ENGINE=${{ vars.ATLAS_ENGINE || 'BOTH' }}" >> .env
+        echo "ATLAS_ENABLE_VOICE=1" >> .env
+        echo "ATLAS_AUTO_SEND_VOICE=1" >> .env
+        echo "ATLAS_VOICE_TYPE=female" >> .env
+        echo "ATLAS_ENABLE_IMAGE_TABLE=1" >> .env
+        echo "ATLAS_RUN_MODE=AUTO" >> .env
+        echo "ATLAS_ENGINE=BOTH" >> .env
+        
+        # نمایش محتوای فایل برای دیباگ
+        cat .env
     
-    - name: Deploy to production
+    - name: Set environment variables directly
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+        NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+        CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+        ATLAS_ENABLE_VOICE: 1
+        ATLAS_AUTO_SEND_VOICE: 1
+        ATLAS_VOICE_TYPE: female
+        ATLAS_ENABLE_IMAGE_TABLE: 1
+        ATLAS_RUN_MODE: AUTO
+        ATLAS_ENGINE: BOTH
       run: |
-        echo "🚀 Starting ATLAS AI..."
+        echo "🚀 Starting ATLAS AI with environment variables..."
+        echo "ATLAS_ENABLE_IMAGE_TABLE=${ATLAS_ENABLE_IMAGE_TABLE}"
+        echo "ATLAS_ENGINE=${ATLAS_ENGINE}"
+        echo "ATLAS_RUN_MODE=${ATLAS_RUN_MODE}"
+        
+        # اجرای مستقیم با متغیرهای محیطی
         python bot.py &
-        sleep 10
+        sleep 30
         echo "✅ ATLAS AI started successfully"
     
     - name: Upload logs on failure
