@@ -210,9 +210,17 @@ def get_current_session(dt=None):
     """تشخیص سشن فعلی بازار و ضریب کیفیت آن"""
     dt = dt or now_utc()
     hour = dt.hour
+    
+    # اولویت با OVERLAP (همپوشانی) - ابتدا بررسی شود
     for name, session in MARKET_SESSIONS.items():
-        if session["open"] <= hour < session["close"]:
+        if name == "OVERLAP" and session["open"] <= hour < session["close"]:
             return name, session["label"], session["multiplier"]
+    
+    # سپس سایر سشن‌ها
+    for name, session in MARKET_SESSIONS.items():
+        if name != "OVERLAP" and session["open"] <= hour < session["close"]:
+            return name, session["label"], session["multiplier"]
+    
     return "CLOSED", "🔒 خارج از سشن", 0.7
 
 def get_next_session_time(dt=None):
@@ -236,7 +244,6 @@ def get_next_session_time(dt=None):
             return name, next_dt
     
     return "ASIA", dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-
 
 # ============================================================
 # COINGECKO IDS MAPPING
