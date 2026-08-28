@@ -5093,7 +5093,7 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     lines.append("───────────────────")
     usdt = fetch_usdt_toman_public()
     if usdt is None:
-        lines.append("💵 🟡 نرخ تتر  :   در دسترس نیست")
+        lines.append("💵 🟡نرخ تتر  :   در دسترس نیست")
     else:
         lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
     lines.append("🔄 این پیام هر ۳ ساعت بروزرسانی می‌شود")
@@ -5815,6 +5815,14 @@ def main():
         total_sent = 0
         all_errors = []
         analysis_results = []
+        
+        # متغیرهای پیش‌فرض برای همه حالت‌ها
+        news = None
+        btc_regime = None
+        macro = None
+        market_info = None
+        top10 = []
+        dynamic30 = []
 
         if do_analysis:
             text, results, macro, news, market_info, unavailable = report()
@@ -5843,11 +5851,15 @@ def main():
                 all_errors.extend(errors)
                 print(payload)
             
-            image_sent = send_image_table(results, top10, dynamic30)
-            if image_sent:
-                print("✅ Image table sent successfully to all destinations")
+            # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
+            if ENABLE_IMAGE_TABLE:
+                image_sent = send_image_table(results, top10, dynamic30)
+                if image_sent:
+                    print("✅ Image table sent successfully to all destinations")
+                else:
+                    print("ℹ️ Image table not sent (matplotlib may not be installed)")
             else:
-                print("ℹ️ Image table not sent (matplotlib may not be installed)")
+                print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
             
             analysis_results = results
             csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
@@ -5863,6 +5875,9 @@ def main():
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
 
+        # ============================================================
+        # VOICE REPORT - با بررسی وجود داده
+        # ============================================================
         if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
             try:
                 print("\n🎤 Generating audio report...")
@@ -5879,8 +5894,9 @@ def main():
                 voice_data = analysis_results if analysis_results else snapshot_results
                 
                 if voice_data:
-                    news_data = news if 'news' in locals() else None
-                    btc_data = btc_regime if 'btc_regime' in locals() else None
+                    # استفاده از متغیرهای تعریف شده با مقدار پیش‌فرض
+                    news_data = news if news is not None else None
+                    btc_data = btc_regime if btc_regime is not None else None
                     audio_file = generate_audio_report(voice_data, news_data, btc_data)
                     if audio_file:
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
