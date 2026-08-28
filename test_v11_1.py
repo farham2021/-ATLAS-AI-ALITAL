@@ -1,72 +1,225 @@
-from pathlib import Path
-import csv, io, sys, types
+"""
+ATLAS AI v11.1 — Unit Tests
+====================================
+Tests for core functionality of the ATLAS AI trading bot.
+"""
 
-# ============================================================
-# اضافه کردن مسیر core به sys.path
-# ============================================================
-sys.path.insert(0, str(Path(__file__).parent))
+import os
+import sys
+import json
+import unittest
+import tempfile
+from unittest.mock import patch, MagicMock
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-# The CI workflow installs ccxt. This test can also run without network/package access.
-ccxt_stub = types.ModuleType('ccxt')
-sys.modules.setdefault('ccxt', ccxt_stub)
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import bot
-
-bot._metal_analysis = lambda x: {
-    'coin': x, 'price': 1.0, 'support': 0.9, 'resistance': 1.1,
-    'action': 'BULLISH WATCH', 'decision_state': 'BULLISH WATCH',
-    'h4_trend': 'BULLISH', 'd1_trend': 'BULLISH', 'confidence': 60,
-}
-
-valid = {
-    'coin': 'BTC', 'price': 100.0, 'support': 90.0, 'resistance': 110.0,
-    'entry': 101.0, 'sl': 95.0, 'tp1': 105.0, 'tp2': 113.0,
-    'h4_trend': 'BULLISH', 'd1_trend': 'BULLISH',
-    'action': 'BUY CONFIRMATION', 'decision_state': 'BUY CONFIRMATION',
-    'direction': 'LONG', 'confidence': 80,
-}
-invalid = dict(valid)
-invalid.update({'coin': 'ETH', 'tp2': 99.0, 'confidence': 95})
-
-text = bot.generate_csv_report([valid, invalid], ['BTC', 'ETH'], [])
-rows = list(csv.DictReader(io.StringIO(text)))
-assert any(r['Symbol'] == 'BTC' and r['Group'] == 'PERSONAL_PORTFOLIO' for r in rows)
-eth = next(r for r in rows if r['Symbol'] == 'ETH')
-assert eth['Entry'] == '' and eth['SL'] == '' and eth['TP2'] == '' and eth['R/R'] == ''
-assert {r['Symbol'] for r in rows} >= {'BTC', 'ETH', 'GOLD', 'SILVER', 'COPPER'}
-print(f'PASS: v11.1 CSV export test ({len(rows)} rows)')
-
-# ============================================================
-# تست Invalidation & No-Trade (با اضافه کردن مسیر core)
-# ============================================================
-from core.invalidation import SignalLifecycle, InvalidationEngine, NoTradeEngine, ContradictionDetector
-
-signal_lifecycle = SignalLifecycle()
-signal_id = signal_lifecycle.create_signal(
-    coin='BTC',
-    direction='LONG',
-    entry=101.0,
-    sl=95.0,
-    tp1=105.0,
-    tp2=113.0,
-    confidence=80,
-    candle_ts=1234567890,
-    reason='Test signal'
+# Import from bot module
+from bot import (
+    VERSION,
+    f,
+    fmt,
+    pct,
+    clamp,
+    now_utc,
+    now_tehran,
+    shamsi,
+    safe_float,
+    safe_mean,
+    safe_median,
+    is_stable,
+    is_ambiguous_symbol,
+    _parse_bool,
+    get_current_session,
+    get_next_session_time,
+    get_run_mode,
+    get_engine_mode,
+    _fmt_price,
+    _fmt_change,
+    _get_status_emoji,
+    action_emoji,
+    _rr_from_values,
+    _validate_trade_geometry,
+    _snapshot_direction,
+    _snapshot_price_text,
+    TEHRAN,
 )
-assert signal_id.startswith('BTC-LON-')
-assert len(signal_id) > 10
 
-# Test contradiction detector
-contradiction_detector = ContradictionDetector()
-status, contradictions = contradiction_detector.detect({
-    'direction': 'LONG',
-    'rsi': 80,  # Overbought
-    'macd': 'BULLISH',
-    'h4_trend': 'BULLISH',
-    'd1_trend': 'BULLISH',
-    'btc_regime': {'regime': 'RISK_ON'},
-})
-assert status == 'LOW_CONTRADICTION' or status == 'HIGH_CONTRADICTION'
-print(f'PASS: Contradiction detector test ({status})')
 
-print('PASS: v11.1 invalidation test suite')
+class TestHelpers(unittest.TestCase):
+    """Test helper functions"""
+
+    def test_f(self):
+        """Test safe_float wrapper"""
+        self.assertEqual(f(10.5), 10.5)
+        self.assertEqual(f("10.5"), 10.5)
+        self.assertEqual(f(None), None)
+        self.assertEqual(f("invalid"), None)
+        self.assertEqual(f("invalid", 0), 0)
+        self.assertEqual(f(True), None)
+
+    def test_fmt(self):
+        """Test price formatting"""
+        self.assertEqual(fmt(1234.56), "$1,234.56")
+        self.assertEqual(fmt(12.34), "$12.3400")
+        self.assertEqual(fmt(0.1234), "$0.123400")
+        self.assertEqual(fmt(0.00012345), "$0.000123")
+        self.assertEqual(fmt(None), "N/A")
+
+    def test_pct(self):
+        """Test percentage formatting"""
+        self.assertEqual(pct(10.5), "+10.50%")
+        self.assertEqual(pct(-5.2), "-5.20%")
+        self.assertEqual(pct(None), "N/A")
+
+    def test_clamp(self):
+        """Test clamp function"""
+        self.assertEqual(clamp(5, 0, 10), 5)
+        self.assertEqual(clamp(-5, 0, 10), 0)
+        self.assertEqual(clamp(15, 0, 10), 10)
+
+    def test_safe_float(self):
+        """Test safe_float"""
+        self.assertEqual(safe_float(10.5), 10.5)
+        self.assertEqual(safe_float("10.5"), 10.5)
+        self.assertEqual(safe_float(None), None)
+        self.assertEqual(safe_float("invalid"), None)
+
+    def test_safe_mean(self):
+        """Test safe_mean"""
+        self.assertEqual(safe_mean([1, 2, 3]), 2.0)
+        self.assertEqual(safe_mean([None, 2, 3]), 2.5)
+        self.assertEqual(safe_mean([]), None)
+        self.assertEqual(safe_mean([None]), None)
+
+    def test_safe_median(self):
+        """Test safe_median"""
+        self.assertEqual(safe_median([1, 2, 3]), 2)
+        self.assertEqual(safe_median([1, 2, 3, 4]), 2.5)
+        self.assertEqual(safe_median([]), None)
+
+    def test_is_stable(self):
+        """Test stablecoin detection"""
+        self.assertTrue(is_stable("USDT"))
+        self.assertTrue(is_stable("USDC"))
+        self.assertTrue(is_stable("DAI"))
+        self.assertFalse(is_stable("BTC"))
+        self.assertFalse(is_stable("ETH"))
+        self.assertFalse(is_stable(""))
+
+    def test_is_ambiguous_symbol(self):
+        """Test ambiguous symbol detection"""
+        self.assertTrue(is_ambiguous_symbol("M"))
+        self.assertTrue(is_ambiguous_symbol("CC"))
+        self.assertFalse(is_ambiguous_symbol("BTC"))
+        self.assertFalse(is_ambiguous_symbol(""))
+
+    def test_parse_bool(self):
+        """Test boolean parser"""
+        self.assertTrue(_parse_bool("true"))
+        self.assertTrue(_parse_bool("1"))
+        self.assertTrue(_parse_bool("yes"))
+        self.assertTrue(_parse_bool("on"))
+        self.assertTrue(_parse_bool(True))
+        self.assertFalse(_parse_bool("false"))
+        self.assertFalse(_parse_bool("0"))
+        self.assertFalse(_parse_bool("no"))
+        self.assertFalse(_parse_bool("off"))
+        self.assertFalse(_parse_bool(False))
+        self.assertFalse(_parse_bool("random"))
+
+    def test_now_utc(self):
+        """Test UTC time"""
+        now = now_utc()
+        self.assertIsInstance(now, datetime)
+        self.assertEqual(now.tzinfo, timezone.utc)
+
+    def test_now_tehran(self):
+        """Test Tehran time"""
+        now = now_tehran()
+        self.assertIsInstance(now, datetime)
+        self.assertEqual(now.tzinfo, TEHRAN)
+
+    def test_shamsi(self):
+        """Test Persian date conversion"""
+        dt = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc)
+        result = shamsi(dt)
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) == 10)  # Format: YYYY/MM/DD
+
+
+class TestMarketSessions(unittest.TestCase):
+    """Test market session functions"""
+
+    def test_get_current_session(self):
+        """Test session detection"""
+        # Test with fixed time
+        dt = datetime(2026, 8, 28, 5, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        # UTC 5:00 = Asia session
+        self.assertEqual(name, "ASIA")
+        self.assertIsInstance(multiplier, float)
+
+        dt = datetime(2026, 8, 28, 10, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        # UTC 10:00 = Europe session
+        self.assertEqual(name, "EUROPE")
+
+        dt = datetime(2026, 8, 28, 14, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        # UTC 14:00 = Overlap session
+        self.assertEqual(name, "OVERLAP")
+
+        dt = datetime(2026, 8, 28, 22, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "CLOSED")
+
+    def test_get_next_session_time(self):
+        """Test next session time"""
+        dt = datetime(2026, 8, 28, 5, 0, 0, tzinfo=timezone.utc)
+        name, next_dt = get_next_session_time(dt)
+        self.assertEqual(name, "EUROPE")
+        self.assertEqual(next_dt.hour, 7)
+
+        dt = datetime(2026, 8, 28, 10, 0, 0, tzinfo=timezone.utc)
+        name, next_dt = get_next_session_time(dt)
+        self.assertEqual(name, "OVERLAP")
+        self.assertEqual(next_dt.hour, 12)
+
+
+class TestFormatting(unittest.TestCase):
+    """Test formatting functions"""
+
+    def test_fmt_price(self):
+        """Test price formatting"""
+        self.assertEqual(_fmt_price(123456.78), "$123,456.78")
+        self.assertEqual(_fmt_price(123.45), "$123.4500")
+        self.assertEqual(_fmt_price(0.1234), "$0.123400")
+        self.assertEqual(_fmt_price(0.00012345), "$0.000123")
+        self.assertEqual(_fmt_price(None), "N/A")
+
+    def test_fmt_change(self):
+        """Test change formatting"""
+        self.assertEqual(_fmt_change(10.5), "+10.50%")
+        self.assertEqual(_fmt_change(-5.2), "-5.20%")
+        self.assertEqual(_fmt_change(None), "N/A")
+
+    def test_get_status_emoji(self):
+        """Test status emoji"""
+        r_buy = {"action": "BUY CONFIRMATION"}
+        r_sell = {"action": "SELL CONFIRMATION"}
+        r_watch = {"action": "BULLISH WATCH"}
+        r_wait = {"action": "NO TRADE"}
+
+        self.assertEqual(_get_status_emoji(r_buy), "🟢 BULL")
+        self.assertEqual(_get_status_emoji(r_sell), "🔴 BEAR")
+        self.assertEqual(_get_status_emoji(r_watch), "⚪ WAIT")
+        self.assertEqual(_get_status_emoji(r_wait), "⚪ WAIT")
+
+    def test_action_emoji(self):
+        """Test action emoji"""
+        self.assertEqual(action_emoji("BUY CONFIRMATION"), "🟢 BUY")
+        self.assertEqual(action_emoji("SELL CONFIRMATION"), "🔴 SELL")
+        self.assertEqual(action_emoji("BULLISH WATCH"), "🟡 WATCH
