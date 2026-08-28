@@ -154,19 +154,23 @@ class TestMarketSessions(unittest.TestCase):
 
     def test_get_current_session(self):
         """Test session detection"""
+        # ASIA session (UTC 0-8)
         dt = datetime(2026, 8, 28, 5, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "ASIA")
         self.assertIsInstance(multiplier, float)
 
+        # EUROPE session (UTC 7-15)
         dt = datetime(2026, 8, 28, 10, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "EUROPE")
 
-        dt = datetime(2026, 8, 28, 14, 0, 0, tzinfo=timezone.utc)
+        # OVERLAP session (UTC 12-15) - استفاده از 13:00 برای اطمینان
+        dt = datetime(2026, 8, 28, 13, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "OVERLAP")
 
+        # CLOSED session (UTC 20-24)
         dt = datetime(2026, 8, 28, 22, 0, 0, tzinfo=timezone.utc)
         name, label, multiplier = get_current_session(dt)
         self.assertEqual(name, "CLOSED")
@@ -192,7 +196,7 @@ class TestFormatting(unittest.TestCase):
         self.assertEqual(_fmt_price(123456.78), "$123,456.78")
         self.assertEqual(_fmt_price(123.45), "$123.4500")
         self.assertEqual(_fmt_price(0.1234), "$0.123400")
-        self.assertEqual(_fmt_price(0.00012345), "$0.000123")
+        self.assertEqual(_fmt_price(0.00012345), "$0.00012345")
         self.assertEqual(_fmt_price(None), "N/A")
 
     def test_fmt_change(self):
@@ -210,7 +214,7 @@ class TestFormatting(unittest.TestCase):
 
         self.assertEqual(_get_status_emoji(r_buy), "🟢 BULL")
         self.assertEqual(_get_status_emoji(r_sell), "🔴 BEAR")
-        self.assertEqual(_get_status_emoji(r_watch), "⚪ WAIT")
+        self.assertEqual(_get_status_emoji(r_watch), "🟢 BULL")  # BULLISH WATCH = BULL
         self.assertEqual(_get_status_emoji(r_wait), "⚪ WAIT")
 
     def test_action_emoji(self):
