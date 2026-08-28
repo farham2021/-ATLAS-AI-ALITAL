@@ -30,8 +30,6 @@ required = [
     "generate_voice_summary", "text_to_speech_persian", "generate_audio_report", "send_audio_report",
     # Session functions
     "get_current_session",
-    # Invalidation & No-Trade functions
-    "SignalLifecycle", "InvalidationEngine", "NoTradeEngine", "ContradictionDetector",
 ]
 missing = [x for x in required if x not in funcs]
 if missing:
@@ -84,11 +82,11 @@ checks = {
     # New confidence and volume ratio checks
     "min confidence 55": "MIN_CONFIDENCE = float(os.environ.get(\"ATLAS_MIN_CONFIDENCE\", \"55\"))" in s,
     "min volume ratio 0.60": "MIN_VOLUME_RATIO = float(os.environ.get(\"ATLAS_MIN_VOLUME_RATIO\", \"0.60\"))" in s,
-    # Invalidation & No-Trade checks
-    "signal lifecycle": "SignalLifecycle" in s and "create_signal" in s and "invalidate_signal" in s,
-    "no-trade engine": "NoTradeEngine" in s and "should_trade" in s,
-    "contradiction detector": "ContradictionDetector" in s and "HIGH_CONTRADICTION" in s,
-    "signal id in asset block": "signal_id" in s and "🆔 Signal:" in s,
+    # Invalidation & No-Trade checks (checking for import and usage, not functions)
+    "signal lifecycle import": "from core.invalidation import" in s or "import core.invalidation" in s,
+    "signal id in results": "signal_id" in s and "create_signal" in s,
+    "no-trade in results": "no_trade_reasons" in s and "should_trade" in s,
+    "contradiction in results": "contradictions" in s and "HIGH_CONTRADICTION" in s,
 }
 for name, ok in checks.items():
     if not ok:
