@@ -1,5 +1,5 @@
 #============================================================
-# ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE
+# ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE + INTELLIGENCE
 # ============================================================
 # TP3/TP4 structural targets are optional and never fabricated.
 # v11.0 architecture:
@@ -59,7 +59,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.1 UNIFIED TWO-ENGINE"
+VERSION = "ATLAS v11.1 UNIFIED TWO-ENGINE + INTELLIGENCE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -5617,6 +5617,151 @@ def _automatic_run_plan(now=None):
     }
 
 
+
+# ============================================================
+# ATLAS v11.1 — OPTIONAL INTELLIGENCE / COMPLETION LAYER
+# ============================================================
+# Additive layer: preserves the existing v11.1 decision engine.
+# It adds explainability, data quality, contradiction/no-trade gates,
+# volatility/derivatives regime labels, signal IDs and portfolio diagnostics.
+# Probabilities are explicitly heuristic until outcome calibration exists.
+# ============================================================
+
+ATLAS_V11_MIN_DATA_QUALITY = float(os.environ.get("ATLAS_V11_MIN_DATA_QUALITY", "70"))
+ATLAS_V11_MIN_RR = float(os.environ.get("ATLAS_V11_MIN_RR", "2.0"))
+ATLAS_V11_MAX_CORR = float(os.environ.get("ATLAS_V11_MAX_CORR", "0.85"))
+ATLAS_V11_MAX_CONCENTRATION = float(os.environ.get("ATLAS_V11_MAX_CONCENTRATION", "0.65"))
+
+def _v11_num(v, default=None):
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
+def _v11_clamp(v, lo=0.0, hi=100.0):
+    return max(lo, min(hi, float(v)))
+
+def v11_signal_id(r):
+    coin=str(r.get("coin","UNKNOWN")).upper()
+    direction=str(r.get("direction") or r.get("action") or "NA").upper()
+    candle=str(r.get("signal_candle_ts") or r.get("candle_ts") or "NA")
+    return f"{coin}-{SIGNAL_TIMEFRAME.upper()}-{hashlib.sha256(f'{coin}|{direction}|{candle}'.encode()).hexdigest()[:10]}"
+
+def v11_data_quality(r):
+    fields=("price","rsi","macd","volume_ratio","atr_pct","support","resistance","h4_trend","d1_trend")
+    score=100.0*sum(r.get(x) is not None for x in fields)/len(fields)
+    if r.get("sr_fallback"): score-=5
+    return round(_v11_clamp(score),1)
+
+def v11_volatility_regime(r):
+    atr=_v11_num(r.get("atr_pct"))
+    if atr is None: return "UNKNOWN"
+    if atr>=8: return "EXTREME"
+    if atr>=5: return "HIGH"
+    if atr>=2: return "NORMAL"
+    return "LOW"
+
+def v11_derivatives_regime(r):
+    funding=_v11_num(r.get("coinglass_funding_rate"))
+    oi=_v11_num(r.get("coinglass_open_interest"))
+    if funding is None and oi is None: return "UNAVAILABLE"
+    if funding is not None and funding>0.01: return "LONG_CROWDED"
+    if funding is not None and funding<-0.01: return "SHORT_CROWDED"
+    return "NEUTRAL"
+
+def v11_evidence(r):
+    pos, neg=[],[]
+    d=str(r.get("direction","")).upper()
+    action=str(r.get("action","")).upper()
+    long_bias=d=="LONG" or "BUY" in action
+    short_bias=d=="SHORT" or "SELL" in action
+    h4=str(r.get("h4_trend","")).upper()
+    d1=str(r.get("d1_trend","")).upper()
+    rsi=_v11_num(r.get("rsi"))
+    vr=_v11_num(r.get("volume_ratio"))
+
+    if long_bias:
+        if any(x in h4 for x in ("BULL","UP","BUY","LONG")): pos.append("4H trend supports LONG")
+        if any(x in d1 for x in ("BULL","UP","BUY","LONG")): pos.append("1D trend supports LONG")
+        if rsi is not None and 50<=rsi<=70: pos.append("RSI supports momentum")
+        if vr is not None and vr>=1.2: pos.append("Volume expansion")
+        if "BEAR" in h4 or "DOWN" in h4: neg.append("4H trend conflict")
+        if "BEAR" in d1 or "DOWN" in d1: neg.append("1D trend conflict")
+        if rsi is not None and rsi>=75: neg.append("RSI strongly overbought")
+    elif short_bias:
+        if any(x in h4 for x in ("BEAR","DOWN","SELL","SHORT")): pos.append("4H trend supports SHORT")
+        if any(x in d1 for x in ("BEAR","DOWN","SELL","SHORT")): pos.append("1D trend supports SHORT")
+        if rsi is not None and 30<=rsi<=50: pos.append("RSI supports downside momentum")
+        if vr is not None and vr>=1.2: pos.append("Volume expansion")
+        if "BULL" in h4 or "UP" in h4: neg.append("4H trend conflict")
+        if "BULL" in d1 or "UP" in d1: neg.append("1D trend conflict")
+        if rsi is not None and rsi<=25: neg.append("RSI strongly oversold")
+
+    entry=_v11_num(r.get("entry")); sl=_v11_num(r.get("sl")); tp2=_v11_num(r.get("tp2"))
+    rr=None
+    if entry is not None and sl is not None and tp2 is not None and abs(entry-sl)>0:
+        rr=abs(tp2-entry)/abs(entry-sl)
+        if rr>=ATLAS_V11_MIN_RR: pos.append(f"RR acceptable ({rr:.2f}R)")
+        else: neg.append(f"RR below threshold ({rr:.2f}R)")
+    return pos,neg,rr
+
+def v11_apply_intelligence(r):
+    q=v11_data_quality(r)
+    r["v11_data_quality"]=q
+    r["v11_volatility_regime"]=v11_volatility_regime(r)
+    r["v11_derivatives_regime"]=v11_derivatives_regime(r)
+    pos,neg,rr=v11_evidence(r)
+    r["v11_positive_evidence"]=pos
+    r["v11_negative_evidence"]=neg
+    r["v11_rr"]=round(rr,3) if rr is not None else None
+    base=_v11_num(r.get("confidence"),50)
+    heuristic=_v11_clamp(base+(q-70)*0.08+min(len(pos),6)*1.5-min(len(neg),6)*2.5,5,95)
+    r["v11_estimated_probability"]=round(heuristic,1)
+    r["v11_probability_status"]="HEURISTIC_NOT_CALIBRATED"
+    invalid=[]
+    if q<ATLAS_V11_MIN_DATA_QUALITY: invalid.append("data quality below threshold")
+    if rr is not None and rr<ATLAS_V11_MIN_RR: invalid.append("RR below threshold")
+    if _v11_num(r.get("confidence"),0)<55: invalid.append("confidence below threshold")
+    d=str(r.get("direction","")).upper()
+    if d=="LONG" and ("BEAR" in str(r.get("h4_trend","")).upper() or "BEAR" in str(r.get("d1_trend","")).upper()):
+        invalid.append("higher-timeframe bearish conflict")
+    if d=="SHORT" and ("BULL" in str(r.get("h4_trend","")).upper() or "BULL" in str(r.get("d1_trend","")).upper()):
+        invalid.append("higher-timeframe bullish conflict")
+    r["v11_invalidated"]=bool(invalid)
+    r["v11_invalidation_reasons"]=invalid
+    r["v11_decision"]="WAIT" if invalid else str(r.get("action") or "WATCH").upper()
+    r["v11_signal_id"]=v11_signal_id(r)
+    score=heuristic*q/100-min(len(neg),6)*3
+    if r["v11_volatility_regime"]=="EXTREME": score-=8
+    elif r["v11_volatility_regime"]=="HIGH": score-=3
+    r["v11_opportunity_score"]=round(_v11_clamp(min(score,35) if invalid else score),1)
+    return r
+
+def v11_portfolio_diagnostics(results):
+    active=[r for r in results if str(r.get("action","")).upper() in
+            {"BUY","STRONG BUY","SELL","STRONG SELL","LONG","SHORT"}]
+    weights={str(r.get("coin","")).upper():max(0,_v11_num(r.get("v11_opportunity_score"),0)) for r in active}
+    total=sum(weights.values())
+    concentration={k:round(v/total,3) for k,v in weights.items()} if total else {}
+    warning="HIGH_CONCENTRATION" if any(v>=ATLAS_V11_MAX_CONCENTRATION for v in concentration.values()) else None
+    return {"concentration":concentration,"warning":warning,"high_correlation_pairs":[]}
+
+def build_v11_intelligence_report(results, portfolio):
+    ranked=sorted(results,key=lambda r:_v11_num(r.get("v11_opportunity_score"),0),reverse=True)
+    lines=["🧠 ATLAS v11.1 — INTELLIGENCE","━━━━━━━━━━━━━━━━━━━━"]
+    for r in ranked[:10]:
+        coin=str(r.get("coin","")).upper()
+        d=r.get("v11_decision","WAIT")
+        p=r.get("v11_estimated_probability",0)
+        q=r.get("v11_data_quality",0)
+        o=r.get("v11_opportunity_score",0)
+        icon="🟢" if d in {"BUY","STRONG BUY","LONG"} else ("🔴" if d in {"SELL","STRONG SELL","SHORT"} else "🟡")
+        lines.append(f"{icon} {coin} | {d} | P~{p:.0f}% | Q:{q:.0f} | O:{o:.0f} | V:{r.get('v11_volatility_regime','?')}")
+    if portfolio.get("warning"): lines.append(f"\n⚠️ Portfolio: {portfolio['warning']}")
+    lines.append("\nℹ️ P~ = heuristic estimate; not calibrated win probability.")
+    return "\n".join(lines)
+
+
 def main():
     try:
         telegram_preflight()
@@ -5638,6 +5783,8 @@ def main():
 
         if do_analysis:
             text, results, macro, news, market_info, unavailable = report()
+            results = [v11_apply_intelligence(r) for r in results]
+            v11_portfolio = v11_portfolio_diagnostics(results)
             top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
             btc_regime = btc_market_regime()
             breadth = market_breadth(results)
@@ -5652,6 +5799,7 @@ def main():
             )
             outputs.append(build_dashboard_table(results, top10, dynamic30))
             outputs.append(full_table_report)  # اضافه کردن گزارش جدولی کامل
+            outputs.append(build_v11_intelligence_report(results, v11_portfolio))
             
             # اضافه کردن جدول رتبه‌بندی سیگنال‌ها
             signal_ranking = build_signal_ranking_table(results, top10, dynamic30)
