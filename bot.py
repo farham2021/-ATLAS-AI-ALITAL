@@ -263,460 +263,6 @@ def get_next_session_time(dt=None):
     return "ASIA", dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
 
 # ============================================================
-# COINGECKO IDS MAPPING
-# ============================================================
-COINGECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "BNB": "binancecoin",
-    "XRP": "ripple",
-    "SOL": "solana",
-    "TRX": "tron",
-    "HYPE": "hype",
-    "DOGE": "dogecoin",
-    "ADA": "cardano",
-    "MATIC": "matic-network",
-    "LINK": "chainlink",
-    "XLM": "stellar",
-    "SUI": "sui",
-    "AVAX": "avalanche-2",
-    "LTC": "litecoin",
-    "SHIB": "shiba-inu",
-    "HBAR": "hedera-hashgraph",
-    "DOT": "polkadot",
-    "BCH": "bitcoin-cash",
-    "XMR": "monero",
-    "NEAR": "near",
-    "QNT": "quant-network",
-    "GRT": "the-graph",
-    "TAO": "tao",
-    "ONDO": "ondo",
-    "UNI": "uniswap",
-    "ETHFI": "ethfi",
-    "ATOM": "cosmos",
-    "FIL": "filecoin",
-    "AAVE": "aave",
-    "MKR": "maker",
-    "APT": "aptos",
-    "ARB": "arbitrum",
-    "OP": "optimism",
-    "INJ": "injective-protocol",
-    "TIA": "celestia",
-    "SEI": "sei-network",
-    "PEPE": "pepe",
-    "FET": "fet",
-    "ICP": "internet-computer",
-    "ETC": "ethereum-classic",
-}
-
-# ============================================================
-# VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
-# ============================================================
-
-def generate_voice_summary(results, news=None, btc_regime=None):
-    """تولید خلاصه صوتی کامل از نتایج با اخبار و سیگنال‌ها"""
-    if not results:
-        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
-    
-    print(f"📝 generate_voice_summary: processing {len(results)} items")
-    
-    session, session_label, session_multiplier = get_current_session()
-    
-    up_count = 0
-    down_count = 0
-    stable_count = 0
-    changes = []
-    buy_signals = []
-    sell_signals = []
-    watch_signals = []
-    
-    for r in results:
-        price = f(r.get("price"))
-        change = f(r.get("change")) or f(r.get("change24"))
-        symbol = r.get("coin", "")
-        action = str(r.get("action") or "").upper()
-        confidence = r.get("confidence", 0)
-        
-        if price:
-            if change is not None:
-                changes.append((symbol, change))
-                if change > 0.5:
-                    up_count += 1
-                elif change < -0.5:
-                    down_count += 1
-                else:
-                    stable_count += 1
-        
-        if action in ("BUY CONFIRMATION", "BUY"):
-            buy_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("SELL CONFIRMATION", "SELL"):
-            sell_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("BULLISH WATCH", "BEARISH WATCH"):
-            watch_signals.append((symbol, action, confidence))
-    
-    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
-    print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
-    
-    lines = [
-        "به گزارش صوتی اطلس خوش آمدید.",
-        f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
-    ]
-    
-    if btc_regime:
-        regime = btc_regime.get("regime", "UNKNOWN")
-        if regime == "RISK_ON":
-            lines.append("بازار در حالت ریسک‌پذیر قرار دارد و تمایل به صعود دارد.")
-        elif regime == "RISK_OFF":
-            lines.append("بازار در حالت ریسک‌گریز قرار دارد و احتیاط بیشتری نیاز است.")
-        else:
-            lines.append("بازار در حالت خنثی قرار دارد.")
-    
-    if up_count > 0:
-        lines.append(f"{up_count} ارز صعودی هستند.")
-    if down_count > 0:
-        lines.append(f"{down_count} ارز نزولی هستند.")
-    if stable_count > 0:
-        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
-    
-    if changes:
-        best = max(changes, key=lambda x: x[1])
-        worst = min(changes, key=lambda x: x[1])
-        if best[1] > 0:
-            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
-        if worst[1] < 0:
-            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
-    
-    if buy_signals:
-        buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
-        lines.append(buy_text)
-    
-    if sell_signals:
-        sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
-        lines.append(sell_text)
-    
-    if watch_signals:
-        watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
-        lines.append(watch_text)
-    
-    if news:
-        bias = news.get("bias", "")
-        impact = news.get("impact", "")
-        if bias == "POSITIVE":
-            lines.append("اخبار بازار عمدتاً مثبت است.")
-        elif bias == "NEGATIVE":
-            lines.append("اخبار بازار عمدتاً منفی است.")
-        elif bias == "MIXED/LIMITED":
-            lines.append("اخبار بازار مختلط است.")
-        
-        if impact == "HIGH":
-            lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
-        
-        items = news.get("items", [])[:3]
-        if items:
-            headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
-            if headlines:
-                lines.append("خبرهای مهم: " + "، ".join(headlines))
-    
-    usdt = fetch_usdt_toman_public()
-    if usdt:
-        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
-    
-    if buy_signals:
-        lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
-    elif watch_signals:
-        lines.append("توصیه: در حال حاضر در جایگاه ناظر باشید و منتظر تأیید سیگنال‌ها بمانید.")
-    else:
-        lines.append("توصیه: فعلاً در جایگاه ناظر باشید و منتظر شکل‌گیری سیگنال معتبر بمانید.")
-    
-    lines.append("این پیام به صورت خودکار هر ۴ ساعت بروزرسانی می‌شود.")
-    
-    result = " ".join(lines)
-    print(f"📝 Voice text length: {len(result)} characters")
-    return result
-
-
-def generate_voice_summary_from_snapshot(results):
-    """تولید خلاصه صوتی از داده‌های اسنپ‌شات"""
-    if not results:
-        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
-    
-    session, session_label, session_multiplier = get_current_session()
-    
-    up_count = 0
-    down_count = 0
-    stable_count = 0
-    changes = []
-    prices = []
-    
-    for r in results:
-        price = f(r.get("price"))
-        change = f(r.get("change")) or f(r.get("change24"))
-        symbol = r.get("coin", "")
-        if price:
-            prices.append(price)
-            if change is not None:
-                changes.append((symbol, change))
-                if change > 0.5:
-                    up_count += 1
-                elif change < -0.5:
-                    down_count += 1
-                else:
-                    stable_count += 1
-    
-    lines = [
-        "به گزارش صوتی اطلس خوش آمدید.",
-        f"گزارش لحظه‌ای بازار ارزهای دیجیتال در سشن {session_label}.",
-    ]
-    
-    if up_count > 0:
-        lines.append(f"{up_count} ارز صعودی هستند.")
-    if down_count > 0:
-        lines.append(f"{down_count} ارز نزولی هستند.")
-    if stable_count > 0:
-        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
-    
-    if changes:
-        best = max(changes, key=lambda x: x[1])
-        worst = min(changes, key=lambda x: x[1])
-        if best[1] > 0:
-            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
-        if worst[1] < 0:
-            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
-    
-    usdt = fetch_usdt_toman_public()
-    if usdt:
-        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
-    
-    lines.append("این پیام به صورت خودکار هر ۳ ساعت بروزرسانی می‌شود.")
-    
-    return " ".join(lines)
-
-
-def text_to_speech_persian(text, voice="female"):
-    """تبدیل متن فارسی به صدا - اولویت: Edge TTS → gTTS → Google Translate"""
-    
-    try:
-        import edge_tts
-        import asyncio
-        voice_map = {"female": "fa-IR-DilaraNeural", "male": "fa-IR-FaridNeural"}
-        selected_voice = voice_map.get(voice, "fa-IR-DilaraNeural")
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-        output_path = temp_file.name
-        temp_file.close()
-        async def generate():
-            communicate = edge_tts.Communicate(text, selected_voice)
-            await communicate.save(output_path)
-        asyncio.run(generate())
-        return output_path
-    except:
-        pass
-    
-    try:
-        from gtts import gTTS
-        tts = gTTS(text=text, lang="fa", slow=False)
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-        tts.save(temp_file.name)
-        return temp_file.name
-    except:
-        pass
-    
-    try:
-        text_encoded = urllib.parse.quote(text)
-        url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl=fa&client=tw-ob"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            audio_data = response.read()
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-        temp_file.write(audio_data)
-        temp_file.close()
-        return temp_file.name
-    except Exception as e:
-        print(f"⚠️ TTS error: {e}")
-        return None
-
-
-def generate_audio_report(results, news=None, btc_regime=None, filename="audio_report.mp3"):
-    """تولید فایل صوتی کامل از گزارش با اخبار و سیگنال‌ها"""
-    if not results:
-        return None
-    
-    audio_text = generate_voice_summary(results, news, btc_regime)
-    
-    if len(audio_text) < 50:
-        audio_text = generate_voice_summary_from_snapshot(results)
-    
-    print(f"🎤 Generating audio with text: {audio_text[:100]}...")
-    audio_file = text_to_speech_persian(audio_text, VOICE_TYPE)
-    if audio_file:
-        import shutil
-        final_path = filename
-        shutil.move(audio_file, final_path)
-        return final_path
-    return None
-
-
-def send_audio_report(audio_file, caption=None):
-    """ارسال گزارش صوتی به تمام مقاصد تلگرام (چت خصوصی + سوپرگروه)"""
-    if not os.path.exists(audio_file):
-        print(f"❌ Audio file not found: {audio_file}")
-        return False
-    if not TELEGRAM_TOKEN:
-        print("❌ TELEGRAM_TOKEN not set")
-        return False
-    if not AUTO_SEND_VOICE:
-        print("ℹ️ AUTO_SEND_VOICE is disabled")
-        return False
-    
-    with open(audio_file, 'rb') as f:
-        audio_data = f.read()
-    
-    destinations = []
-    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
-        destinations.append({
-            "id": str(TELEGRAM_CHAT_ID).strip(),
-            "name": "PRIVATE_CHAT"
-        })
-        print(f"✅ Audio destination: PRIVATE_CHAT ({TELEGRAM_CHAT_ID})")
-    
-    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
-        group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
-        if group_id not in [d["id"] for d in destinations]:
-            destinations.append({
-                "id": group_id,
-                "name": "SUPERGROUP"
-            })
-            print(f"✅ Audio destination: SUPERGROUP ({group_id})")
-    
-    if not destinations:
-        print("❌ No Telegram destinations configured for audio")
-        return False
-    
-    print(f"🎤 Sending audio to {len(destinations)} destination(s)")
-    success_count = 0
-    
-    for dest in destinations:
-        chat_id = dest["id"]
-        dest_name = dest["name"]
-        
-        print(f"  Sending audio to {dest_name}...", end=" ", flush=True)
-        
-        boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
-        body = bytearray()
-        
-        body.extend(f'--{boundary}\r\n'.encode())
-        body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
-        body.extend(str(chat_id).encode())
-        body.extend(b'\r\n')
-        
-        if caption:
-            body.extend(f'--{boundary}\r\n'.encode())
-            body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
-            body.extend(caption.encode('utf-8'))
-            body.extend(b'\r\n')
-        
-        body.extend(f'--{boundary}\r\n'.encode())
-        body.extend(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"\r\n'.encode())
-        body.extend(b'Content-Type: audio/mpeg\r\n\r\n')
-        body.extend(audio_data)
-        body.extend(b'\r\n')
-        body.extend(f'--{boundary}--\r\n'.encode())
-        
-        headers = {
-            'Content-Type': f'multipart/form-data; boundary={boundary}',
-            'Content-Length': str(len(body))
-        }
-        
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
-        req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
-        
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                if result.get('ok', False):
-                    print("✅")
-                    success_count += 1
-                else:
-                    error_msg = result.get('description', 'Unknown error')
-                    print(f"❌ {error_msg}")
-        except urllib.error.HTTPError as e:
-            print(f"❌ HTTP {e.code}: {e.reason}")
-        except Exception as e:
-            print(f"❌ {e}")
-    
-    if success_count > 0:
-        print(f"✅ Audio sent to {success_count}/{len(destinations)} destinations")
-    else:
-        print(f"❌ Audio failed to all {len(destinations)} destinations")
-    
-    return success_count > 0
-
-# ============================================================
-# ATLAS RADAR
-# ============================================================
-
-ATLAS_PRIORITY_TOP10 = [
-    "BTC", "ETH", "BNB", "XRP", "SOL",
-    "TRX", "HYPE", "DOGE", "ADA", "MATIC",
-]
-
-ATLAS_PERSONAL_ASSETS = [
-    "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ADA", "LINK",
-    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
-    "NEAR", "ONDO", "TAO",
-]
-
-ATLAS_STATIC = [
-    "BTC", "ETH", "XRP", "SOL", "BNB", "TON", "ADA", "DOGE", "TRX", "LINK",
-    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR",
-    "QNT", "GRT", "TAO", "ONDO", "UNI", "ETHFI", "ATOM", "FIL", "AAVE", "MKR",
-    "APT", "ARB", "OP", "INJ", "TIA", "SEI", "PEPE", "FET", "ICP", "ETC",
-    "HYPE", "MATIC",
-]
-
-ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
-METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
-METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
-
-DATA_SYMBOL_ALIASES = {
-    "MATIC": "POL",
-}
-
-def data_symbol(symbol):
-    return DATA_SYMBOL_ALIASES.get((symbol or "").upper(), (symbol or "").upper())
-
-STABLE_SYMBOLS = {
-    "USDT", "USDC", "USDE", "USDS", "DAI", "FDUSD", "TUSD", "USDP",
-    "PYUSD", "USDD", "FRAX", "LUSD", "GUSD", "USDG", "USDB", "EURC",
-    "USDC.E", "USD0", "USD1",
-}
-
-MACRO_SYMBOLS = {
-    "DXY": ("DX-Y.NYB", "DX=F", "^DXY"),
-    "GOLD": "GC=F",
-    "SILVER": "SI=F",
-    "COPPER": "HG=F",
-    "WTI": "CL=F",
-    "BRENT": "BZ=F",
-}
-
-NEWS_NEGATIVE = (
-    "hack", "exploit", "lawsuit", "ban", "delist", "liquidation", "fraud",
-    "sec", "investigation", "outflow", "stolen", "sanction", "default",
-    "bankruptcy", "attack", "breach", "collapse", "tariff", "war",
-)
-NEWS_POSITIVE = (
-    "approval", "approved", "etf", "inflow", "partnership", "launch",
-    "adoption", "upgrade", "listing", "integration", "record", "acquisition",
-)
-HIGH_IMPACT_WORDS = (
-    "federal reserve", "fed", "fomc", "interest rate", "rate decision",
-    "cpi", "inflation", "jobs report", "nonfarm", "nfp", "powell",
-    "hack", "exploit", "sec", "lawsuit", "ban", "regulation", "sanction",
-    "war", "tariff", "bank failure", "liquidation cascade",
-)
-
-# ============================================================
 # GENERIC HELPERS
 # ============================================================
 
@@ -837,6 +383,193 @@ def safe_http_get(url, timeout=15, headers=None, default=None):
         append_changelog("HTTP", None, None, f"request failed: {url}: {e}")
         return default
 
+# ============================================================
+# CANDLE FUNCTIONS - اصلاح شده با تابع _next_candle_boundary_ms
+# ============================================================
+
+def _next_candle_boundary_ms(start_ms, timeframe):
+    """محاسبه زمان بسته‌شدن کندل بعدی بر اساس تایم‌فریم"""
+    dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    
+    if timeframe == "1M":
+        if dt.month == 12:
+            nxt = dt.replace(year=dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            nxt = dt.replace(month=dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return int(nxt.timestamp() * 1000)
+    
+    if timeframe == "1w":
+        nxt = dt + timedelta(days=7)
+        return int(nxt.timestamp() * 1000)
+    
+    fixed = {
+        "15m": 15 * 60 * 1000,
+        "30m": 30 * 60 * 1000,
+        "1h": 60 * 60 * 1000,
+        "4h": 4 * 60 * 60 * 1000,
+        "1d": 24 * 60 * 60 * 1000,
+    }.get(timeframe)
+    
+    if fixed is None:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    
+    return start_ms + fixed
+
+def candle_is_closed(start_ms, timeframe, now_ms=None):
+    """بررسی بسته‌شدن کندل"""
+    if start_ms is None:
+        return False
+    now_ms = now_ms or int(time.time() * 1000)
+    try:
+        return _next_candle_boundary_ms(int(start_ms), timeframe) <= now_ms
+    except Exception:
+        return False
+
+def strip_incomplete(rows, timeframe):
+    """حذف کندل‌های ناقص"""
+    clean = []
+    now_ms = int(time.time() * 1000)
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        ts = safe_float(row[0])
+        if ts is None:
+            continue
+        if candle_is_closed(int(ts), timeframe, now_ms):
+            clean.append(list(row))
+    return clean
+
+def candle_event(coin, timeframe, rows):
+    latest = int(rows[-1][0]) if rows else None
+    if latest is None:
+        return {"status": "NO_DATA", "closed_ts": None, "timeframe": timeframe}
+    status = "NEW_CLOSED"
+    if EVENT_DEDUP_ENABLED:
+        with sqlite_conn() as c:
+            prev = c.execute(
+                "select last_closed_ts from candle_events where coin=? and timeframe=?",
+                (coin, timeframe),
+            ).fetchone()
+            if prev and prev[0] == latest:
+                status = "UNCHANGED"
+            c.execute(
+                "insert into candle_events(coin,timeframe,last_closed_ts,last_status,observed_at) values(?,?,?,?,?) "
+                "on conflict(coin,timeframe) do update set last_closed_ts=excluded.last_closed_ts,last_status=excluded.last_status,observed_at=excluded.observed_at",
+                (coin, timeframe, latest, status, now_utc().isoformat()),
+            )
+    return {"status": status, "closed_ts": latest, "timeframe": timeframe}
+
+# ============================================================
+# COINGECKO IDS MAPPING
+# ============================================================
+COINGECKO_IDS = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "BNB": "binancecoin",
+    "XRP": "ripple",
+    "SOL": "solana",
+    "TRX": "tron",
+    "HYPE": "hype",
+    "DOGE": "dogecoin",
+    "ADA": "cardano",
+    "MATIC": "matic-network",
+    "LINK": "chainlink",
+    "XLM": "stellar",
+    "SUI": "sui",
+    "AVAX": "avalanche-2",
+    "LTC": "litecoin",
+    "SHIB": "shiba-inu",
+    "HBAR": "hedera-hashgraph",
+    "DOT": "polkadot",
+    "BCH": "bitcoin-cash",
+    "XMR": "monero",
+    "NEAR": "near",
+    "QNT": "quant-network",
+    "GRT": "the-graph",
+    "TAO": "tao",
+    "ONDO": "ondo",
+    "UNI": "uniswap",
+    "ETHFI": "ethfi",
+    "ATOM": "cosmos",
+    "FIL": "filecoin",
+    "AAVE": "aave",
+    "MKR": "maker",
+    "APT": "aptos",
+    "ARB": "arbitrum",
+    "OP": "optimism",
+    "INJ": "injective-protocol",
+    "TIA": "celestia",
+    "SEI": "sei-network",
+    "PEPE": "pepe",
+    "FET": "fet",
+    "ICP": "internet-computer",
+    "ETC": "ethereum-classic",
+}
+
+# ============================================================
+# ATLAS RADAR
+# ============================================================
+
+ATLAS_PRIORITY_TOP10 = [
+    "BTC", "ETH", "BNB", "XRP", "SOL",
+    "TRX", "HYPE", "DOGE", "ADA", "MATIC",
+]
+
+ATLAS_PERSONAL_ASSETS = [
+    "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ADA", "LINK",
+    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
+    "NEAR", "ONDO", "TAO",
+]
+
+ATLAS_STATIC = [
+    "BTC", "ETH", "XRP", "SOL", "BNB", "TON", "ADA", "DOGE", "TRX", "LINK",
+    "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR", "NEAR",
+    "QNT", "GRT", "TAO", "ONDO", "UNI", "ETHFI", "ATOM", "FIL", "AAVE", "MKR",
+    "APT", "ARB", "OP", "INJ", "TIA", "SEI", "PEPE", "FET", "ICP", "ETC",
+    "HYPE", "MATIC",
+]
+
+ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
+METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
+METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
+
+DATA_SYMBOL_ALIASES = {
+    "MATIC": "POL",
+}
+
+def data_symbol(symbol):
+    return DATA_SYMBOL_ALIASES.get((symbol or "").upper(), (symbol or "").upper())
+
+STABLE_SYMBOLS = {
+    "USDT", "USDC", "USDE", "USDS", "DAI", "FDUSD", "TUSD", "USDP",
+    "PYUSD", "USDD", "FRAX", "LUSD", "GUSD", "USDG", "USDB", "EURC",
+    "USDC.E", "USD0", "USD1",
+}
+
+MACRO_SYMBOLS = {
+    "DXY": ("DX-Y.NYB", "DX=F", "^DXY"),
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",
+    "COPPER": "HG=F",
+    "WTI": "CL=F",
+    "BRENT": "BZ=F",
+}
+
+NEWS_NEGATIVE = (
+    "hack", "exploit", "lawsuit", "ban", "delist", "liquidation", "fraud",
+    "sec", "investigation", "outflow", "stolen", "sanction", "default",
+    "bankruptcy", "attack", "breach", "collapse", "tariff", "war",
+)
+NEWS_POSITIVE = (
+    "approval", "approved", "etf", "inflow", "partnership", "launch",
+    "adoption", "upgrade", "listing", "integration", "record", "acquisition",
+)
+HIGH_IMPACT_WORDS = (
+    "federal reserve", "fed", "fomc", "interest rate", "rate decision",
+    "cpi", "inflation", "jobs report", "nonfarm", "nfp", "powell",
+    "hack", "exploit", "sec", "lawsuit", "ban", "regulation", "sanction",
+    "war", "tariff", "bank failure", "liquidation cascade",
+)
 
 # ============================================================
 # SQLITE FALLBACK / LOCAL AUDIT
@@ -957,6 +690,132 @@ def init_sqlite():
         );
         """)
 
+# ============================================================
+# CCXT - اصلاح شده با صرافی‌های غیرتحریمی
+# ============================================================
+
+def make_exchange(exchange_id):
+    cls = getattr(ccxt, exchange_id)
+    return cls({
+        "enableRateLimit": True,
+        "timeout": 15000,
+        "options": {"defaultType": "spot"},
+    })
+
+def init_exchanges():
+    global EX, MARKETS
+    EX = {}
+    MARKETS = {}
+    
+    print("🔧 Initializing exchanges...")
+    
+    # فقط صرافی‌های غیرتحریمی و معتبر را امتحان کن
+    for eid in get_valid_exchanges():
+        try:
+            print(f"  ⏳ {eid}...", end=" ", flush=True)
+            ex = make_exchange(eid)
+            markets = ex.load_markets()
+            if not markets:
+                raise RuntimeError(f"{eid}: empty market catalog")
+            EX[eid] = ex
+            MARKETS[eid] = markets
+            print(f"✅ {len(markets)} markets")
+        except Exception as e:
+            EX.pop(eid, None)
+            MARKETS.pop(eid, None)
+            error_msg = str(e)[:100]
+            print(f"❌ {error_msg}")
+            append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
+    
+    if not EX:
+        print("⚠️ No exchanges available! Using fallback data sources.")
+        return False
+    
+    print(f"✅ {len(EX)} exchanges initialized successfully")
+    return True
+
+EX = {}
+MARKETS = {}
+
+def ensure_exchanges(force=False):
+    if EX and MARKETS and not force:
+        return True
+    init_exchanges()
+    return bool(EX)
+
+def coingecko_headers():
+    if COINGECKO_API_KEY:
+        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
+    return {}
+
+def symbol_for(eid, coin):
+    markets = MARKETS.get(eid, {})
+    dc = data_symbol(coin)
+    for s in (f"{dc}/USDT", f"{dc}/USDT:USDT", f"{coin}/USDT", f"{coin}/USDT:USDT"):
+        if s in markets:
+            return s
+    return None
+
+def exchange_ticker(eid, coin):
+    ex = EX.get(eid)
+    if ex is None:
+        raise RuntimeError(f"{eid}: exchange unavailable")
+    sym = symbol_for(eid, coin)
+    if not sym:
+        raise RuntimeError(f"{eid}: pair unavailable")
+    try:
+        t = ex.fetch_ticker(sym)
+        return {
+            "source": eid.upper(),
+            "price": f(t.get("last")),
+            "change": f(t.get("percentage")),
+            "quoteVolume": f(t.get("quoteVolume")),
+        }
+    except Exception as e:
+        raise RuntimeError(f"{eid}: ticker fetch failed - {e}")
+
+def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
+    ex = EX.get(eid)
+    if ex is None:
+        raise RuntimeError(f"{eid}: exchange unavailable")
+    sym = symbol_for(eid, coin)
+    if not sym:
+        raise RuntimeError(f"{eid}: pair unavailable")
+    supported = getattr(ex, "timeframes", None) or {}
+    if supported and timeframe not in supported:
+        raise RuntimeError(f"{eid}: timeframe {timeframe} unsupported")
+    rows = ex.fetch_ohlcv(sym, timeframe=timeframe, limit=limit)
+    if len(rows) < 60:
+        raise RuntimeError(f"{eid}: insufficient candles")
+    return strip_incomplete(rows, timeframe)
+
+def best_ohlcv(coin, timeframe, limit=250):
+    ensure_exchanges()
+    
+    if not EX:
+        raise RuntimeError(f"No exchanges available for {coin}")
+    
+    # اولویت با صرافی‌های غیرتحریمی و مطمئن
+    for eid in PRIORITY_EXCHANGES:
+        if eid not in EX:
+            continue
+        try:
+            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
+        except Exception as e:
+            print(f"⚠️ {eid} failed for {coin}: {str(e)[:50]}")
+            continue
+    
+    # اگر صرافی‌های اولویت‌دار موفق نشدند، بقیه را امتحان کن
+    for eid in FALLBACK_EXCHANGES:
+        if eid not in EX:
+            continue
+        try:
+            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
+        except Exception as e:
+            print(f"⚠️ {eid} failed for {coin}: {str(e)[:50]}")
+            continue
+    
+    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
 
 # ============================================================
 # SUPABASE STORAGE
@@ -1029,9 +888,7 @@ class SupabaseStore:
         except Exception:
             return []
 
-
 STORE = SupabaseStore()
-
 
 def append_changelog(component, old, new, reason, evidence=None):
     ts = now_utc().isoformat()
@@ -1058,7 +915,6 @@ def append_changelog(component, old, new, reason, evidence=None):
             "evidence": evidence or {},
         },
     )
-
 
 # ============================================================
 # MULTI-SOURCE HELPERS
@@ -1180,197 +1036,6 @@ def multi_source_validation(symbol, exchange_price=None):
     }
 
 # ============================================================
-# CCXT - اصلاح شده با صرافی‌های غیرتحریمی
-# ============================================================
-
-def make_exchange(exchange_id):
-    cls = getattr(ccxt, exchange_id)
-    return cls({
-        "enableRateLimit": True,
-        "timeout": 15000,
-        "options": {"defaultType": "spot"},
-    })
-
-def init_exchanges():
-    global EX, MARKETS
-    EX = {}
-    MARKETS = {}
-    
-    print("🔧 Initializing exchanges...")
-    
-    # فقط صرافی‌های غیرتحریمی و معتبر را امتحان کن
-    for eid in get_valid_exchanges():
-        try:
-            print(f"  ⏳ {eid}...", end=" ", flush=True)
-            ex = make_exchange(eid)
-            markets = ex.load_markets()
-            if not markets:
-                raise RuntimeError(f"{eid}: empty market catalog")
-            EX[eid] = ex
-            MARKETS[eid] = markets
-            print(f"✅ {len(markets)} markets")
-        except Exception as e:
-            EX.pop(eid, None)
-            MARKETS.pop(eid, None)
-            error_msg = str(e)[:100]
-            print(f"❌ {error_msg}")
-            append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
-    
-    if not EX:
-        print("⚠️ No exchanges available! Using fallback data sources.")
-        return False
-    
-    print(f"✅ {len(EX)} exchanges initialized successfully")
-    return True
-
-EX = {}
-MARKETS = {}
-
-def ensure_exchanges(force=False):
-    if EX and MARKETS and not force:
-        return True
-    init_exchanges()
-    return bool(EX)
-
-def coingecko_headers():
-    if COINGECKO_API_KEY:
-        return {"x-cg-demo-api-key": COINGECKO_API_KEY}
-    return {}
-
-def symbol_for(eid, coin):
-    markets = MARKETS.get(eid, {})
-    dc = data_symbol(coin)
-    for s in (f"{dc}/USDT", f"{dc}/USDT:USDT", f"{coin}/USDT", f"{coin}/USDT:USDT"):
-        if s in markets:
-            return s
-    return None
-
-def exchange_ticker(eid, coin):
-    ex = EX.get(eid)
-    if ex is None:
-        raise RuntimeError(f"{eid}: exchange unavailable")
-    sym = symbol_for(eid, coin)
-    if not sym:
-        raise RuntimeError(f"{eid}: pair unavailable")
-    try:
-        t = ex.fetch_ticker(sym)
-        return {
-            "source": eid.upper(),
-            "price": f(t.get("last")),
-            "change": f(t.get("percentage")),
-            "quoteVolume": f(t.get("quoteVolume")),
-        }
-    except Exception as e:
-        raise RuntimeError(f"{eid}: ticker fetch failed - {e}")
-
-def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
-    ex = EX.get(eid)
-    if ex is None:
-        raise RuntimeError(f"{eid}: exchange unavailable")
-    sym = symbol_for(eid, coin)
-    if not sym:
-        raise RuntimeError(f"{eid}: pair unavailable")
-    supported = getattr(ex, "timeframes", None) or {}
-    if supported and timeframe not in supported:
-        raise RuntimeError(f"{eid}: timeframe {timeframe} unsupported")
-    rows = ex.fetch_ohlcv(sym, timeframe=timeframe, limit=limit)
-    if len(rows) < 60:
-        raise RuntimeError(f"{eid}: insufficient candles")
-    return strip_incomplete(rows, timeframe)
-    def _next_candle_boundary_ms(start_ms, timeframe):
-    dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
-    if timeframe == "1M":
-        if dt.month == 12:
-            nxt = dt.replace(year=dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            nxt = dt.replace(month=dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        return int(nxt.timestamp() * 1000)
-    if timeframe == "1w":
-        nxt = dt + timedelta(days=7)
-        return int(nxt.timestamp() * 1000)
-    fixed = {
-        "15m": 15 * 60 * 1000,
-        "30m": 30 * 60 * 1000,
-        "1h": 60 * 60 * 1000,
-        "4h": 4 * 60 * 60 * 1000,
-        "1d": 24 * 60 * 60 * 1000,
-    }.get(timeframe)
-    if fixed is None:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
-    return start_ms + fixed
-
-def candle_is_closed(start_ms, timeframe, now_ms=None):
-    if start_ms is None:
-        return False
-    now_ms = now_ms or int(time.time() * 1000)
-    try:
-        return _next_candle_boundary_ms(int(start_ms), timeframe) <= now_ms
-    except Exception:
-        return False
-
-def strip_incomplete(rows, timeframe):
-    clean = []
-    now_ms = int(time.time() * 1000)
-    for row in rows or []:
-        if not isinstance(row, (list, tuple)) or len(row) < 6:
-            continue
-        ts = safe_float(row[0])
-        if ts is None:
-            continue
-        if candle_is_closed(int(ts), timeframe, now_ms):
-            clean.append(list(row))
-    return clean
-
-def candle_event(coin, timeframe, rows):
-    latest = int(rows[-1][0]) if rows else None
-    if latest is None:
-        return {"status": "NO_DATA", "closed_ts": None, "timeframe": timeframe}
-    status = "NEW_CLOSED"
-    if EVENT_DEDUP_ENABLED:
-        with sqlite_conn() as c:
-            prev = c.execute(
-                "select last_closed_ts from candle_events where coin=? and timeframe=?",
-                (coin, timeframe),
-            ).fetchone()
-            if prev and prev[0] == latest:
-                status = "UNCHANGED"
-            c.execute(
-                "insert into candle_events(coin,timeframe,last_closed_ts,last_status,observed_at) values(?,?,?,?,?) "
-                "on conflict(coin,timeframe) do update set last_closed_ts=excluded.last_closed_ts,last_status=excluded.last_status,observed_at=excluded.observed_at",
-                (coin, timeframe, latest, status, now_utc().isoformat()),
-            )
-    return {"status": status, "closed_ts": latest, "timeframe": timeframe}
-
-def best_ohlcv(coin, timeframe, limit=250):
-    ensure_exchanges()
-    
-    if not EX:
-        raise RuntimeError(f"No exchanges available for {coin}")
-    
-    # اولویت با صرافی‌های غیرتحریمی و مطمئن
-    for eid in PRIORITY_EXCHANGES:
-        if eid not in EX:
-            continue
-        try:
-            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
-        except Exception as e:
-            print(f"⚠️ {eid} failed for {coin}: {str(e)[:50]}")
-            continue
-    
-    # اگر صرافی‌های اولویت‌دار موفق نشدند، بقیه را امتحان کن
-    for eid in FALLBACK_EXCHANGES:
-        if eid not in EX:
-            continue
-        try:
-            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
-        except Exception as e:
-            print(f"⚠️ {eid} failed for {coin}: {str(e)[:50]}")
-            continue
-    
-    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
-
-
-# ============================================================
 # DYNAMIC MARKET UNIVERSE
 # ============================================================
 
@@ -1460,7 +1125,6 @@ def build_universe():
         )
     return universe, top10, dynamic30
 
-
 # ============================================================
 # PORTFOLIO SYMBOLS — FIXED (USER-DEFINED, NEVER CHANGES)
 # ============================================================
@@ -1537,7 +1201,6 @@ def _portfolio_rows(results):
                 "original_action": "NO DATA",
             })
     return rows
-
 
 # ============================================================
 # TECHNICAL INDICATORS
@@ -1740,7 +1403,6 @@ def daily_key_levels(daily_rows, current_price=None):
             "support_touches":sup["touches"] if sup else 0,"resistance_touches":res["touches"] if res else 0,
             "confidence":confidence,"method":"DAILY_SWING_CLUSTER_REJECTION_VOLUME"}
 
-
 # ============================================================
 # CANDLE PATTERNS
 # ============================================================
@@ -1771,7 +1433,6 @@ def candle_pattern(rows):
     if upper / total >= 0.60 and bc <= bo:
         return "BEARISH PIN BAR", "BEARISH"
     return "NONE", "NEUTRAL"
-
 
 # ============================================================
 # DIVERGENCE
@@ -1805,7 +1466,6 @@ def divergence_3_level(values, indicator):
         if p[0] < p[1] < p[2] and r[0] > r[1] > r[2]:
             return "BEARISH_3_LEVEL"
     return None
-
 
 # ============================================================
 # MULTI-TIMEFRAME ANALYSIS
@@ -1856,7 +1516,6 @@ def tf_snapshot(coin):
         out["30m"] = {"error": str(e), "event": {"status":"ERROR","closed_ts":None,"timeframe":"30m"}}
     return out
 
-
 # ============================================================
 # 30-MINUTE MOMENTUM
 # ============================================================
@@ -1877,7 +1536,6 @@ def momentum_30m(coin):
     except Exception as e:
         append_changelog("MOMENTUM_30M",None,None,f"{coin}: {e}")
         return "UNKNOWN",False
-
 
 # ============================================================
 # NEWS
@@ -1950,7 +1608,6 @@ def news_feed():
         "items": items[:12],
     }
 
-
 # ============================================================
 # MACRO: DXY / METALS / OIL
 # ============================================================
@@ -1995,7 +1652,6 @@ def macro_snapshot():
         out[name] = value
     return out
 
-
 # ============================================================
 # LIQUIDITY
 # ============================================================
@@ -2017,7 +1673,6 @@ def market_liquidity_index(results):
     scores = [f(x.get("liquidity_score")) for x in results]
     scores = [x for x in scores if x is not None]
     return round(safe_mean(scores, 0.0), 1)
-
 
 # ============================================================
 # PRICE CONSENSUS
@@ -2075,7 +1730,6 @@ def price_consensus(coin):
         else "LOW"
     )
     return med, sources, quality, sp, errors
-
 
 # ============================================================
 # SIGNAL SCORING
@@ -2159,7 +1813,6 @@ def weekly_pivot(rows):
     if not highs or not lows or not closes_:
         return None
     return (max(highs) + min(lows) + closes_[-1]) / 3.0
-
 
 def _validate_trade_geometry(direction, entry, sl, tp1, tp2, min_rr=None):
     """Deterministic safety gate: reject impossible/contradictory trade geometry."""
@@ -2302,7 +1955,6 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
         elif h > (resistance or math.inf) and c < (resistance or -math.inf):
             state="RESISTANCE_REJECT"
     return {"state":state,"close_location":round(loc,3),"range_pct":round(range_pct,3),"near_extreme":loc>=0.85 or loc<=0.15}
-
 
 # ============================================================
 # ANALYZE COIN
@@ -2538,7 +2190,7 @@ def analyze_coin(coin, market_news, weights):
         reason_parts.append("واگرایی 3 سطحی")
     if warning:
         reason_parts.append(warning)
-       change_24h = next(
+    change_24h = next(
         (f(x.get("change")) for x in sources if f(x.get("change")) is not None),
         None,
     )
@@ -2798,7 +2450,6 @@ def analyze_coin(coin, market_news, weights):
         "should_trade": should_trade,
         "repeat_signal": repeat_signal,
     }
-
 
 # ============================================================
 # DECISION ENGINE — REGIME / BREADTH / RISK / MEMORY
@@ -3086,7 +2737,6 @@ def atlas_decision_board(results, btc_regime, breadth):
     lines.append("Rule: تحلیل خوب ≠ معامله خوب؛ R/R، regime، ساختار و تکراری‌بودن سیگنال همزمان بررسی شده‌اند.")
     return "\n".join(lines)
 
-
 # ============================================================
 # SELF-HEALING WEIGHTS
 # ============================================================
@@ -3174,7 +2824,6 @@ def self_diagnostic():
                           {"samples":3,"wins":3-losses,"losses":losses,"error_pct":error_pct,"signal_ids":[r["id"] for r in recent]})
         with sqlite_conn() as c:
             c.executemany("insert or ignore into self_healing_processed(signal_id,processed_at) values(?,?)",[(r["id"],now_utc().isoformat()) for r in recent])
-
 
 # ============================================================
 # BACKTEST ENGINE
@@ -3444,7 +3093,6 @@ def mandatory_backtest_gate(universe):
     _save_backtest_gate(passed, result)
     return passed, result
 
-
 # ============================================================
 # SIGNAL OUTCOME TRACKING
 # ============================================================
@@ -3557,7 +3205,6 @@ def evaluate_open_outcomes():
             STORE.insert("atlas_signal_outcomes",{"coin":row["coin"],"direction":row["direction"],"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"issued_at":row["issued_at"],"status":"CLOSED","outcome":outcome,"exit_price":exit_price,"exit_at":now_utc().isoformat(),"pnl_pct":pnl,"bars_to_exit":bars,"notes":row["notes"]})
         except Exception as e:
             append_changelog("OUTCOME_EVAL",None,None,f"{row['coin']}: {e}",{"traceback":traceback.format_exc()})
-
 
 # ============================================================
 # TELEGRAM — WITH RATE LIMIT HANDLING
@@ -3762,7 +3409,6 @@ def send_report(text):
     
     return len(parts), sent, errors
 
-
 # ============================================================
 # DATA EXPORT — DYNAMIC CSV FROM THE SAME RESULTS OBJECT
 # ============================================================
@@ -3923,6 +3569,344 @@ def send_csv_report(results, top10, dynamic30):
     return sent, errors
 
 # ============================================================
+# VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
+# ============================================================
+
+def generate_voice_summary(results, news=None, btc_regime=None):
+    """تولید خلاصه صوتی کامل از نتایج با اخبار و سیگنال‌ها"""
+    if not results:
+        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
+    
+    print(f"📝 generate_voice_summary: processing {len(results)} items")
+    
+    session, session_label, session_multiplier = get_current_session()
+    
+    up_count = 0
+    down_count = 0
+    stable_count = 0
+    changes = []
+    buy_signals = []
+    sell_signals = []
+    watch_signals = []
+    
+    for r in results:
+        price = f(r.get("price"))
+        change = f(r.get("change")) or f(r.get("change24"))
+        symbol = r.get("coin", "")
+        action = str(r.get("action") or "").upper()
+        confidence = r.get("confidence", 0)
+        
+        if price:
+            if change is not None:
+                changes.append((symbol, change))
+                if change > 0.5:
+                    up_count += 1
+                elif change < -0.5:
+                    down_count += 1
+                else:
+                    stable_count += 1
+        
+        if action in ("BUY CONFIRMATION", "BUY"):
+            buy_signals.append((symbol, confidence, r.get("rr", 0)))
+        elif action in ("SELL CONFIRMATION", "SELL"):
+            sell_signals.append((symbol, confidence, r.get("rr", 0)))
+        elif action in ("BULLISH WATCH", "BEARISH WATCH"):
+            watch_signals.append((symbol, action, confidence))
+    
+    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
+    print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
+    
+    lines = [
+        "به گزارش صوتی اطلس خوش آمدید.",
+        f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
+    ]
+    
+    if btc_regime:
+        regime = btc_regime.get("regime", "UNKNOWN")
+        if regime == "RISK_ON":
+            lines.append("بازار در حالت ریسک‌پذیر قرار دارد و تمایل به صعود دارد.")
+        elif regime == "RISK_OFF":
+            lines.append("بازار در حالت ریسک‌گریز قرار دارد و احتیاط بیشتری نیاز است.")
+        else:
+            lines.append("بازار در حالت خنثی قرار دارد.")
+    
+    if up_count > 0:
+        lines.append(f"{up_count} ارز صعودی هستند.")
+    if down_count > 0:
+        lines.append(f"{down_count} ارز نزولی هستند.")
+    if stable_count > 0:
+        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
+    
+    if changes:
+        best = max(changes, key=lambda x: x[1])
+        worst = min(changes, key=lambda x: x[1])
+        if best[1] > 0:
+            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
+        if worst[1] < 0:
+            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
+    
+    if buy_signals:
+        buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
+        lines.append(buy_text)
+    
+    if sell_signals:
+        sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
+        lines.append(sell_text)
+    
+    if watch_signals:
+        watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
+        lines.append(watch_text)
+    
+    if news:
+        bias = news.get("bias", "")
+        impact = news.get("impact", "")
+        if bias == "POSITIVE":
+            lines.append("اخبار بازار عمدتاً مثبت است.")
+        elif bias == "NEGATIVE":
+            lines.append("اخبار بازار عمدتاً منفی است.")
+        elif bias == "MIXED/LIMITED":
+            lines.append("اخبار بازار مختلط است.")
+        
+        if impact == "HIGH":
+            lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
+        
+        items = news.get("items", [])[:3]
+        if items:
+            headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
+            if headlines:
+                lines.append("خبرهای مهم: " + "، ".join(headlines))
+    
+    usdt = fetch_usdt_toman_public()
+    if usdt:
+        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
+    
+    if buy_signals:
+        lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
+    elif watch_signals:
+        lines.append("توصیه: در حال حاضر در جایگاه ناظر باشید و منتظر تأیید سیگنال‌ها بمانید.")
+    else:
+        lines.append("توصیه: فعلاً در جایگاه ناظر باشید و منتظر شکل‌گیری سیگنال معتبر بمانید.")
+    
+    lines.append("این پیام به صورت خودکار هر ۴ ساعت بروزرسانی می‌شود.")
+    
+    result = " ".join(lines)
+    print(f"📝 Voice text length: {len(result)} characters")
+    return result
+
+def generate_voice_summary_from_snapshot(results):
+    """تولید خلاصه صوتی از داده‌های اسنپ‌شات"""
+    if not results:
+        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
+    
+    session, session_label, session_multiplier = get_current_session()
+    
+    up_count = 0
+    down_count = 0
+    stable_count = 0
+    changes = []
+    prices = []
+    
+    for r in results:
+        price = f(r.get("price"))
+        change = f(r.get("change")) or f(r.get("change24"))
+        symbol = r.get("coin", "")
+        if price:
+            prices.append(price)
+            if change is not None:
+                changes.append((symbol, change))
+                if change > 0.5:
+                    up_count += 1
+                elif change < -0.5:
+                    down_count += 1
+                else:
+                    stable_count += 1
+    
+    lines = [
+        "به گزارش صوتی اطلس خوش آمدید.",
+        f"گزارش لحظه‌ای بازار ارزهای دیجیتال در سشن {session_label}.",
+    ]
+    
+    if up_count > 0:
+        lines.append(f"{up_count} ارز صعودی هستند.")
+    if down_count > 0:
+        lines.append(f"{down_count} ارز نزولی هستند.")
+    if stable_count > 0:
+        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
+    
+    if changes:
+        best = max(changes, key=lambda x: x[1])
+        worst = min(changes, key=lambda x: x[1])
+        if best[1] > 0:
+            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
+        if worst[1] < 0:
+            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
+    
+    usdt = fetch_usdt_toman_public()
+    if usdt:
+        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
+    
+    lines.append("این پیام به صورت خودکار هر ۳ ساعت بروزرسانی می‌شود.")
+    
+    return " ".join(lines)
+
+def text_to_speech_persian(text, voice="female"):
+    """تبدیل متن فارسی به صدا - اولویت: Edge TTS → gTTS → Google Translate"""
+    
+    try:
+        import edge_tts
+        import asyncio
+        voice_map = {"female": "fa-IR-DilaraNeural", "male": "fa-IR-FaridNeural"}
+        selected_voice = voice_map.get(voice, "fa-IR-DilaraNeural")
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        output_path = temp_file.name
+        temp_file.close()
+        async def generate():
+            communicate = edge_tts.Communicate(text, selected_voice)
+            await communicate.save(output_path)
+        asyncio.run(generate())
+        return output_path
+    except:
+        pass
+    
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang="fa", slow=False)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        tts.save(temp_file.name)
+        return temp_file.name
+    except:
+        pass
+    
+    try:
+        text_encoded = urllib.parse.quote(text)
+        url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl=fa&client=tw-ob"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            audio_data = response.read()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        temp_file.write(audio_data)
+        temp_file.close()
+        return temp_file.name
+    except Exception as e:
+        print(f"⚠️ TTS error: {e}")
+        return None
+
+def generate_audio_report(results, news=None, btc_regime=None, filename="audio_report.mp3"):
+    """تولید فایل صوتی کامل از گزارش با اخبار و سیگنال‌ها"""
+    if not results:
+        return None
+    
+    audio_text = generate_voice_summary(results, news, btc_regime)
+    
+    if len(audio_text) < 50:
+        audio_text = generate_voice_summary_from_snapshot(results)
+    
+    print(f"🎤 Generating audio with text: {audio_text[:100]}...")
+    audio_file = text_to_speech_persian(audio_text, VOICE_TYPE)
+    if audio_file:
+        import shutil
+        final_path = filename
+        shutil.move(audio_file, final_path)
+        return final_path
+    return None
+
+def send_audio_report(audio_file, caption=None):
+    """ارسال گزارش صوتی به تمام مقاصد تلگرام (چت خصوصی + سوپرگروه)"""
+    if not os.path.exists(audio_file):
+        print(f"❌ Audio file not found: {audio_file}")
+        return False
+    if not TELEGRAM_TOKEN:
+        print("❌ TELEGRAM_TOKEN not set")
+        return False
+    if not AUTO_SEND_VOICE:
+        print("ℹ️ AUTO_SEND_VOICE is disabled")
+        return False
+    
+    with open(audio_file, 'rb') as f:
+        audio_data = f.read()
+    
+    destinations = []
+    if TELEGRAM_CHAT_ID and str(TELEGRAM_CHAT_ID).strip():
+        destinations.append({
+            "id": str(TELEGRAM_CHAT_ID).strip(),
+            "name": "PRIVATE_CHAT"
+        })
+        print(f"✅ Audio destination: PRIVATE_CHAT ({TELEGRAM_CHAT_ID})")
+    
+    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID).strip():
+        group_id = str(TELEGRAM_GROUP_CHAT_ID).strip()
+        if group_id not in [d["id"] for d in destinations]:
+            destinations.append({
+                "id": group_id,
+                "name": "SUPERGROUP"
+            })
+            print(f"✅ Audio destination: SUPERGROUP ({group_id})")
+    
+    if not destinations:
+        print("❌ No Telegram destinations configured for audio")
+        return False
+    
+    print(f"🎤 Sending audio to {len(destinations)} destination(s)")
+    success_count = 0
+    
+    for dest in destinations:
+        chat_id = dest["id"]
+        dest_name = dest["name"]
+        
+        print(f"  Sending audio to {dest_name}...", end=" ", flush=True)
+        
+        boundary = '---------------------------' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+        body = bytearray()
+        
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
+        body.extend(str(chat_id).encode())
+        body.extend(b'\r\n')
+        
+        if caption:
+            body.extend(f'--{boundary}\r\n'.encode())
+            body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
+            body.extend(caption.encode('utf-8'))
+            body.extend(b'\r\n')
+        
+        body.extend(f'--{boundary}\r\n'.encode())
+        body.extend(f'Content-Disposition: form-data; name="audio"; filename="{os.path.basename(audio_file)}"\r\n'.encode())
+        body.extend(b'Content-Type: audio/mpeg\r\n\r\n')
+        body.extend(audio_data)
+        body.extend(b'\r\n')
+        body.extend(f'--{boundary}--\r\n'.encode())
+        
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(body))
+        }
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendAudio"
+        req = urllib.request.Request(url, data=bytes(body), headers=headers, method='POST')
+        
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if result.get('ok', False):
+                    print("✅")
+                    success_count += 1
+                else:
+                    error_msg = result.get('description', 'Unknown error')
+                    print(f"❌ {error_msg}")
+        except urllib.error.HTTPError as e:
+            print(f"❌ HTTP {e.code}: {e.reason}")
+        except Exception as e:
+            print(f"❌ {e}")
+    
+    if success_count > 0:
+        print(f"✅ Audio sent to {success_count}/{len(destinations)} destinations")
+    else:
+        print(f"❌ Audio failed to all {len(destinations)} destinations")
+    
+    return success_count > 0
+
+# ============================================================
 # REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
 # ============================================================
 
@@ -3940,7 +3924,6 @@ def action_emoji(action):
         return "⚪ NO DATA"
     return "⚪ WAIT"
 
-
 def tradingview_chart_url(symbol, metal=False):
     if metal:
         tv_symbol = METAL_TV.get(str(symbol).upper())
@@ -3950,13 +3933,11 @@ def tradingview_chart_url(symbol, metal=False):
         return None
     return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(tv_symbol, safe=':!')}&interval={urllib.parse.quote(TRADINGVIEW_INTERVAL)}"
 
-
 def _rr_from_values(entry, sl, tp):
     entry, sl, tp = f(entry), f(sl), f(tp)
     if None in (entry, sl, tp) or entry == sl:
         return None
     return abs(entry - tp) / abs(entry - sl)
-
 
 def _plan_is_allowed(r):
     """Expose levels only for executable or explicitly conditional closed-candle setups."""
@@ -4031,7 +4012,6 @@ def _compact_reason(r):
             seen.append(p)
     return "؛ ".join(seen[:2])
 
-
 def asset_block(r, metal=False, detail=False):
     """Compact decision block; trade levels appear only for a valid/conditional setup."""
     r = _ensure_candidate_plan(dict(r or {}))
@@ -4098,7 +4078,6 @@ def asset_block(r, metal=False, detail=False):
     
     return "\n".join(lines)
 
-
 def _opportunity_score(r):
     conf = float(r.get("confidence") or 0)
     rr = float(r.get("rr") or 0)
@@ -4110,7 +4089,6 @@ def _opportunity_score(r):
     executable = 30 if r.get("action") in ("BUY CONFIRMATION","SELL CONFIRMATION") else 0
     rr_score = min(rr, 4.0) * 10
     return conf * .45 + rr_score + setup*.08 + entry*.05 + risk*.04 + tv_bonus + executable
-
 
 def top5_opportunities(results, exclude_symbols=None):
     """Five best EXECUTABLE crypto opportunities; excluded portfolio symbols never leak into MARKET."""
@@ -4188,14 +4166,12 @@ def _metal_analysis(name):
     except Exception as e:
         return {"coin":name,"price":None,"change":None,"h4_trend":"N/A","d1_trend":"N/A","w1_trend":"N/A","rsi":None,"macd":"N/A","atr_pct":None,"support":None,"resistance":None,"direction":"NONE","action":"NO DATA","confidence":0,"reason":"داده در دسترس نیست","error":str(e)}
 
-
 def metals_report():
     rows=[_metal_analysis(x) for x in ATLAS_METALS]
     lines=["━━━━━━━━━━━━━━━━━━","🪙 ATLAS METALS","طلا / نقره / مس — مستقل از Top 5 کریپتو"]
     for r in rows:
         lines.append(asset_block(r, metal=True, detail=True))
     return "\n\n".join(lines)
-
 
 def _compact_scenario_row(r, metal=False):
     """Compact dashboard row matching the user's uploaded CSV format.
@@ -4294,7 +4270,6 @@ def _compact_scenario_row(r, metal=False):
         "session_multiplier": session_multiplier,
     }
 
-
 def _compact_section(title, rows, metal=False):
     lines = [title, "───────────────────"]
     if not rows:
@@ -4312,8 +4287,6 @@ def _compact_section(title, rows, metal=False):
     session, session_label, session_multiplier = get_current_session()
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
-
-
 
 def _table_status(r):
     h4 = str(r.get("h4_trend") or "").upper()
@@ -4403,8 +4376,6 @@ def _final_market_recommendation(results, top10, dynamic30, macro=None, btc_regi
         f"یا یک pullback به سطوح حمایتی کلیدی بمانید. ورود در شرایط نامطمئن ریسک بهینه‌ای ندارد. (سشن: {session_label} | ضریب: {session_multiplier:.1f}x)"
     )
 
-
-
 def _best_setup_block(results, universe_filter=None, title="🔥 BEST SETUP"):
     """Choose only a real, geometrically valid setup; overbought is a risk modifier, not a buy signal."""
     allowed={str(x).upper() for x in universe_filter} if universe_filter is not None else None
@@ -4476,7 +4447,6 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
     ]
     return "\n\n".join(lines)
 
-
 def build_personal_report(results, macro=None, news=None, market_info=None, btc_regime=None, breadth=None):
     """PERSONAL engine: all portfolio assets, same compact table format."""
     rows = _portfolio_rows(results)
@@ -4492,14 +4462,11 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         _final_market_recommendation(rows, [], [], macro, btc_regime),
     ])
 
-
 def personal_report(*args, **kwargs):
     return build_personal_report(*args, **kwargs)
 
-
 def atlas_engine_mode():
     return get_engine_mode()
-
 
 def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
     market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
@@ -4509,7 +4476,7 @@ def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info
     if mode=="PERSONAL": return [personal]
     return [market,personal]
 
-
+# ============================================================
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
 # ============================================================
 
@@ -4810,7 +4777,6 @@ def atlas_conclusion(results):
     lines.append("🛡️ تصمیم ATLAS: BUY/SELL فقط پس از Gate + R/R + regime + ساختار؛ WATCH یعنی جهت جالب است اما ورود هنوز تأیید نشده.")
     return "\n".join(lines)
 
-
 # ============================================================
 # CONTEXT PERSISTENCE
 # ============================================================
@@ -4867,14 +4833,12 @@ def save_run(results, parts, macro, news, unavailable=0):
         },
     )
 
-
 # ============================================================
 # MAIN
 # ============================================================
 
 _LAST_TOP10 = []
 _LAST_DYNAMIC30 = []
-
 
 def report():
     init_sqlite()
@@ -4943,7 +4907,6 @@ PUBLIC_USDT_PAGES = (
     "https://nobitex.ir/usdt/",
 )
 
-
 def _snapshot_price_text(value):
     v = f(value)
     if v is None:
@@ -4958,7 +4921,6 @@ def _snapshot_price_text(value):
         return f"${v:.6f}"
     return f"${v:.8f}"
 
-
 def _public_page_text(url):
     req = urllib.request.Request(
         url,
@@ -4966,7 +4928,6 @@ def _public_page_text(url):
     )
     with urllib.request.urlopen(req, timeout=15) as r:
         return r.read().decode("utf-8", errors="ignore")
-
 
 def _parse_usdt_toman_page(url, html):
     """Parse public exchange HTML only; no exchange API/key is used."""
@@ -5016,7 +4977,6 @@ def _parse_usdt_toman_page(url, html):
             return median(values)
     return None
 
-
 def fetch_usdt_toman_public():
     """Read USDT/Toman from reputable Iranian exchange web pages, without API keys."""
     candidates = []
@@ -5064,7 +5024,6 @@ def fetch_snapshot_results():
     print(f"📊 Snapshot fetched {len(rows)}/{len(SNAPSHOT_SYMBOLS)} symbols")
     return rows
 
-
 def _snapshot_previous_prices():
     """دریافت قیمت‌های قبلی از دیتابیس"""
     try:
@@ -5080,7 +5039,6 @@ def _snapshot_previous_prices():
         print(f"⚠️ Snapshot previous prices error: {e}")
         return {}
 
-
 def _snapshot_direction(current, previous):
     """تشخیص جهت تغییر قیمت و نمایش فلش مناسب"""
     current = f(current)
@@ -5091,7 +5049,6 @@ def _snapshot_direction(current, previous):
     if abs(delta_pct) < SNAPSHOT_FLAT_THRESHOLD_PCT:
         return "➡️"
     return "⬆️" if delta_pct > 0 else "⬇️"
-
 
 def _save_snapshot_prices(results, captured_at):
     try:
@@ -5112,7 +5069,6 @@ def _save_snapshot_prices(results, captured_at):
             con.close()
     except Exception as e:
         print(f"⚠️ Snapshot save error: {e}")
-
 
 def build_price_snapshot(results, updated_at=None, previous_prices=None):
     by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
@@ -5160,7 +5116,6 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
 
-
 def send_price_snapshot(results):
     """Send snapshot separately; persist comparison state only after successful delivery."""
     captured_at = now_tehran().isoformat()
@@ -5187,8 +5142,6 @@ def _automatic_run_plan(now=None):
         "analysis": True,
         "snapshot": True,
     }
-
-
 
 # ============================================================
 # ATLAS v11.1 — OPTIONAL INTELLIGENCE / COMPLETION LAYER
@@ -5333,7 +5286,6 @@ def build_v11_intelligence_report(results, portfolio):
     lines.append("\nℹ️ P~ = heuristic estimate; not calibrated win probability.")
     return "\n".join(lines)
 
-
 # ============================================================
 # BUILD FULL TABLE REPORT
 # ============================================================
@@ -5371,7 +5323,6 @@ def build_full_table_report(results, top10_symbols=None, dynamic30_symbols=None)
     lines.extend(build_market_summary(results))
     
     return "\n".join(lines)
-
 
 def build_table_top10(results):
     """ساخت جدول TOP 10 بازار"""
@@ -5412,7 +5363,6 @@ def build_table_top10(results):
     
     return lines
 
-
 def build_table_personal(results):
     """ساخت جدول PERSONAL PORTFOLIO با جزئیات کامل"""
     lines = []
@@ -5452,7 +5402,6 @@ def build_table_personal(results):
     
     return lines
 
-
 def build_table_dynamic(results, dynamic30_symbols):
     """ساخت جدول DYNAMIC TOP 30"""
     lines = []
@@ -5491,7 +5440,6 @@ def build_table_dynamic(results, dynamic30_symbols):
     
     return lines
 
-
 def build_table_metals():
     """ساخت جدول METALS"""
     lines = []
@@ -5522,7 +5470,6 @@ def build_table_metals():
     
     return lines
 
-
 def build_best_setup_section(results):
     """ساخت بخش BEST SETUP"""
     lines = []
@@ -5551,7 +5498,6 @@ def build_best_setup_section(results):
     
     return lines
 
-
 def build_market_summary(results):
     """ساخت بخش جمع‌بندی بازار"""
     lines = []
@@ -5579,7 +5525,6 @@ def build_market_summary(results):
     lines.append(f"🎯 BTC Regime: {btc_regime.get('regime', 'UNKNOWN')}")
     
     return lines
-
 
 def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=None):
     """ساخت جدول رتبه‌بندی کامل سیگنال‌ها"""
@@ -5617,7 +5562,6 @@ def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=No
         lines.append("⚪ هیچ سیگنال تأییدشده‌ای وجود ندارد")
     
     return "\n".join(lines)
-
 
 def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
     """ساخت جدول تصویری از سیگنال‌ها"""
@@ -5744,7 +5688,6 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
         print(f"⚠️ Image generation error: {e}")
         return None
 
-
 def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     """ارسال جدول تصویری به تمام مقاصد تلگرام"""
     if not ENABLE_IMAGE_TABLE:
@@ -5828,7 +5771,6 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     
     return success_count > 0
 
-
 def _fmt_price(value):
     """فرمت کردن قیمت"""
     if value is None:
@@ -5841,13 +5783,11 @@ def _fmt_price(value):
         return f"${value:,.6f}"
     return f"${value:.8f}"
 
-
 def _fmt_change(value):
     """فرمت کردن تغییرات"""
     if value is None:
         return "N/A"
     return f"{value:+.2f}%"
-
 
 def _get_status_emoji(r):
     """دریافت وضعیت با ایموجی"""
@@ -5858,7 +5798,6 @@ def _get_status_emoji(r):
         return "🔴 BEAR"
     else:
         return "⚪ WAIT"
-
 
 # ============================================================
 # MAIN EXECUTION
@@ -6050,4 +5989,4 @@ def main():
         return 1
 
 if __name__ == "__main__":
-    raise SystemExit(main()) 
+   raise SystemExit(main())
