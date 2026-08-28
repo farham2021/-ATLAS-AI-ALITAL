@@ -1,10 +1,15 @@
 from pathlib import Path
 import csv, io, sys, types
 
+# ============================================================
+# اضافه کردن مسیر core به sys.path
+# ============================================================
+sys.path.insert(0, str(Path(__file__).parent))
+
 # The CI workflow installs ccxt. This test can also run without network/package access.
 ccxt_stub = types.ModuleType('ccxt')
 sys.modules.setdefault('ccxt', ccxt_stub)
-sys.path.insert(0, str(Path(__file__).parent))
+
 import bot
 
 bot._metal_analysis = lambda x: {
@@ -19,17 +24,10 @@ valid = {
     'h4_trend': 'BULLISH', 'd1_trend': 'BULLISH',
     'action': 'BUY CONFIRMATION', 'decision_state': 'BUY CONFIRMATION',
     'direction': 'LONG', 'confidence': 80,
-    # Invalidation fields
-    'signal_id': 'BTC-LON-1234567890',
-    'contradiction_status': 'NO_CONTRADICTION',
-    'contradictions': [],
-    'no_trade_reasons': [],
-    'should_trade': True,
 }
 invalid = dict(valid)
-invalid.update({'coin': 'ETH', 'tp2': 99.0, 'confidence': 95, 'signal_id': 'ETH-LON-0987654321'})
+invalid.update({'coin': 'ETH', 'tp2': 99.0, 'confidence': 95})
 
-# Test CSV export
 text = bot.generate_csv_report([valid, invalid], ['BTC', 'ETH'], [])
 rows = list(csv.DictReader(io.StringIO(text)))
 assert any(r['Symbol'] == 'BTC' and r['Group'] == 'PERSONAL_PORTFOLIO' for r in rows)
@@ -38,7 +36,9 @@ assert eth['Entry'] == '' and eth['SL'] == '' and eth['TP2'] == '' and eth['R/R'
 assert {r['Symbol'] for r in rows} >= {'BTC', 'ETH', 'GOLD', 'SILVER', 'COPPER'}
 print(f'PASS: v11.1 CSV export test ({len(rows)} rows)')
 
-# Test Invalidation & No-Trade fields
+# ============================================================
+# تست Invalidation & No-Trade (با اضافه کردن مسیر core)
+# ============================================================
 from core.invalidation import SignalLifecycle, InvalidationEngine, NoTradeEngine, ContradictionDetector
 
 signal_lifecycle = SignalLifecycle()
