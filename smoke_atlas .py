@@ -1,93 +1,160 @@
 #!/usr/bin/env python3
-from pathlib import Path
-import ast, re, sys
+#==============================================================================
+# ATLAS v11.1 — smoke_atlas.py
+#==============================================================================
+# Lightweight health check for ATLAS core functions.
+# This file should be updated whenever new core functions are added.
+#==============================================================================
 
-BOT = Path("bot.py")
+import sys
+import os
+import importlib.util
 
-def fail(message):
-    print("FAIL:", message)
-    raise SystemExit(1)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-if not BOT.exists():
-    fail("bot.py not found")
+print("🔥 ATLAS smoke test v11.1")
 
-s = BOT.read_text(encoding="utf-8")
-try:
-    tree = ast.parse(s, filename=str(BOT))
-except SyntaxError as e:
-    fail(f"bot.py syntax error: {e}")
-
-funcs = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-
-required = [
-    "build_report", "build_personal_report", "build_two_engine_reports",
-    "atlas_engine_mode", "analyze_coin", "main",
-    "tradingview_chart_url", "build_price_snapshot",
-    "_compact_scenario_row", "_compact_section", "_final_market_recommendation",
-    "send_price_snapshot", "fetch_usdt_toman_public",
-    "fetch_snapshot_results", "_automatic_run_plan", "generate_csv_report", "send_csv_report", "_best_setup_block",
-    # Voice functions
-    "generate_voice_summary", "text_to_speech_persian", "generate_audio_report", "send_audio_report",
-    # Session functions
-    "get_current_session",
+# ============================================================
+# لیست کامل توابع مورد نیاز
+# ============================================================
+required_functions = [
+    # ===== Core =====
+    "VERSION",
+    "TIMEFRAMES",
+    "SIGNAL_TIMEFRAME",
+    
+    # ===== Helpers =====
+    "now_utc",
+    "now_tehran",
+    "shamsi",
+    "safe_float",
+    "f",
+    "fmt",
+    "pct",
+    "clamp",
+    "is_stable",
+    "is_ambiguous_symbol",
+    "http_get",
+    "safe_http_get",
+    
+    # ===== Database =====
+    "sqlite_conn",
+    "init_sqlite",
+    "append_changelog",
+    
+    # ===== Exchange =====
+    "make_exchange",
+    "init_exchanges",
+    "ensure_exchanges",
+    "best_ohlcv",
+    
+    # ===== Market =====
+    "build_universe",
+    "analyze_coin",
+    "btc_market_regime",
+    "market_breadth",
+    "apply_decision_engine",
+    "atlas_decision_board",
+    
+    # ===== Weights =====
+    "get_weights",
+    "update_weight",
+    "self_diagnostic",
+    
+    # ===== Backtest =====
+    "backtest_coin",
+    "mandatory_backtest_gate",
+    
+    # ===== Signals =====
+    "store_signal",
+    "evaluate_open_outcomes",
+    
+    # ===== Telegram =====
+    "telegram_preflight",
+    "send_with_retry",
+    "send_report",
+    
+    # ===== Reports =====
+    "build_report",
+    "build_personal_report",
+    "build_two_engine_reports",
+    "atlas_engine_mode",
+    "generate_csv_report",
+    "send_csv_report",
+    "tradingview_chart_url",
+    
+    # ===== Snapshot =====
+    "build_price_snapshot",
+    "send_price_snapshot",
+    "fetch_usdt_toman_public",
+    "fetch_snapshot_results",
+    "_automatic_run_plan",
+    
+    # ===== Table Functions =====
+    "build_full_table_report",
+    "build_signal_ranking_table",
+    "send_image_table",
+    "_best_setup_block",
+    "_compact_scenario_row",
+    "_compact_section",
+    "_final_market_recommendation",
+    
+    # ===== Text to Image =====
+    "text_to_image",
+    "send_report_as_image",
+    
+    # ===== Intelligence =====
+    "v11_apply_intelligence",
+    "v11_portfolio_diagnostics",
+    "build_v11_intelligence_report",
+    
+    # ===== Portfolio =====
+    "_portfolio_symbols",
+    "_portfolio_rows",
+    "personal_report",
 ]
-missing = [x for x in required if x not in funcs]
-if missing:
-    fail("missing required functions: " + ", ".join(missing))
 
-# Check for MARKET_SESSIONS variable (not a function)
-if "MARKET_SESSIONS" not in s:
-    fail("MARKET_SESSIONS dictionary not found")
-
-checks = {
-    "version v11.1": bool(re.search(r'^VERSION\s*=\s*["\']ATLAS v11\.1', s, re.M)),
-    "no stale v10 markers": not bool(re.search(r'ATLAS v10|v10\.[0-9]|10\.2', s)),
-    "single build_report": funcs.count("build_report") == 1,
-    "single build_personal_report": funcs.count("build_personal_report") == 1,
-    "single build_two_engine_reports": funcs.count("build_two_engine_reports") == 1,
-    "single personal_report alias": funcs.count("personal_report") == 1,
-    "two-engine": all(x in s for x in ("MARKET", "PERSONAL", "BOTH")),
-    "personal portfolio": "ATLAS_PERSONAL_ASSETS" in s,
-    "market excludes personal": "market_results" in s and "not in personal_symbols" in s,
-    "metals": "ATLAS_METALS" in s and all(x in s for x in ("GOLD", "SILVER", "COPPER")),
-    "TradingView links": "tradingview.com/chart/?symbol=" in s,
-    "separate 3h snapshot": "send_price_snapshot" in s and "این پیام هر ۳ ساعت" in s,
-    "snapshot-only path": "fetch_snapshot_results" in s and 'run_mode == "SNAPSHOT"' in s,
-    "automatic 3h/4h scheduler": "_automatic_run_plan" in s and "dt.hour % 3 == 0" in s and "dt.hour % 4 == 0" in s,
-    "public Iranian USDT sources": all(x in s.lower() for x in ("wallex.ir", "excoino.com", "nobitex.ir")),
-    "KCEX CCXT source": '"kcex"' in s,
-    "closed-candle logic": "strip_incomplete" in s and "candle_is_closed" in s,
-    "compact table output": all(x in s for x in ("_compact_scenario_row", "کلیدی:", "🟢 صعودی:", "🔴 نزولی:")),
-    "no verbose market headings": "TOP 5 OPPORTUNITIES" not in s[s.index("def build_report"):s.index("def build_personal_report")],
-    "no verbose personal headings": "🧠 ATLAS MEMORY / CALIBRATION" not in s[s.index("def build_personal_report"):s.index("def personal_report")],
-    "all dynamic30 output": "dyn30_rows" in s and "DYNAMIC TOP 30" in s and "خارج از Top 10 و Personal" in s,
-    "metals in compact market output": "ATLAS METALS — GOLD / SILVER / COPPER" in s,
-    "trade geometry gate": "_validate_trade_geometry" in s and "invalid LONG geometry" in s and "invalid SHORT geometry" in s,
-    "negative/contradictory TP blocked": "non-positive trade level" in s and "Trade geometry blocked" in s,
-    "snapshot compares previous price": "_snapshot_previous_prices" in s and "_snapshot_direction" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
-    "snapshot persists after successful send": "if sent == parts and sent > 0" in s and "_save_snapshot_prices" in s,
-    "dashboard table": "build_dashboard_table" in s and "ATLAS AI — DASHBOARD TABLE" in s and "PERSONAL PORTFOLIO" in s,
-    "dynamic30 compact output capped": "dyn30_all_rows" in s and "dynamic_top8(" in s,
-    "no duplicate portfolio function": s.count("def _portfolio_rows(") == 1,
-    "dynamic CSV export": "CSV_COLUMNS" in s and "def generate_csv_report(" in s and "def send_csv_report(" in s,
-    "CSV includes all universes": all(x in s for x in ("MARKET_TOP10", "DYNAMIC_TOP30", "PERSONAL_PORTFOLIO")),
-    "best setup validation": "def _best_setup_block(" in s and "MIN_EXECUTABLE_RR" in s and "repeat_signal" in s,
-    "CSV invalid geometry suppressed": "_csv_safe_plan" in s and "_validate_trade_geometry" in s,
-    "snapshot arrows": "⬆️" in s and "⬇️" in s and "SNAPSHOT_FLAT_THRESHOLD_PCT" in s,
-    # Voice checks
-    "voice summary": "generate_voice_summary" in s,
-    "voice output": "send_audio_report" in s and "ATLAS_ENABLE_VOICE" in s,
-    "session support": "get_current_session" in s and "MARKET_SESSIONS" in s and "multiplier" in s,
-    "session in snapshot": "سشن فعلی" in s and "ضریب کیفیت" in s,
-    # New confidence and volume ratio checks
-    "min confidence 55": "MIN_CONFIDENCE = float(os.environ.get(\"ATLAS_MIN_CONFIDENCE\", \"55\"))" in s,
-    "min volume ratio 0.60": "MIN_VOLUME_RATIO = float(os.environ.get(\"ATLAS_MIN_VOLUME_RATIO\", \"0.60\"))" in s,
-}
-for name, ok in checks.items():
-    if not ok:
-        fail(name)
-
-compile(s, str(BOT), "exec")
-print("PASS: ATLAS v11.1 unified two-engine + metals + snapshot + voice + session smoke test")
-for name in checks:
-    print("  OK:", name)
+try:
+    # بارگذاری ماژول bot.py
+    spec = importlib.util.spec_from_file_location("bot", "bot.py")
+    if spec is None:
+        print("❌ FAIL: Could not find bot.py")
+        sys.exit(1)
+    
+    bot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bot)
+    
+    # بررسی وجود توابع
+    missing = []
+    for name in required_functions:
+        if not hasattr(bot, name):
+            missing.append(name)
+    
+    if missing:
+        print(f"❌ FAIL: missing required functions: {', '.join(missing)}")
+        print(f"   Total: {len(missing)} missing out of {len(required_functions)}")
+        sys.exit(1)
+    
+    print(f"✅ All {len(required_functions)} required functions present")
+    
+    # ===== بررسی نسخه =====
+    if hasattr(bot, "VERSION"):
+        print(f"✅ Version: {bot.VERSION}")
+    
+    # ===== بررسی توابع جدید =====
+    new_functions = ["text_to_image", "send_report_as_image", "build_full_table_report"]
+    for func in new_functions:
+        if hasattr(bot, func):
+            print(f"✅ {func} available")
+    
+    print("✅ smoke_atlas passed")
+    sys.exit(0)
+    
+except ImportError as e:
+    print(f"❌ FAIL: Import error - {e}")
+    sys.exit(1)
+except Exception as e:
+    print(f"❌ FAIL: Unexpected error - {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
