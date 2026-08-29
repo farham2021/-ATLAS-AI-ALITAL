@@ -1,4 +1,0 @@
-ccxt>=4.0.0
-matplotlib>=3.5.0
-edge-tts>=6.0.0
-gtts>=2.3.0
