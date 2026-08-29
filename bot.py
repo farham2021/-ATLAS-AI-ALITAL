@@ -5009,18 +5009,31 @@ def fetch_snapshot_results():
 
 
 def _snapshot_previous_prices():
-    """دریافت قیمت‌های قبلی از دیتابیس"""
+    """دریافت قیمت‌های قبلی از Supabase (با Fallback به SQLite)"""
+    # اولویت ۱: خواندن از Supabase
+    rows = STORE.select("snapshot_prices", {"select": "symbol,price"})
+    if rows and isinstance(rows, list) and len(rows) > 0:
+        result = {}
+        for r in rows:
+            sym = str(r.get("symbol", "")).upper()
+            price = f(r.get("price"))
+            if sym and price is not None:
+                result[sym] = price
+        print(f"📊 Loaded {len(result)} previous prices from Supabase")
+        return result
+    
+    # Fallback به SQLite (برای اجرای محلی)
     try:
         con = sqlite3.connect(DB_FILE, timeout=10)
         try:
             rows = con.execute("select symbol, price from snapshot_prices").fetchall()
             result = {str(sym).upper(): float(price) for sym, price in rows if price is not None}
-            print(f"📊 Loaded {len(result)} previous prices from database")
+            print(f"📊 Loaded {len(result)} previous prices from SQLite (fallback)")
             return result
         finally:
             con.close()
     except Exception as e:
-        print(f"⚠️ Snapshot previous prices error: {e}")
+        print(f"⚠️ Snapshot previous prices error (SQLite): {e}")
         return {}
 
 
@@ -5037,24 +5050,41 @@ def _snapshot_direction(current, previous):
 
 
 def _save_snapshot_prices(results, captured_at):
-    try:
-        con = sqlite3.connect(DB_FILE, timeout=10)
-        try:
-            con.execute("create table if not exists snapshot_prices(symbol text primary key, price real not null, captured_at text not null)")
-            for r in results or []:
-                sym = str(r.get("coin") or "").upper()
-                price = f(r.get("price"))
-                if sym and price is not None and price > 0:
-                    con.execute(
-                        "insert into snapshot_prices(symbol,price,captured_at) values(?,?,?) "
-                        "on conflict(symbol) do update set price=excluded.price,captured_at=excluded.captured_at",
-                        (sym, price, captured_at),
-                    )
-            con.commit()
-        finally:
-            con.close()
-    except Exception as e:
-        print(f"⚠️ Snapshot save error: {e}")
+    """ذخیره قیمت‌ها در Supabase (با Fallback به SQLite)"""
+    saved_count = 0
+    for r in results or []:
+        sym = str(r.get("coin") or "").upper()
+        price = f(r.get("price"))
+        if sym and price is not None and price > 0:
+            # تلاش برای ذخیره در Supabase
+            success = STORE.insert(
+                "snapshot_prices",
+                {
+                    "symbol": sym,
+                    "price": price,
+                    "captured_at": captured_at,
+                }
+            )
+            if success:
+                saved_count += 1
+            else:
+                # Fallback به SQLite
+                try:
+                    con = sqlite3.connect(DB_FILE, timeout=10)
+                    try:
+                        con.execute(
+                            "insert into snapshot_prices(symbol,price,captured_at) values(?,?,?) "
+                            "on conflict(symbol) do update set price=excluded.price,captured_at=excluded.captured_at",
+                            (sym, price, captured_at),
+                        )
+                        con.commit()
+                        saved_count += 1
+                    finally:
+                        con.close()
+                except Exception as e:
+                    print(f"⚠️ Snapshot save error (SQLite): {e}")
+    
+    print(f"📊 Saved {saved_count} prices to Supabase (and fallback)")
 
 
 def build_price_snapshot(results, updated_at=None, previous_prices=None):
