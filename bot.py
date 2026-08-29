@@ -6325,6 +6325,597 @@ def _get_status_emoji(r):
         return "⚪ WAIT"
 
 
+
+# ============================================================
+# ATLAS v11.4 — INTELLIGENCE / DECISION REDESIGN
+# ============================================================
+# This layer intentionally sits above the legacy collectors and execution
+# plumbing. It reuses the existing OHLCV, multi-timeframe, S/R, volume,
+# liquidity, news, derivatives, Telegram, CSV, PNG and voice infrastructure,
+# but replaces the old "mostly hard-gates" presentation with:
+#   1) evidence-based scoring,
+#   2) explicit market regime,
+#   3) setup classification,
+#   4) conditional triggers,
+#   5) contradiction analysis,
+#   6) scenario map,
+#   7) opportunity ranking,
+#   8) portfolio-aware actions.
+#
+# IMPORTANT: "confidence" is a model score, NOT a calibrated win probability.
+# No order is placed by ATLAS.
+# ============================================================
+
+VERSION = "ATLAS v11.4 INTELLIGENCE ENGINE"
+ATLAS_INTELLIGENCE_VERSION = VERSION
+ATLAS_MIN_INTEL_SCORE = float(os.environ.get("ATLAS_MIN_INTEL_SCORE", "58"))
+ATLAS_EXECUTABLE_SCORE = float(os.environ.get("ATLAS_EXECUTABLE_SCORE", "72"))
+ATLAS_BREAKOUT_VOLUME = float(os.environ.get("ATLAS_BREAKOUT_VOLUME", "1.15"))
+ATLAS_NEAR_LEVEL_ATR = float(os.environ.get("ATLAS_NEAR_LEVEL_ATR", "0.60"))
+ATLAS_IMAGE_ROWS = int(os.environ.get("ATLAS_IMAGE_ROWS", "10"))
+
+def _i_num(x, default=0.0):
+    v = f(x)
+    return default if v is None or not math.isfinite(v) else float(v)
+
+def _i_dir(x):
+    s = str(x or "").upper()
+    if any(k in s for k in ("BULL", "UP", "LONG", "BUY")):
+        return "LONG"
+    if any(k in s for k in ("BEAR", "DOWN", "SHORT", "SELL")):
+        return "SHORT"
+    return "NEUTRAL"
+
+def _i_sign(x):
+    return 1 if x == "LONG" else -1 if x == "SHORT" else 0
+
+def _i_level_distance(price, level):
+    p, l = _i_num(price, None), _i_num(level, None)
+    if p is None or l is None or p <= 0:
+        return None
+    return abs(p-l)/p*100.0
+
+def _i_setup(r):
+    """Classify the market structure rather than reducing it to BUY/SELL."""
+    direction = _i_dir(r.get("direction"))
+    trigger = r.get("candle_trigger") or {}
+    state = str(trigger.get("state") or "").upper()
+    price = _i_num(r.get("price"), None)
+    support = _i_num(r.get("support"), None)
+    resistance = _i_num(r.get("resistance"), None)
+    vr = _i_num(r.get("volume_ratio"), 0)
+    pattern = str(r.get("pattern") or "").upper()
+    atrp = _i_num(r.get("atr_pct"), 0)
+
+    if state in ("BREAKOUT_CLOSED", "BREAKDOWN_CLOSED"):
+        return "BREAKOUT" if state == "BREAKOUT_CLOSED" else "BREAKDOWN"
+    if state in ("SUPPORT_RECLAIM", "RESISTANCE_REJECT"):
+        return "PULLBACK" if state == "SUPPORT_RECLAIM" else "REVERSAL"
+    if direction in ("LONG", "SHORT") and vr >= ATLAS_BREAKOUT_VOLUME:
+        if direction == "LONG" and resistance and price and price >= resistance*0.995:
+            return "BREAKOUT WATCH"
+        if direction == "SHORT" and support and price and price <= support*1.005:
+            return "BREAKDOWN WATCH"
+    if pattern and pattern not in ("NONE", "UNKNOWN"):
+        if direction == "LONG" and "BULL" in pattern:
+            return "TREND CONTINUATION"
+        if direction == "SHORT" and "BEAR" in pattern:
+            return "TREND CONTINUATION"
+    if price and support and resistance and support < price < resistance:
+        width = (resistance-support)/price*100.0
+        if width > max(2.0, atrp*2.0):
+            return "RANGE"
+    if direction in ("LONG", "SHORT"):
+        return "TREND CONTINUATION"
+    return "NO SETUP"
+
+def _i_structure_score(r):
+    h1, h4, d1, w1 = map(_i_dir, (r.get("h1_trend"), r.get("h4_trend"), r.get("d1_trend"), r.get("w1_trend")))
+    votes = [_i_sign(x) for x in (h1,h4,d1,w1)]
+    weighted = votes[0]*0.10 + votes[1]*0.30 + votes[2]*0.35 + votes[3]*0.25
+    return 50 + 50*weighted
+
+def _i_momentum_score(r):
+    score = 50.0
+    ind = _i_dir(r.get("trend"))
+    h4 = _i_dir(r.get("h4_trend"))
+    macd_s = str(r.get("macd") or "").upper()
+    rsi = _i_num(r.get("rsi"), None)
+    mom30 = _i_dir(r.get("momentum_30m"))
+    if ind == h4 and ind != "NEUTRAL": score += 15*_i_sign(ind)
+    if "BULL" in macd_s: score += 12
+    elif "BEAR" in macd_s: score -= 12
+    if mom30 == "LONG": score += 6
+    elif mom30 == "SHORT": score -= 6
+    if rsi is not None:
+        if 52 <= rsi <= 68: score += 8
+        elif 45 <= rsi < 52: score += 2
+        elif 68 < rsi <= 75: score += 4
+        elif rsi > 75: score -= 8
+        elif 32 <= rsi < 45: score -= 4
+        elif rsi < 25: score += 6
+    return max(0, min(100, score))
+
+def _i_volume_score(r):
+    vr = _i_num(r.get("volume_ratio"), 0)
+    if vr >= 1.50: return 95
+    if vr >= 1.20: return 82
+    if vr >= 1.00: return 68
+    if vr >= 0.60: return 52
+    if vr > 0: return 35
+    return 45
+
+def _i_sr_score(r):
+    price = _i_num(r.get("price"), None)
+    support = _i_num(r.get("support"), None)
+    resistance = _i_num(r.get("resistance"), None)
+    if price is None or support is None or resistance is None or resistance <= support:
+        return 45
+    span = resistance-support
+    if span <= 0: return 45
+    pos = (price-support)/span
+    # Better location: longs near support / shorts near resistance.
+    d = _i_dir(r.get("direction"))
+    if d == "LONG":
+        return max(20, min(95, 95 - pos*65))
+    if d == "SHORT":
+        return max(20, min(95, 30 + pos*65))
+    return 55
+
+def _i_liquidity_score(r):
+    return max(0, min(100, _i_num(r.get("liquidity_score"), 50)))
+
+def _i_contradictions(r, bias):
+    out = []
+    h4, d1, w1 = map(_i_dir, (r.get("h4_trend"), r.get("d1_trend"), r.get("w1_trend")))
+    rsi = _i_num(r.get("rsi"), None)
+    vr = _i_num(r.get("volume_ratio"), None)
+    macd = str(r.get("macd") or "").upper()
+    if bias == "LONG":
+        if d1 == "SHORT": out.append("D1 opposes long")
+        if w1 == "SHORT": out.append("W1 opposes long")
+        if "BEAR" in macd: out.append("MACD bearish")
+        if rsi is not None and rsi > 75: out.append("RSI overbought")
+    elif bias == "SHORT":
+        if d1 == "LONG": out.append("D1 opposes short")
+        if w1 == "LONG": out.append("W1 opposes short")
+        if "BULL" in macd: out.append("MACD bullish")
+        if rsi is not None and rsi < 25: out.append("RSI oversold")
+    if vr is not None and vr < 0.60: out.append("weak volume")
+    return out
+
+def _i_bias(r):
+    structure = _i_structure_score(r)
+    momentum = _i_momentum_score(r)
+    h4 = _i_dir(r.get("h4_trend"))
+    d1 = _i_dir(r.get("d1_trend"))
+    long_votes = sum(1 for x in (h4,d1,_i_dir(r.get("w1_trend"))) if x == "LONG")
+    short_votes = sum(1 for x in (h4,d1,_i_dir(r.get("w1_trend"))) if x == "SHORT")
+    if structure >= 58 and momentum >= 55 and long_votes >= 2: return "LONG"
+    if structure <= 42 and momentum <= 45 and short_votes >= 2: return "SHORT"
+    if structure >= 62: return "LONG"
+    if structure <= 38: return "SHORT"
+    return "NEUTRAL"
+
+def _i_regime(r, market_score=None):
+    h4, d1, w1 = map(_i_dir, (r.get("h4_trend"), r.get("d1_trend"), r.get("w1_trend")))
+    atrp = _i_num(r.get("atr_pct"), 0)
+    vr = _i_num(r.get("volume_ratio"), 0)
+    if atrp >= VOLATILITY_THRESHOLDS["HIGH"]*1.5:
+        vol = "EXTREME"
+    elif atrp >= VOLATILITY_THRESHOLDS["HIGH"]:
+        vol = "HIGH"
+    elif atrp >= VOLATILITY_THRESHOLDS["NORMAL"]:
+        vol = "NORMAL"
+    else:
+        vol = "LOW"
+    if h4 == d1 == "LONG" and w1 in ("LONG","NEUTRAL"): trend = "BULL TREND"
+    elif h4 == d1 == "SHORT" and w1 in ("SHORT","NEUTRAL"): trend = "BEAR TREND"
+    elif h4 != "NEUTRAL" and d1 != "NEUTRAL" and h4 != d1: trend = "TRANSITION"
+    else: trend = "RANGE"
+    if vr >= 1.5: participation = "EXPANSION"
+    elif vr >= 1.0: participation = "NORMAL"
+    else: participation = "THIN"
+    score = _i_num(market_score, 50)
+    if trend == "BULL TREND": regime_bias = "RISK-ON"
+    elif trend == "BEAR TREND": regime_bias = "RISK-OFF"
+    else: regime_bias = "NEUTRAL"
+    return {"trend": trend, "volatility": vol, "participation": participation,
+            "bias": regime_bias, "score": round(max(0,min(100,score)),1)}
+
+def _i_trigger(r):
+    p = _i_num(r.get("price"), None)
+    s = _i_num(r.get("support"), None)
+    res = _i_num(r.get("resistance"), None)
+    atrp = _i_num(r.get("atr_pct"), 0)
+    pad = max(0.10, atrp*0.15)
+    if p is None: return {}
+    return {
+        "long": round(res*(1+pad/100), 8) if res else None,
+        "short": round(s*(1-pad/100), 8) if s else None,
+        "support": s, "resistance": res,
+    }
+
+def _i_scenario(r):
+    p = _i_num(r.get("price"), None)
+    s = _i_num(r.get("support"), None)
+    res = _i_num(r.get("resistance"), None)
+    bias = r.get("intel_bias","NEUTRAL")
+    trig = r.get("intel_trigger") or {}
+    scenarios = []
+    if p is not None and res is not None:
+        scenarios.append(("BULL", "LONG", trig.get("long"), f"4H close above {fmt(trig.get('long')) if trig.get('long') else fmt(res)}"))
+    if p is not None and s is not None:
+        scenarios.append(("BEAR", "SHORT", trig.get("short"), f"4H close below {fmt(trig.get('short')) if trig.get('short') else fmt(s)}"))
+    if bias == "LONG":
+        base = "Bull case has the stronger structural edge."
+    elif bias == "SHORT":
+        base = "Bear case has the stronger structural edge."
+    else:
+        base = "No directional edge; wait for a range break."
+    return scenarios, base
+
+def _i_reason(r):
+    parts = []
+    bias = r.get("intel_bias","NEUTRAL")
+    if r.get("structure_score",50) >= 65: parts.append("HTF structure bullish")
+    elif r.get("structure_score",50) <= 35: parts.append("HTF structure bearish")
+    if r.get("momentum_score",50) >= 65: parts.append("momentum supportive")
+    elif r.get("momentum_score",50) <= 35: parts.append("momentum weak")
+    if r.get("volume_score",50) >= 75: parts.append("volume expansion")
+    elif r.get("volume_score",50) < 50: parts.append("volume thin")
+    setup = r.get("setup_type","NO SETUP")
+    if setup != "NO SETUP": parts.append(setup.replace("_"," ").lower())
+    c = r.get("contradictions") or []
+    if c: parts.append("conflict: " + ", ".join(c[:2]))
+    return "؛ ".join(parts) or ("neutral structure" if bias == "NEUTRAL" else "mixed evidence")
+
+def _i_quality(r):
+    return _i_num(r.get("data_quality"), 50)
+
+def _i_score(r):
+    structure = _i_num(r.get("structure_score"),50)
+    momentum = _i_num(r.get("momentum_score"),50)
+    volume = _i_num(r.get("volume_score"),50)
+    sr = _i_num(r.get("sr_score"),50)
+    liq = _i_num(r.get("liquidity_score"),50)
+    dataq = _i_quality(r)
+    regime = _i_num(r.get("regime_score"),50)
+    contradiction = len(r.get("contradictions") or [])
+    # Evidence score is deliberately independent from hard trade gates.
+    score = (
+        structure*0.28 + momentum*0.22 + volume*0.12 + sr*0.12 +
+        liq*0.08 + dataq*0.10 + regime*0.08
+    )
+    score -= min(18, contradiction*5)
+    return max(0, min(100, score))
+
+def _i_opportunity(r):
+    score = _i_num(r.get("intel_score"),50)
+    rr = _i_num(r.get("rr"), 0)
+    setup = str(r.get("setup_type") or "")
+    setup_bonus = 10 if setup in ("BREAKOUT","BREAKDOWN","PULLBACK","REVERSAL","BREAKOUT WATCH","BREAKDOWN WATCH") else 3
+    rr_bonus = min(12, max(0, rr-1.0)*5)
+    if str(r.get("regime_volatility")) == "EXTREME": setup_bonus -= 8
+    return round(max(0,min(100,score*0.72 + setup_bonus + rr_bonus)),1)
+
+def v11_apply_intelligence(r):
+    """New evidence engine. It never claims its score is a win probability."""
+    q = _i_quality(r)
+    structure = _i_structure_score(r)
+    momentum = _i_momentum_score(r)
+    volume = _i_volume_score(r)
+    sr = _i_sr_score(r)
+    liq = _i_liquidity_score(r)
+    bias = _i_bias(r)
+    # Use existing regime score where available; otherwise derive a neutral baseline.
+    regime_score = _i_num(r.get("regime_score"), 50)
+    regime = _i_regime(r, regime_score)
+    r["intel_bias"] = bias
+    r["structure_score"] = round(structure,1)
+    r["momentum_score"] = round(momentum,1)
+    r["volume_score"] = round(volume,1)
+    r["sr_score"] = round(sr,1)
+    r["liquidity_score_canonical"] = round(liq,1)
+    r["intel_regime"] = regime
+    r["regime_trend"] = regime["trend"]
+    r["regime_volatility"] = regime["volatility"]
+    r["regime_participation"] = regime["participation"]
+    r["regime_bias"] = regime["bias"]
+    r["intel_trigger"] = _i_trigger(r)
+    r["setup_type"] = _i_setup(r)
+    r["contradictions"] = _i_contradictions(r, bias)
+    r["intel_score"] = round(_i_score(r),1)
+    # "confidence" becomes a transparent model-strength score, not probability.
+    r["confidence"] = int(round(max(0,min(100, 42 + abs(r["intel_score"]-50)*1.15))))
+    r["confidence_label"] = "MODEL STRENGTH"
+    r["opportunity_score"] = _i_opportunity(r)
+    # Preserve executable status from the validated legacy trade engine.
+    legacy_action = str(r.get("action") or r.get("decision_state") or "NO TRADE").upper()
+    executable = legacy_action in ("BUY CONFIRMATION","SELL CONFIRMATION","BUY","SELL") and r.get("gate") == "PASS"
+    r["executable"] = bool(executable)
+    if executable:
+        r["intel_decision"] = "BUY" if "BUY" in legacy_action else "SELL"
+    elif r["opportunity_score"] >= ATLAS_MIN_INTEL_SCORE and bias != "NEUTRAL":
+        r["intel_decision"] = "WATCH LONG" if bias == "LONG" else "WATCH SHORT"
+    else:
+        r["intel_decision"] = "WAIT"
+    rr = _i_num(r.get("rr"),0)
+    if not rr:
+        e, sl, tp2 = map(lambda k:_i_num(r.get(k),None), ("entry","sl","tp2"))
+        if None not in (e,sl,tp2) and abs(e-sl)>0:
+            rr=abs(tp2-e)/abs(e-sl)
+    r["rr_intel"] = round(rr,2) if rr else None
+    scenarios, base = _i_scenario(r)
+    r["scenarios"] = scenarios
+    r["scenario_base_case"] = base
+    r["intel_reason"] = _i_reason(r)
+    r["intel_signal_id"] = hashlib.sha1(
+        f"{r.get('coin')}|{r.get('signal_candle_ts')}|{bias}|{r.get('setup_type')}".encode()
+    ).hexdigest()[:12]
+    r["v11_estimated_probability"] = None
+    r["v11_probability_status"] = "NOT_CALIBRATED"
+    return r
+
+def _intel_rank(results, personal=False):
+    rows = []
+    pset = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    for r in results:
+        if not r.get("price"): continue
+        if personal and str(r.get("coin","")).upper() not in pset: continue
+        if not personal and str(r.get("coin","")).upper() in pset: continue
+        rows.append(r)
+    return sorted(rows, key=lambda x: (
+        _i_num(x.get("opportunity_score"),0),
+        _i_num(x.get("intel_score"),0),
+        _i_num(x.get("data_quality"),0)
+    ), reverse=True)
+
+def _intel_line(r, detailed=True):
+    coin=str(r.get("coin","")).upper()
+    decision=r.get("intel_decision","WAIT")
+    icon="🟢" if decision=="BUY" or decision=="WATCH LONG" else "🔴" if decision=="SELL" or decision=="WATCH SHORT" else "🟡"
+    price=fmt(r.get("price"))
+    setup=r.get("setup_type","NO SETUP")
+    bias=r.get("intel_bias","NEUTRAL")
+    score=r.get("opportunity_score",0)
+    conf=r.get("confidence",0)
+    rr=r.get("rr_intel")
+    trig=r.get("intel_trigger") or {}
+    if bias=="LONG": trigger=f"LONG>{fmt(trig.get('long'))}" if trig.get("long") else "LONG trigger N/A"
+    elif bias=="SHORT": trigger=f"SHORT<{fmt(trig.get('short'))}" if trig.get("short") else "SHORT trigger N/A"
+    else: trigger="breakout required"
+    line=f"{icon} {coin} | {decision} | {setup} | O:{score:.0f} | S:{conf:.0f} | {price}"
+    if rr: line += f" | RR:{rr:.2f}"
+    if detailed: line += f"\n   Trigger: {trigger}\n   {r.get('intel_reason','')}"
+    return line
+
+def _intel_market_header(macro=None, news=None, breadth=None):
+    dt=now_tehran()
+    session, label, mult=get_current_session()
+    market_score = _i_num((breadth or {}).get("score"),50)
+    lines=[
+        "🤖 ATLAS AI — MARKET INTELLIGENCE 4H",
+        "━━━━━━━━━━━━━━━━━━",
+        f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
+        f"🕐 {label} | ضریب کیفیت سشن: {mult:.1f}x",
+        f"🌐 Market breadth: {market_score:.0f}/100",
+    ]
+    if news:
+        lines.append(f"📰 News: {news.get('bias','MIXED/LIMITED')} | Impact: {news.get('impact','NORMAL')}")
+    return lines
+
+def _intel_summary(results, personal=False):
+    rows=_intel_rank(results,personal)
+    executable=[r for r in rows if r.get("executable")]
+    watches=[r for r in rows if str(r.get("intel_decision","")).startswith("WATCH")]
+    waits=[r for r in rows if r.get("intel_decision")=="WAIT"]
+    return rows, executable, watches, waits
+
+def _build_intel_report(results, macro, news, breadth, personal=False):
+    rows, executable, watches, waits = _intel_summary(results,personal)
+    lines=_intel_market_header(macro,news,breadth)
+    title="💼 PERSONAL PORTFOLIO" if personal else "📡 OPPORTUNITY RANKING"
+    lines += ["", title, "───────────────────"]
+    for r in rows[:8]:
+        lines.append(_intel_line(r))
+    lines += ["", "🧠 DECISION BOARD", "───────────────────"]
+    if executable:
+        best=executable[0]
+        lines.append(f"🟢 EXECUTABLE: {best.get('coin')} — {best.get('intel_decision')} | O:{best.get('opportunity_score',0):.0f} | RR:{best.get('rr_intel') or 'N/A'}")
+    elif watches:
+        best=watches[0]
+        lines.append(f"🟡 BEST WATCH: {best.get('coin')} — {best.get('intel_decision')} | O:{best.get('opportunity_score',0):.0f}")
+        lines.append(f"   Trigger: {('above '+fmt((best.get('intel_trigger') or {}).get('long'))) if best.get('intel_bias')=='LONG' else ('below '+fmt((best.get('intel_trigger') or {}).get('short')) if best.get('intel_bias')=='SHORT' else 'range break')}")
+    else:
+        lines.append("⚪ NO ACTIONABLE SETUP: market structure is not sufficiently asymmetric.")
+    lines.append(f"📊 Universe: {len(rows)} | Executable: {len(executable)} | Watch: {len(watches)} | Wait: {len(waits)}")
+    if rows:
+        best=rows[0]
+        lines.append(f"🎯 Best opportunity: {best.get('coin')} | {best.get('setup_type')} | O:{best.get('opportunity_score',0):.0f}")
+    lines += ["", "📌 Scenario map", "───────────────────"]
+    for r in rows[:3]:
+        scenarios=r.get("scenarios") or []
+        lines.append(f"🔹 {r.get('coin')}: {r.get('scenario_base_case','')}")
+        for side, direction, trigger, txt in scenarios:
+            lines.append(f"   {'🟢' if direction=='LONG' else '🔴'} {side}: {txt}")
+    lines += ["", "⚠️ Model note: Score/Confidence are model-strength metrics, not calibrated win probabilities."]
+    return "\n".join(lines)
+
+def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
+    mode=get_engine_mode()
+    if mode=="MARKET":
+        return [_build_intel_report(results,macro,news,breadth,False)]
+    if mode=="PERSONAL":
+        return [_build_intel_report(results,macro,news,breadth,True)]
+    return [
+        _build_intel_report(results,macro,news,breadth,False),
+        _build_intel_report(results,macro,news,breadth,True),
+    ]
+
+def _new_csv_columns():
+    return (
+        "Group","Symbol","Status","DecisionState","Price","Change24H",
+        "Support","Resistance","Entry","SL","TP1","TP2","TP3","TP4","R/R",
+        "Confidence","H4Trend","D1Trend","W1Trend","RSI","MACD","Volume",
+        "VolumeRatio","ATR_pct","Liquidity","Gate","GateReason","Direction",
+        "RepeatSignal","Reason","ModelVersion","DataQuality","SignalID",
+        "RegimeTrend","RegimeVolatility","RegimeDerivatives","RegimeScore",
+        "IntelBias","SetupType","OpportunityScore","StructureScore",
+        "MomentumScore","VolumeScore","SRScore","ContradictionCount",
+        "Contradictions","LongTrigger","ShortTrigger","Executable",
+        "IntelDecision","IntelSignalID","ConfidenceLabel"
+    )
+
+def generate_csv_report(results, top10, dynamic30):
+    import csv, io
+    personal_symbols={str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    ordered=[]
+    for sym in list(top10 or ATLAS_PRIORITY_TOP10)+list(dynamic30 or [])+list(ATLAS_PERSONAL_ASSETS)+list(ATLAS_METALS):
+        s=str(sym).upper()
+        if s and s not in ordered: ordered.append(s)
+    result_map={str(r.get("coin") or "").upper():dict(r) for r in (results or []) if r.get("coin")}
+    rows=[]
+    for sym in ordered:
+        r=result_map.get(sym)
+        if r is None and sym in ATLAS_METALS:
+            r=_metal_analysis(sym)
+            if r: r=v11_apply_intelligence(r)
+        if not r: continue
+        plan=_csv_safe_plan(r)
+        entry=sl=tp1=tp2=tp3=tp4=rr=""
+        if plan:
+            entry,sl,tp1,tp2=plan
+            tp3=f(r.get("tp3")); tp4=f(r.get("tp4"))
+            rr=_rr_from_values(entry,sl,tp2)
+        trig=r.get("intel_trigger") or {}
+        state=str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT")
+        if state in ("BUY","BUY CONFIRMATION"): status="BUY"
+        elif state in ("SELL","SELL CONFIRMATION"): status="SELL"
+        elif state.startswith("WATCH"): status="WATCH"
+        elif state=="WAIT": status="WAIT"
+        else: status="HOLD"
+        rows.append([
+            _csv_group(sym,top10,dynamic30,personal_symbols),sym,status,state,
+            _csv_number(r.get("price")),_csv_number(r.get("change"),4),
+            _csv_number(r.get("support")),_csv_number(r.get("resistance")),
+            _csv_number(entry),_csv_number(sl),_csv_number(tp1),_csv_number(tp2),
+            _csv_number(tp3),_csv_number(tp4),_csv_number(rr,3),
+            _csv_number(r.get("confidence"),2),r.get("h4_trend","UNKNOWN"),
+            r.get("d1_trend","UNKNOWN"),r.get("w1_trend","UNKNOWN"),
+            _csv_number(r.get("rsi"),2),r.get("macd",""),r.get("volume",""),
+            _csv_number(r.get("volume_ratio"),3),_csv_number(r.get("atr_pct"),3),
+            r.get("liquidity",""),r.get("gate",""),r.get("gate_reason",""),
+            r.get("direction",""),bool(r.get("repeat_signal")),r.get("intel_reason") or r.get("reason",""),
+            VERSION,_csv_number(r.get("data_quality"),2),r.get("signal_id",""),
+            r.get("regime_trend",""),r.get("regime_volatility",""),r.get("regime_derivatives",""),
+            _csv_number(r.get("regime_score"),2),r.get("intel_bias","NEUTRAL"),r.get("setup_type","NO SETUP"),
+            _csv_number(r.get("opportunity_score"),2),_csv_number(r.get("structure_score"),2),
+            _csv_number(r.get("momentum_score"),2),_csv_number(r.get("volume_score"),2),
+            _csv_number(r.get("sr_score"),2),len(r.get("contradictions") or []),
+            " | ".join(r.get("contradictions") or []),_csv_number(trig.get("long")),
+            _csv_number(trig.get("short")),bool(r.get("executable")),r.get("intel_decision","WAIT"),
+            r.get("intel_signal_id",""),r.get("confidence_label","MODEL STRENGTH")
+        ])
+    out=io.StringIO(newline="")
+    w=csv.writer(out,lineterminator="\n")
+    w.writerow(_new_csv_columns()); w.writerows(rows)
+    return out.getvalue()
+
+def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
+    """PNG ranking redesigned around opportunity/setup rather than raw price."""
+    if not ENABLE_IMAGE_TABLE: return None
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+        if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            fm.fontManager.addfont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            plt.rcParams["font.family"]="DejaVu Sans"
+        rows=_intel_rank(results,False)[:ATLAS_IMAGE_ROWS]
+        if not rows:
+            return None
+        fig,ax=plt.subplots(figsize=(17,8.5))
+        ax.axis("off")
+        headers=["#","Asset","Decision","Setup","Bias","Opp.","Strength","R/R","Trigger"]
+        cell=[headers]
+        for i,r in enumerate(rows,1):
+            trig=r.get("intel_trigger") or {}
+            if r.get("intel_bias")=="LONG": t=fmt(trig.get("long")) if trig.get("long") else "N/A"
+            elif r.get("intel_bias")=="SHORT": t=fmt(trig.get("short")) if trig.get("short") else "N/A"
+            else: t="Range break"
+            cell.append([
+                str(i),str(r.get("coin",""))[:8],str(r.get("intel_decision","WAIT")),
+                str(r.get("setup_type","NO SETUP"))[:16],str(r.get("intel_bias","NEUTRAL")),
+                f"{_i_num(r.get('opportunity_score'),0):.0f}",
+                f"{_i_num(r.get('confidence'),0):.0f}",f"{_i_num(r.get('rr_intel'),0):.2f}" if r.get("rr_intel") else "—",
+                t[:22]
+            ])
+        table=ax.table(cellText=cell,loc="center",cellLoc="center",colWidths=[.04,.09,.12,.15,.09,.08,.09,.08,.20])
+        table.auto_set_font_size(False); table.set_fontsize(10); table.scale(1,2.0)
+        for (ri,cj),cellobj in table.get_celld().items():
+            if ri==0:
+                cellobj.set_facecolor("#26384A"); cellobj.set_text_props(color="white",weight="bold")
+            elif ri%2==0:
+                cellobj.set_facecolor("#EEF2F5")
+            if ri>0 and cj in (2,4):
+                val=str(cell[ri][cj])
+                if "LONG" in val or val=="BUY": cellobj.set_facecolor("#2E8B57"); cellobj.set_text_props(color="white")
+                elif "SHORT" in val or val=="SELL": cellobj.set_facecolor("#C0392B"); cellobj.set_text_props(color="white")
+            if ri>0 and cj==5:
+                v=_i_num(cell[ri][cj],0)
+                cellobj.set_facecolor("#2E8B57" if v>=75 else "#D4AC0D" if v>=60 else "#C0392B")
+                cellobj.set_text_props(color="white")
+        ax.set_title("ATLAS v11.4 — OPPORTUNITY RANKING",fontsize=17,weight="bold",pad=18)
+        ax.text(0.5,0.03,"Opportunity ≠ probability | Conditional triggers only | No order execution",ha="center",fontsize=9)
+        plt.tight_layout()
+        plt.savefig(filename,dpi=160,bbox_inches="tight",facecolor="white")
+        plt.close()
+        return filename
+    except Exception as e:
+        print(f"⚠️ Image generation error: {e}")
+        return None
+
+def generate_voice_summary(results, news=None, btc_regime=None):
+    rows=_intel_rank(results,False)
+    dt=now_tehran()
+    session,label,mult=get_current_session()
+    lines=[
+        "گزارش هوشمند اطلس.",
+        f"زمان گزارش {dt.strftime('%H:%M')} به وقت تهران. {label}.",
+    ]
+    if btc_regime:
+        regime=btc_regime.get("regime") or btc_regime.get("trend") or "نامشخص"
+        lines.append(f"رژیم کلی بیت کوین {regime}.")
+    executable=[r for r in rows if r.get("executable")]
+    watches=[r for r in rows if str(r.get("intel_decision","")).startswith("WATCH")]
+    if executable:
+        lines.append("سیگنال اجرایی معتبر وجود دارد.")
+        for r in executable[:3]:
+            lines.append(f"{r.get('coin')}، {r.get('intel_decision')}، امتیاز فرصت {r.get('opportunity_score',0):.0f}، نسبت ریسک به بازده {r.get('rr_intel') or 0:.1f}.")
+    elif watches:
+        lines.append("در حال حاضر سیگنال اجرایی قطعی نداریم، اما چند فرصت در مرحله انتظار تأیید هستند.")
+        for r in watches[:3]:
+            trig=r.get("intel_trigger") or {}
+            if r.get("intel_bias")=="LONG":
+                lines.append(f"{r.get('coin')} صعودی؛ تریگر عبور و تثبیت بالای {fmt(trig.get('long')) if trig.get('long') else 'سطح مقاومت'} است.")
+            else:
+                lines.append(f"{r.get('coin')} نزولی؛ تریگر شکست و تثبیت زیر {fmt(trig.get('short')) if trig.get('short') else 'سطح حمایت'} است.")
+    else:
+        lines.append("در حال حاضر فرصت معاملاتی با عدم تقارن کافی دیده نمی‌شود.")
+    if rows:
+        best=rows[0]
+        lines.append(f"بهترین فرصت فعلی {best.get('coin')} با نوع ستاپ {best.get('setup_type')} و امتیاز فرصت {best.get('opportunity_score',0):.0f} است.")
+        if best.get("contradictions"):
+            lines.append("هشدارهای اصلی این فرصت: " + "، ".join(best["contradictions"][:3]) + ".")
+    if news:
+        lines.append(f"وضعیت اخبار {news.get('bias','مختلط')} و شدت اثر {news.get('impact','عادی')} است.")
+    usdt=fetch_usdt_toman_public()
+    if usdt: lines.append(f"نرخ تتر حدود {usdt:,.0f} تومان است.")
+    lines.append("امتیاز فرصت و اطمینان اطلس احتمال برد آماری نیست و هنوز کالیبره نشده است.")
+    lines.append("این گزارش توصیه سرمایه گذاری قطعی نیست و اتلس سفارش خرید یا فروش ثبت نمی‌کند.")
+    return " ".join(lines)
+
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
