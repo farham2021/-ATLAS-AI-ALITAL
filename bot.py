@@ -2261,7 +2261,143 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
 
 
 # ============================================================
-# ANALYZE COIN
+# ===== NEW: DATA QUALITY, SIGNAL LIFECYCLE, NO-TRADE ENGINES =====
+# ============================================================
+
+def calculate_data_quality(result):
+    """
+    Data Quality Engine - امتیاز کیفیت داده‌ها (0-100)
+    معیارها: تعداد منابع، spread، در دسترس بودن داده‌ها، تازگی، کیفیت S/R
+    """
+    score = 0
+    
+    # 1. تعداد منابع قیمت (30 امتیاز)
+    sources = len(result.get("sources", []))
+    if sources >= 5:
+        score += 30
+    elif sources >= 3:
+        score += 20
+    elif sources >= 1:
+        score += 10
+    
+    # 2. Spread قیمت (20 امتیاز)
+    spread = result.get("spread", 100)
+    if spread is not None:
+        if spread <= 0.5:
+            score += 20
+        elif spread <= 1.5:
+            score += 15
+        elif spread <= 3.0:
+            score += 10
+        else:
+            score += 5
+    
+    # 3. در دسترس بودن داده‌های کلیدی (30 امتیاز)
+    key_fields = ["price", "rsi", "macd", "volume_ratio", "atr_pct", "support", "resistance"]
+    available = sum(1 for f in key_fields if result.get(f) is not None)
+    score += (available / len(key_fields)) * 30
+    
+    # 4. تازگی داده (10 امتیاز)
+    errors = result.get("price_source_errors", [])
+    if len(errors) == 0:
+        score += 10
+    elif len(errors) <= 2:
+        score += 5
+    
+    # 5. کیفیت S/R (10 امتیاز)
+    sr_conf = result.get("sr_confidence", "LOW")
+    if sr_conf == "HIGH":
+        score += 10
+    elif sr_conf == "MEDIUM":
+        score += 5
+    
+    return min(100, int(score))
+
+
+def generate_signal_id(coin, timeframe="4H"):
+    """تولید شناسه یکتا برای هر سیگنال"""
+    import hashlib
+    import random
+    timestamp = now_tehran().strftime("%Y%m%d-%H%M")
+    random_part = hashlib.md5(f"{coin}{timeframe}{time.time()}{random.random()}".encode()).hexdigest()[:4].upper()
+    return f"{coin}-{timeframe}-{timestamp}-{random_part}"
+
+
+def build_no_trade_reasons(result):
+    """
+    No-Trade Engine - لیست دقیق دلایل عدم ورود به معامله
+    """
+    reasons = []
+    
+    # RR پایین
+    rr = result.get("rr")
+    if rr is not None and rr < MIN_EXECUTABLE_RR:
+        reasons.append(f"R/R too low ({rr:.2f} < {MIN_EXECUTABLE_RR:.1f})")
+    
+    # BTC regime مخالف
+    regime = result.get("btc_regime", {}).get("regime")
+    direction = result.get("direction")
+    if direction == "LONG" and regime == "RISK_OFF":
+        reasons.append("BTC regime is RISK_OFF (bearish)")
+    elif direction == "SHORT" and regime == "RISK_ON":
+        reasons.append("BTC regime is RISK_ON (bullish)")
+    
+    # نقدینگی کم
+    liquidity = result.get("liquidity_score", 0)
+    if liquidity < 45:
+        reasons.append(f"Low liquidity ({liquidity:.0f})")
+    
+    # کیفیت داده پایین
+    dq = result.get("data_quality", 100)
+    if dq < 60:
+        reasons.append(f"Poor data quality ({dq:.0f})")
+    
+    # مقاومت/حمایت نزدیک
+    entry = result.get("entry")
+    if direction == "LONG":
+        resistance = result.get("resistance")
+        if resistance and entry and (resistance - entry) / entry < 0.015:
+            reasons.append(f"Resistance too close ({fmt(resistance)})")
+    elif direction == "SHORT":
+        support = result.get("support")
+        if support and entry and (entry - support) / entry < 0.015:
+            reasons.append(f"Support too close ({fmt(support)})")
+    
+    # اشباع RSI
+    rsi = result.get("rsi")
+    if direction == "LONG" and rsi and rsi > 70:
+        reasons.append(f"RSI overbought ({rsi:.1f})")
+    elif direction == "SHORT" and rsi and rsi < 30:
+        reasons.append(f"RSI oversold ({rsi:.1f})")
+    
+    # نوسان بالا
+    atr = result.get("atr_pct")
+    if atr and atr > 8:
+        reasons.append(f"Extreme volatility ({atr:.1f}%)")
+    
+    # تکرار سیگنال
+    if result.get("repeat_signal"):
+        reasons.append("Signal already active")
+    
+    # تضاد در سیگنال
+    contradictions = result.get("contradictions", [])
+    if contradictions:
+        reasons.append(f"Contradictions: {', '.join(contradictions[:2])}")
+    
+    # عدم تأیید کندل
+    trigger_state = (result.get("candle_trigger") or {}).get("state")
+    if direction in ("LONG", "SHORT") and trigger_state not in ("BREAKOUT_CLOSED", "BREAKDOWN_CLOSED", "SUPPORT_RECLAIM", "RESISTANCE_REJECT"):
+        reasons.append("Candle confirmation missing")
+    
+    # گیت بلاک
+    if result.get("gate") == "BLOCK":
+        reasons.append(f"Gate blocked: {result.get('gate_reason', 'Unknown reason')}")
+    
+    return reasons
+
+
+# ============================================================
+# ANALYZE COIN (modified to include new engines)
 # ============================================================
 
 def analyze_coin(coin, market_news, weights):
@@ -2539,6 +2675,32 @@ def analyze_coin(coin, market_news, weights):
         if "همپوشانی سشن — نقدینگی بالا" not in str(reason_parts):
             reason_parts.append("همپوشانی سشن — نقدینگی بالا")
 
+    # ===== NEW: Data Quality =====
+    data_quality = calculate_data_quality({
+        "sources": sources,
+        "spread": spread_pct,
+        "price": price,
+        "rsi": tf4.get("rsi"),
+        "macd": tf4.get("macd"),
+        "volume_ratio": vol_ratio,
+        "atr_pct": atrp,
+        "support": effective_levels.get("support") if effective_levels else None,
+        "resistance": effective_levels.get("resistance") if effective_levels else None,
+        "sr_confidence": effective_levels.get("confidence", "LOW") if effective_levels else "LOW",
+        "price_source_errors": errors,
+    })
+    
+    # ===== NEW: Signal ID =====
+    signal_id = generate_signal_id(coin, "4H")
+    
+    # ===== NEW: Apply Data Quality cap =====
+    if data_quality < 70:
+        confidence = min(confidence, 65)  # cap at 65%
+        if data_quality < 50:
+            confidence = min(confidence, 40)
+            gate = "BLOCK"
+            gate_reason = "Data quality too low: " + gate_reason
+
     temp_result = {
         "coin": coin,
         "price": price,
@@ -2608,6 +2770,12 @@ def analyze_coin(coin, market_news, weights):
         "session_label": session_label,
         "session_multiplier": session_multiplier,
         "btc_regime": btc_market_regime(),
+        # ===== NEW FIELDS =====
+        "data_quality": data_quality,
+        "data_quality_label": "HIGH" if data_quality >= 80 else "MEDIUM" if data_quality >= 60 else "LOW",
+        "signal_id": signal_id,
+        "no_trade_reasons": [],
+        "no_trade_summary": "",
     }
 
     # Simple invalidation logic inline
@@ -2754,6 +2922,9 @@ def analyze_coin(coin, market_news, weights):
         "no_trade_reasons": no_trade_reasons,
         "should_trade": should_trade,
         "repeat_signal": repeat_signal,
+        # ===== NEW FIELDS =====
+        "data_quality": data_quality,
+        "data_quality_label": "HIGH" if data_quality >= 80 else "MEDIUM" if data_quality >= 60 else "LOW",
     }
 
 
@@ -3730,6 +3901,7 @@ CSV_COLUMNS = (
     "R/R", "Confidence", "H4Trend", "D1Trend", "W1Trend", "RSI", "MACD",
     "Volume", "VolumeRatio", "ATR_pct", "Liquidity", "Gate", "GateReason",
     "Direction", "RepeatSignal", "Reason", "ModelVersion",
+    "DataQuality", "SignalID",
 )
 
 def _csv_group(symbol, top10, dynamic30, personal_symbols):
@@ -3822,6 +3994,7 @@ def generate_csv_report(results, top10, dynamic30):
             _csv_number(r.get("atr_pct"), 3), r.get("liquidity", ""),
             r.get("gate", ""), r.get("gate_reason", ""), r.get("direction", ""),
             bool(r.get("repeat_signal")), r.get("reason", ""), VERSION,
+            r.get("data_quality", ""), r.get("signal_id", ""),
         ])
 
     out = io.StringIO(newline="")
@@ -4013,6 +4186,16 @@ def asset_block(r, metal=False, detail=False):
         f"RSI: {rsi_text} | MACD: {r.get('macd','N/A')} | ATR: {atr_text}",
         f"S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))}",
     ]
+
+    # ===== NEW: Data Quality =====
+    if r.get("data_quality") is not None:
+        dq = r["data_quality"]
+        label = r.get("data_quality_label", "UNKNOWN")
+        lines.append(f"Data Quality: {dq:.0f}% — {label}")
+
+    # ===== NEW: Signal ID =====
+    if r.get("signal_id"):
+        lines.append(f"🆔 Signal ID: {r['signal_id']}")
 
     if _plan_is_allowed(r) and f(r.get("entry")) is not None and f(r.get("sl")) is not None and f(r.get("tp2")) is not None:
         rr = _rr_from_values(r.get("entry"), r.get("sl"), r.get("tp2"))
