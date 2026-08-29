@@ -164,6 +164,7 @@ MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
 TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
 SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
+SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.5"))
 
 # ============================================================
 # CACHE & MEMORY SETTINGS
@@ -5038,7 +5039,7 @@ def _snapshot_previous_prices():
 
 
 def _snapshot_direction(current, previous):
-    """تشخیص جهت تغییر قیمت و نمایش فلش مناسب"""
+    """تشخیص جهت تغییر قیمت نسبت به قیمت قبلی (فال‌بک)"""
     current = f(current)
     previous = f(previous)
     if current is None or previous is None or previous <= 0:
@@ -5047,6 +5048,19 @@ def _snapshot_direction(current, previous):
     if abs(delta_pct) < SNAPSHOT_FLAT_THRESHOLD_PCT:
         return "➡️"
     return "⬆️" if delta_pct > 0 else "⬇️"
+
+
+def _get_snapshot_arrow(price, previous_price, change24=None):
+    """
+    تعیین فلش جهت تغییر قیمت با اولویت تغییرات ۲۴ ساعته.
+    اگر change24 موجود باشد، بر اساس آن و آستانه‌ی SNAPSHOT_24H_THRESHOLD_PCT تصمیم‌گیری می‌شود.
+    در غیر این صورت به _snapshot_direction فال‌بک می‌شود.
+    """
+    if change24 is not None:
+        if abs(change24) < SNAPSHOT_24H_THRESHOLD_PCT:
+            return "➡️"
+        return "⬆️" if change24 > 0 else "⬇️"
+    return _snapshot_direction(price, previous_price)
 
 
 def _save_snapshot_prices(results, captured_at):
@@ -5115,7 +5129,9 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         if price is None:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
-        arrow = _snapshot_direction(price, previous_prices.get(sym))
+        # دریافت change24 از داده‌های ticker
+        change24 = f(r.get("change24"))
+        arrow = _get_snapshot_arrow(price, previous_prices.get(sym), change24)
         arrow_stats[arrow] = arrow_stats.get(arrow, 0) + 1
         lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
     
