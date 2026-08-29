@@ -1,250 +1,355 @@
-# test_bot.py
-# ============================================================
-# ATLAS AI v11.1 — TEST SUITE
-# ============================================================
+"""
+ATLAS AI v11.1 — Unit Tests
+====================================
+Tests for core functionality of the ATLAS AI trading bot.
+"""
 
-import pytest
 import os
 import sys
-import json
+import unittest
 import tempfile
-from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-# تنظیم متغیرهای محیطی برای تست
-os.environ["TELEGRAM_TOKEN"] = "test_token"
-os.environ["TELEGRAM_CHAT_ID"] = "test_chat"
-os.environ["TELEGRAM_GROUP_CHAT_ID"] = "test_group"
-os.environ["ATLAS_RUN_MODE"] = "ANALYSIS"
-os.environ["ATLAS_ENGINE"] = "BOTH"
-os.environ["ATLAS_ENABLE_VOICE"] = "0"
-os.environ["ATLAS_AUTO_SEND_VOICE"] = "0"
-os.environ["ATLAS_ENABLE_IMAGE_TABLE"] = "0"
-os.environ["ATLAS_CANDLE_EVENT_DEDUP"] = "0"
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# وارد کردن ماژول bot
-try:
-    from bot import (
-        VERSION,
-        TIMEFRAMES,
-        SIGNAL_TIMEFRAME,
-        now_utc,
-        now_tehran,
-        shamsi,
-        safe_float,
-        f,
-        safe_mean,
-        safe_median,
-        fmt,
-        pct,
-        clamp,
-        is_stable,
-        is_ambiguous_symbol,
-        get_run_mode,
-        get_engine_mode,
-        get_current_session,
-        get_next_session_time,
-        _parse_bool,
-    )
-except ImportError as e:
-    print(f"Import error: {e}")
-    sys.exit(1)
-
-# تعریف توابع _fmt_price, _fmt_change, _get_status_emoji در صورت عدم وجود در bot
-try:
-    from bot import _fmt_price, _fmt_change, _get_status_emoji
-except ImportError:
-    # تعریف محلی برای تست
-    def _fmt_price(value):
-        if value is None:
-            return "N/A"
-        if abs(value) >= 1000:
-            return f"${value:,.2f}"
-        if abs(value) >= 1:
-            return f"${value:,.4f}"
-        if abs(value) >= 0.01:
-            return f"${value:,.6f}"
-        return f"${value:.8f}"
-    
-    def _fmt_change(value):
-        if value is None:
-            return "N/A"
-        return f"{value:+.2f}%"
-    
-    def _get_status_emoji(r):
-        action = str(r.get("action") or "").upper()
-        if "BUY" in action or "BULLISH" in action:
-            return "🟢 BULL"
-        elif "SELL" in action or "BEARISH" in action:
-            return "🔴 BEAR"
-        else:
-            return "⚪ WAIT"
+# Import from bot module
+from bot import (
+    VERSION,
+    f,
+    fmt,
+    pct,
+    clamp,
+    now_utc,
+    now_tehran,
+    shamsi,
+    safe_float,
+    safe_mean,
+    safe_median,
+    is_stable,
+    is_ambiguous_symbol,
+    _parse_bool,
+    get_current_session,
+    get_next_session_time,
+    get_run_mode,
+    get_engine_mode,
+    _fmt_price,
+    _fmt_change,
+    _get_status_emoji,
+    action_emoji,
+    _rr_from_values,
+    _validate_trade_geometry,
+    _snapshot_direction,
+    _snapshot_price_text,
+    TEHRAN,
+)
 
 
-# ============================================================
-# TEST CLASSES
-# ============================================================
-
-class TestBasicFunctions:
-    """تست توابع پایه"""
-
-    def test_version(self):
-        """تست وجود نسخه"""
-        assert VERSION is not None
-        assert "ATLAS" in VERSION
-
-    def test_timeframes(self):
-        """تست تایم‌فریم‌ها"""
-        assert "4h" in TIMEFRAMES
-        assert "1d" in TIMEFRAMES
-        assert "1w" in TIMEFRAMES
-        assert "1M" in TIMEFRAMES
-
-    def test_signal_timeframe(self):
-        """تست تایم‌فریم سیگنال"""
-        assert SIGNAL_TIMEFRAME == "4h"
-
-    def test_now_utc(self):
-        """تست زمان UTC"""
-        dt = now_utc()
-        assert dt.tzinfo == timezone.utc
-
-    def test_now_tehran(self):
-        """تست زمان تهران"""
-        dt = now_tehran()
-        assert dt.tzinfo is not None
-        assert str(dt.tzinfo) == "Asia/Tehran"
-
-    def test_shamsi(self):
-        """تست تبدیل تاریخ شمسی"""
-        dt = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        result = shamsi(dt)
-        assert isinstance(result, str)
-        assert len(result.split("/")) == 3
-
-    def test_safe_float(self):
-        """تست تبدیل به float"""
-        assert safe_float("123") == 123.0
-        assert safe_float("abc") is None
-        assert safe_float(None) is None
-        assert safe_float(456) == 456.0
+class TestHelpers(unittest.TestCase):
+    """Test helper functions"""
 
     def test_f(self):
-        """تست تابع f"""
-        assert f("123") == 123.0
-        assert f(None) is None
-
-    def test_safe_mean(self):
-        """تست میانگین"""
-        assert safe_mean([1, 2, 3]) == 2.0
-        assert safe_mean([]) is None
-        assert safe_mean([1, None, 3]) == 2.0
-
-    def test_safe_median(self):
-        """تست میانه"""
-        assert safe_median([1, 2, 3]) == 2.0
-        assert safe_median([1, 2, 3, 4]) == 2.5
-        assert safe_median([]) is None
+        """Test safe_float wrapper"""
+        self.assertEqual(f(10.5), 10.5)
+        self.assertEqual(f("10.5"), 10.5)
+        self.assertEqual(f(None), None)
+        self.assertEqual(f("invalid"), None)
+        self.assertEqual(f("invalid", 0), 0)
+        self.assertEqual(f(True), None)
 
     def test_fmt(self):
-        """تست فرمت قیمت"""
-        assert fmt(1000) == "$1,000.00"
-        assert fmt(1.2345) == "$1.2345"
-        assert fmt(None) == "N/A"
+        """Test price formatting"""
+        self.assertEqual(fmt(1234.56), "$1,234.56")
+        self.assertEqual(fmt(12.34), "$12.3400")
+        self.assertEqual(fmt(0.1234), "$0.123400")
+        self.assertEqual(fmt(0.00012345), "$0.000123")
+        self.assertEqual(fmt(None), "N/A")
 
     def test_pct(self):
-        """تست فرمت درصد"""
-        assert pct(10.5) == "+10.50%"
-        assert pct(-5.2) == "-5.20%"
-        assert pct(None) == "N/A"
+        """Test percentage formatting"""
+        self.assertEqual(pct(10.5), "+10.50%")
+        self.assertEqual(pct(-5.2), "-5.20%")
+        self.assertEqual(pct(None), "N/A")
 
     def test_clamp(self):
-        """تست محدودسازی"""
-        assert clamp(5, 0, 10) == 5
-        assert clamp(-1, 0, 10) == 0
-        assert clamp(15, 0, 10) == 10
+        """Test clamp function"""
+        self.assertEqual(clamp(5, 0, 10), 5)
+        self.assertEqual(clamp(-5, 0, 10), 0)
+        self.assertEqual(clamp(15, 0, 10), 10)
+
+    def test_safe_float(self):
+        """Test safe_float"""
+        self.assertEqual(safe_float(10.5), 10.5)
+        self.assertEqual(safe_float("10.5"), 10.5)
+        self.assertEqual(safe_float(None), None)
+        self.assertEqual(safe_float("invalid"), None)
+
+    def test_safe_mean(self):
+        """Test safe_mean"""
+        self.assertEqual(safe_mean([1, 2, 3]), 2.0)
+        self.assertEqual(safe_mean([None, 2, 3]), 2.5)
+        self.assertEqual(safe_mean([]), None)
+        self.assertEqual(safe_mean([None]), None)
+
+    def test_safe_median(self):
+        """Test safe_median"""
+        self.assertEqual(safe_median([1, 2, 3]), 2)
+        self.assertEqual(safe_median([1, 2, 3, 4]), 2.5)
+        self.assertEqual(safe_median([]), None)
 
     def test_is_stable(self):
-        """تست تشخیص استیبل‌کوین"""
-        assert is_stable("USDT") is True
-        assert is_stable("BTC") is False
-        assert is_stable("USDC") is True
+        """Test stablecoin detection"""
+        self.assertTrue(is_stable("USDT"))
+        self.assertTrue(is_stable("USDC"))
+        self.assertTrue(is_stable("DAI"))
+        self.assertFalse(is_stable("BTC"))
+        self.assertFalse(is_stable("ETH"))
+        self.assertFalse(is_stable(""))
 
     def test_is_ambiguous_symbol(self):
-        """تست تشخیص سمبل مبهم"""
-        assert is_ambiguous_symbol("M") is True
-        assert is_ambiguous_symbol("CC") is True
-        assert is_ambiguous_symbol("BTC") is False
+        """Test ambiguous symbol detection"""
+        self.assertTrue(is_ambiguous_symbol("M"))
+        self.assertTrue(is_ambiguous_symbol("CC"))
+        self.assertFalse(is_ambiguous_symbol("BTC"))
+        self.assertFalse(is_ambiguous_symbol(""))
 
     def test_parse_bool(self):
-        """تست تبدیل boolean"""
-        assert _parse_bool("true") is True
-        assert _parse_bool("1") is True
-        assert _parse_bool("yes") is True
-        assert _parse_bool("false") is False
-        assert _parse_bool("0") is False
-        assert _parse_bool("no") is False
-        assert _parse_bool(True) is True
-        assert _parse_bool(False) is False
+        """Test boolean parser"""
+        self.assertTrue(_parse_bool("true"))
+        self.assertTrue(_parse_bool("1"))
+        self.assertTrue(_parse_bool("yes"))
+        self.assertTrue(_parse_bool("on"))
+        self.assertTrue(_parse_bool(True))
+        self.assertFalse(_parse_bool("false"))
+        self.assertFalse(_parse_bool("0"))
+        self.assertFalse(_parse_bool("no"))
+        self.assertFalse(_parse_bool("off"))
+        self.assertFalse(_parse_bool(False))
+        self.assertFalse(_parse_bool("random"))
 
-    def test_get_run_mode(self):
-        """تست حالت اجرا"""
-        mode = get_run_mode()
-        assert mode in ("AUTO", "SNAPSHOT", "ANALYSIS", "BOTH")
+    def test_now_utc(self):
+        """Test UTC time"""
+        now = now_utc()
+        self.assertIsInstance(now, datetime)
+        self.assertEqual(now.tzinfo, timezone.utc)
 
-    def test_get_engine_mode(self):
-        """تست حالت موتور"""
-        mode = get_engine_mode()
-        assert mode in ("MARKET", "PERSONAL", "BOTH")
+    def test_now_tehran(self):
+        """Test Tehran time"""
+        now = now_tehran()
+        self.assertIsInstance(now, datetime)
+        self.assertEqual(now.tzinfo, TEHRAN)
 
-
-class TestFormatFunctions:
-    """تست توابع فرمت"""
-
-    def test_fmt_price(self):
-        """تست فرمت قیمت با _fmt_price"""
-        assert _fmt_price(1000) == "$1,000.00"
-        assert _fmt_price(1.2345) == "$1.2345"
-        assert _fmt_price(None) == "N/A"
-
-    def test_fmt_change(self):
-        """تست فرمت تغییرات"""
-        assert _fmt_change(10.5) == "+10.50%"
-        assert _fmt_change(-5.2) == "-5.20%"
-        assert _fmt_change(None) == "N/A"
-
-    def test_get_status_emoji(self):
-        """تست دریافت ایموجی وضعیت"""
-        mock_r = {"action": "BUY CONFIRMATION"}
-        assert _get_status_emoji(mock_r) == "🟢 BULL"
-        
-        mock_r = {"action": "SELL CONFIRMATION"}
-        assert _get_status_emoji(mock_r) == "🔴 BEAR"
-        
-        mock_r = {"action": "WAIT"}
-        assert _get_status_emoji(mock_r) == "⚪ WAIT"
+    def test_shamsi(self):
+        """Test Persian date conversion"""
+        dt = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc)
+        result = shamsi(dt)
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) == 10)
 
 
-class TestSessionFunctions:
-    """تست توابع سشن"""
+class TestMarketSessions(unittest.TestCase):
+    """Test market session functions"""
 
     def test_get_current_session(self):
-        """تست تشخیص سشن فعلی"""
-        name, label, multiplier = get_current_session()
-        assert name in ("ASIA", "EUROPE", "AMERICA", "OVERLAP", "CLOSED")
-        assert isinstance(multiplier, float)
-        assert 0.7 <= multiplier <= 1.2
+        """Test session detection"""
+        # ASIA session (UTC 0-8)
+        dt = datetime(2026, 8, 28, 5, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "ASIA")
+        self.assertIsInstance(multiplier, float)
 
-    def test_get_next_session_time(self):
-        """تست زمان سشن بعدی"""
-        name, dt = get_next_session_time()
-        assert name in ("ASIA", "EUROPE", "AMERICA", "OVERLAP")
-        assert isinstance(dt, datetime)
+        # EUROPE session (UTC 7-15) - در 10:00 فقط EUROPE فعال است
+        dt = datetime(2026, 8, 28, 10, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "EUROPE")
+
+        # OVERLAP session (UTC 12-15) - در 13:00 OVERLAP اولویت دارد
+        dt = datetime(2026, 8, 28, 13, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "OVERLAP")
+
+        # AMERICA session (UTC 12-20) - در 18:00 فقط AMERICA فعال است
+        dt = datetime(2026, 8, 28, 18, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "AMERICA")
+
+        # CLOSED session (UTC 20-24)
+        dt = datetime(2026, 8, 28, 22, 0, 0, tzinfo=timezone.utc)
+        name, label, multiplier = get_current_session(dt)
+        self.assertEqual(name, "CLOSED")
 
 
-# ============================================================
-# RUN TESTS
-# ============================================================
+class TestFormatting(unittest.TestCase):
+    """Test formatting functions"""
+
+    def test_fmt_price(self):
+        """Test price formatting"""
+        self.assertEqual(_fmt_price(123456.78), "$123,456.78")
+        self.assertEqual(_fmt_price(123.45), "$123.4500")
+        self.assertEqual(_fmt_price(0.1234), "$0.123400")
+        self.assertEqual(_fmt_price(0.00012345), "$0.00012345")
+        self.assertEqual(_fmt_price(None), "N/A")
+
+    def test_fmt_change(self):
+        """Test change formatting"""
+        self.assertEqual(_fmt_change(10.5), "+10.50%")
+        self.assertEqual(_fmt_change(-5.2), "-5.20%")
+        self.assertEqual(_fmt_change(None), "N/A")
+
+    def test_get_status_emoji(self):
+        """Test status emoji"""
+        r_buy = {"action": "BUY CONFIRMATION"}
+        r_sell = {"action": "SELL CONFIRMATION"}
+        r_watch = {"action": "BULLISH WATCH"}
+        r_wait = {"action": "NO TRADE"}
+
+        self.assertEqual(_get_status_emoji(r_buy), "🟢 BULL")
+        self.assertEqual(_get_status_emoji(r_sell), "🔴 BEAR")
+        self.assertEqual(_get_status_emoji(r_watch), "🟢 BULL")  # BULLISH WATCH = BULL
+        self.assertEqual(_get_status_emoji(r_wait), "⚪ WAIT")
+
+    def test_action_emoji(self):
+        """Test action emoji"""
+        self.assertEqual(action_emoji("BUY CONFIRMATION"), "🟢 BUY")
+        self.assertEqual(action_emoji("SELL CONFIRMATION"), "🔴 SELL")
+        self.assertEqual(action_emoji("BULLISH WATCH"), "🟡 WATCH")
+        self.assertEqual(action_emoji("BEARISH WATCH"), "🟠 WATCH-SELL")
+        self.assertEqual(action_emoji("NO DATA"), "⚪ NO DATA")
+        self.assertEqual(action_emoji("NO TRADE"), "⚪ WAIT")
+
+
+class TestTradeGeometry(unittest.TestCase):
+    """Test trade geometry validation"""
+
+    def test_rr_from_values(self):
+        """Test R/R calculation"""
+        rr = _rr_from_values(100, 95, 110)
+        self.assertEqual(rr, 2.0)
+
+        rr = _rr_from_values(100, 105, 90)
+        self.assertEqual(rr, 2.0)
+
+        self.assertIsNone(_rr_from_values(None, 95, 110))
+        self.assertIsNone(_rr_from_values(100, 100, 110))
+
+    def test_validate_trade_geometry_long(self):
+        """Test LONG geometry validation"""
+        valid, reason = _validate_trade_geometry("LONG", 100, 95, 102, 110)
+        self.assertTrue(valid)
+
+        valid, reason = _validate_trade_geometry("LONG", 100, 95, 98, 110)
+        self.assertFalse(valid)
+        self.assertIn("invalid LONG geometry", reason)
+
+        valid, reason = _validate_trade_geometry("LONG", 100, 105, 102, 110)
+        self.assertFalse(valid)
+
+    def test_validate_trade_geometry_short(self):
+        """Test SHORT geometry validation"""
+        valid, reason = _validate_trade_geometry("SHORT", 100, 105, 98, 90)
+        self.assertTrue(valid)
+
+        valid, reason = _validate_trade_geometry("SHORT", 100, 105, 102, 110)
+        self.assertFalse(valid)
+
+        valid, reason = _validate_trade_geometry("SHORT", 100, 95, 98, 90)
+        self.assertFalse(valid)
+
+    def test_validate_trade_geometry_min_rr(self):
+        """Test minimum R/R requirement"""
+        valid, reason = _validate_trade_geometry("LONG", 100, 98, 101, 103, min_rr=3.0)
+        self.assertFalse(valid)
+        self.assertIn("R/R below", reason)
+
+
+class TestSnapshotHelpers(unittest.TestCase):
+    """Test snapshot helper functions"""
+
+    def test_snapshot_price_text(self):
+        """Test price text formatting for snapshots"""
+        self.assertEqual(_snapshot_price_text(123456.78), "$123,457")
+        self.assertEqual(_snapshot_price_text(1234.56), "$1,234.56")
+        self.assertEqual(_snapshot_price_text(12.34), "$12.34")
+        self.assertEqual(_snapshot_price_text(0.1234), "$0.12")
+        self.assertEqual(_snapshot_price_text(0.00012345), "$0.000123")
+        self.assertEqual(_snapshot_price_text(None), None)
+
+    def test_snapshot_direction(self):
+        """Test direction arrow detection"""
+        self.assertEqual(_snapshot_direction(110, 100), "⬆️")
+        self.assertEqual(_snapshot_direction(90, 100), "⬇️")
+        self.assertEqual(_snapshot_direction(100.02, 100), "➡️")
+        self.assertEqual(_snapshot_direction(None, 100), "➡️")
+        self.assertEqual(_snapshot_direction(110, None), "➡️")
+        self.assertEqual(_snapshot_direction(110, 0), "➡️")
+
+
+class TestRunMode(unittest.TestCase):
+    """Test run mode detection"""
+
+    @patch.dict(os.environ, {"ATLAS_RUN_MODE": "AUTO"})
+    def test_get_run_mode_auto(self):
+        self.assertEqual(get_run_mode(), "AUTO")
+
+    @patch.dict(os.environ, {"ATLAS_RUN_MODE": "SNAPSHOT"})
+    def test_get_run_mode_snapshot(self):
+        self.assertEqual(get_run_mode(), "SNAPSHOT")
+
+    @patch.dict(os.environ, {"ATLAS_RUN_MODE": "ANALYSIS"})
+    def test_get_run_mode_analysis(self):
+        self.assertEqual(get_run_mode(), "ANALYSIS")
+
+    @patch.dict(os.environ, {"ATLAS_RUN_MODE": "BOTH"})
+    def test_get_run_mode_both(self):
+        self.assertEqual(get_run_mode(), "BOTH")
+
+    @patch.dict(os.environ, {"ATLAS_RUN_MODE": "INVALID"})
+    def test_get_run_mode_default(self):
+        self.assertEqual(get_run_mode(), "AUTO")
+
+    @patch.dict(os.environ, {})
+    def test_get_run_mode_empty(self):
+        self.assertEqual(get_run_mode(), "AUTO")
+
+
+class TestEngineMode(unittest.TestCase):
+    """Test engine mode detection"""
+
+    @patch.dict(os.environ, {"ATLAS_ENGINE": "MARKET"})
+    def test_get_engine_mode_market(self):
+        self.assertEqual(get_engine_mode(), "MARKET")
+
+    @patch.dict(os.environ, {"ATLAS_ENGINE": "PERSONAL"})
+    def test_get_engine_mode_personal(self):
+        self.assertEqual(get_engine_mode(), "PERSONAL")
+
+    @patch.dict(os.environ, {"ATLAS_ENGINE": "BOTH"})
+    def test_get_engine_mode_both(self):
+        self.assertEqual(get_engine_mode(), "BOTH")
+
+    @patch.dict(os.environ, {"ATLAS_ENGINE": "INVALID"})
+    def test_get_engine_mode_default(self):
+        self.assertEqual(get_engine_mode(), "BOTH")
+
+    @patch.dict(os.environ, {})
+    def test_get_engine_mode_empty(self):
+        self.assertEqual(get_engine_mode(), "BOTH")
+
+
+class TestVersion(unittest.TestCase):
+    """Test version string"""
+
+    def test_version(self):
+        self.assertIn("ATLAS", VERSION)
+        self.assertIn("v11", VERSION)
+
+
+def run_tests():
+    """Run all tests"""
+    unittest.main(verbosity=2)
+
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])
+    run_tests()
