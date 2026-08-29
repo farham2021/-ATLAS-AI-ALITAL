@@ -4424,7 +4424,7 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
         f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x",
-        _best_setup_block(market_results),
+        # _best_setup_block removed to avoid text report duplication (CSV only)
         _compact_section("📡 ATLAS TOP 10", top10_rows),
         _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
         _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
@@ -4443,7 +4443,7 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
         f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x",
-        _best_setup_block(rows, title="🔥 BEST PERSONAL SETUP"),
+        # _best_setup_block removed to avoid text report duplication (CSV only)
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
         _final_market_recommendation(rows, [], [], macro, btc_regime),
     ])
@@ -4463,7 +4463,8 @@ def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info
     if mode=="MARKET": return [market]
     personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
     if mode=="PERSONAL": return [personal]
-    return [market,personal]
+    # Only return the two engine reports; the dashboard table and full table report are sent as CSV only
+    return [market, personal]
 
 
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
@@ -5273,7 +5274,7 @@ def build_v11_intelligence_report(results, portfolio):
 
 def build_full_table_report(results, top10_symbols=None, dynamic30_symbols=None):
     """
-    ساخت گزارش کامل جدولی با تمام بخش‌ها
+    ساخت گزارش کامل جدولی با تمام بخش‌ها - اما این تابع دیگر در خروجی نهایی ارسال نمی‌شود
     """
     lines = []
     dt = now_tehran()
@@ -5515,7 +5516,7 @@ def build_market_summary(results):
 
 
 def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=None):
-    """ساخت جدول رتبه‌بندی کامل سیگنال‌ها"""
+    """ساخت جدول رتبه‌بندی کامل سیگنال‌ها - این تابع دیگر در خروجی نهایی ارسال نمی‌شود"""
     lines = []
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("📊 ATLAS SIGNAL RANKING")
@@ -5799,8 +5800,19 @@ def _get_status_emoji(r):
 
 def main():
     try:
+        print(f"\n{'='*50}")
+        print(f"🚀 {VERSION}")
+        print(f"📅 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran")
+        print(f"{'='*50}\n")
+        
         telegram_preflight()
         run_mode = get_run_mode()
+        print(f"📌 Run Mode: {run_mode}")
+        print(f"📌 Engine Mode: {get_engine_mode()}")
+        print(f"📌 Voice Enabled: {ENABLE_VOICE_REPORT}")
+        print(f"📌 Auto Voice: {AUTO_SEND_VOICE}")
+        print(f"📌 Image Table: {ENABLE_IMAGE_TABLE}")
+        print()
         
         if run_mode == "AUTO":
             plan = _automatic_run_plan()
@@ -5811,6 +5823,9 @@ def main():
             do_analysis, do_snapshot = True, False
         else:
             do_analysis, do_snapshot = True, True
+        
+        print(f"📋 Plan: Analysis={do_analysis}, Snapshot={do_snapshot}")
+        print()
 
         total_sent = 0
         all_errors = []
@@ -5825,55 +5840,68 @@ def main():
         dynamic30 = []
 
         if do_analysis:
+            print("🔍 Starting ANALYSIS...")
             text, results, macro, news, market_info, unavailable = report()
+            print(f"✅ Analysis complete: {len(results)} results, {unavailable} unavailable")
+            
             results = [v11_apply_intelligence(r) for r in results]
             v11_portfolio = v11_portfolio_diagnostics(results)
             top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
             btc_regime = btc_market_regime()
             breadth = market_breadth(results)
             
-            full_table_report = build_full_table_report(results, top10, dynamic30)
-            
+            print(f"📊 Building reports...")
+            # فقط گزارش‌های متنی خلاصه (بدون جداول) ارسال می‌شوند
             outputs = build_two_engine_reports(
                 results, top10, dynamic30, macro, news, market_info,
                 unavailable, btc_regime, breadth
             )
-            outputs.append(build_dashboard_table(results, top10, dynamic30))
-            outputs.append(full_table_report)
-            outputs.append(build_v11_intelligence_report(results, v11_portfolio))
+            # گزارش‌های جدولی به‌صورت CSV ارسال می‌شوند، نه متن
+            # build_dashboard_table و full_table_report و signal_ranking از اینجا حذف شدند
             
-            signal_ranking = build_signal_ranking_table(results, top10, dynamic30)
-            outputs.append(signal_ranking)
+            print(f"📄 Total text outputs: {len(outputs)}")
+            for idx, payload in enumerate(outputs, 1):
+                parts = split_telegram(payload)
+                print(f"  Output {idx}: {len(payload)} chars → {len(parts)} parts")
             
             for payload in outputs:
                 parts, sent, errors = send_report(payload)
                 total_sent += sent
                 all_errors.extend(errors)
-                print(payload)
+                if sent > 0:
+                    print(f"✅ Sent {sent} parts")
             
             # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
             if ENABLE_IMAGE_TABLE:
+                print("📸 Generating image table...")
                 image_sent = send_image_table(results, top10, dynamic30)
                 if image_sent:
-                    print("✅ Image table sent successfully to all destinations")
+                    print("✅ Image table sent successfully")
                 else:
                     print("ℹ️ Image table not sent (matplotlib may not be installed)")
             else:
                 print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
             
             analysis_results = results
+            
+            # ارسال CSV کامل (شامل تمام جداول و داده‌ها)
+            print("📊 Generating CSV report...")
             csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
             total_sent += csv_sent
             all_errors.extend(csv_errors)
             print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
+            
             save_context(macro, news, market_liquidity_index(results), market_info)
             save_run(results, sum(len(split_telegram(x)) for x in outputs), macro, news, unavailable)
 
         if do_snapshot:
+            print("📸 Starting SNAPSHOT...")
             snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
+            print(f"✅ Snapshot results: {len(snapshot_results)}")
             snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
+            print(f"✅ Snapshot sent: {snapshot_sent}")
 
         # ============================================================
         # VOICE REPORT - با بررسی وجود داده
@@ -5901,7 +5929,7 @@ def main():
                     if audio_file:
                         result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
                         if result:
-                            print("✅ Audio report sent successfully to all destinations")
+                            print("✅ Audio report sent successfully")
                         try:
                             os.unlink(audio_file)
                         except:
@@ -5917,6 +5945,14 @@ def main():
             elif not AUTO_SEND_VOICE:
                 print(f"ℹ️ Voice disabled: AUTO_SEND_VOICE={AUTO_SEND_VOICE}")
 
+        print(f"\n{'='*50}")
+        print(f"📊 SUMMARY:")
+        print(f"  Total sent: {total_sent}")
+        print(f"  Errors: {len(all_errors)}")
+        if all_errors:
+            print(f"  Errors: {all_errors[:5]}")
+        print(f"{'='*50}\n")
+
         if not do_analysis and not do_snapshot:
             print(f"{VERSION}: AUTO schedule has no task at this hour.")
             return 0
@@ -5928,6 +5964,7 @@ def main():
         tb = traceback.format_exc()
         append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
+        print(tb)
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
                 alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
