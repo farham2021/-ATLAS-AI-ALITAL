@@ -1,19 +1,9 @@
 #============================================================
-# ATLAS AI v11.1 — UNIFIED TWO-ENGINE DECISION ENGINE + INTELLIGENCE
+# ATLAS AI v11.3 — SIGNAL SUMMARY ENGINE
 # ============================================================
-# TP3/TP4 structural targets are optional and never fabricated.
-# v11.0 architecture:
-# - Fixed portfolio symbols (user-defined, never changes)
-# - Compact dashboard-style report output
-# - BTC pair filtering with dynamic volume threshold
-# - Two-table format: market overview + trade plan
-# - 4-line summary: market regime, best setup, news, risk
-# - Separate 3H Price Snapshot with public Iranian USDT pricing; no API key required
-# - No extra paragraphs or explanations
-# - Real-time data only, no fabricated numbers
-# - Smart Telegram rate limit handling with exponential backoff
-# - Simultaneous delivery to private chat and supergroup
-# - Duplicate report prevention with hash-based deduplication
+# Stage 1: Data Quality + Signal Lifecycle + No-Trade
+# Stage 2: Regime Matrix + Volatility Engine + Liquidation Cascade
+# Stage 3: Signal Summary Engine (Smart Summary at end of report)
 #
 # Design principles:
 #   - ATLAS static radar is NEVER removed.
@@ -59,7 +49,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.1 UNIFIED TWO-ENGINE + INTELLIGENCE"
+VERSION = "ATLAS v11.3 SIGNAL SUMMARY ENGINE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -178,6 +168,21 @@ MARKET_BREADTH_MIN_SAMPLES = int(os.environ.get("ATLAS_MARKET_BREADTH_MIN_SAMPLE
 # ============================================================
 DB_FILE = os.environ.get("ATLAS_SQLITE_FILE", "atlas_v11.sqlite3")
 CHANGELOG_FILE = os.environ.get("ATLAS_CHANGELOG", "changelog.txt")
+
+# ============================================================
+# REGIME & VOLATILITY SETTINGS (Stage 2)
+# ============================================================
+VOLATILITY_THRESHOLDS = {
+    "LOW": float(os.environ.get("ATLAS_VOLATILITY_LOW", "2.0")),
+    "NORMAL": float(os.environ.get("ATLAS_VOLATILITY_NORMAL", "5.0")),
+    "HIGH": float(os.environ.get("ATLAS_VOLATILITY_HIGH", "8.0")),
+}
+REGIME_WEIGHTS = {
+    "trend": float(os.environ.get("ATLAS_REGIME_WEIGHT_TREND", "0.4")),
+    "volatility": float(os.environ.get("ATLAS_REGIME_WEIGHT_VOL", "0.2")),
+    "derivatives": float(os.environ.get("ATLAS_REGIME_WEIGHT_DERIV", "0.2")),
+    "breadth": float(os.environ.get("ATLAS_REGIME_WEIGHT_BREADTH", "0.2")),
+}
 
 # ============================================================
 # RUN MODE & ENGINE MODE - با پیش‌فرض‌های صحیح
@@ -2261,7 +2266,7 @@ def candle_trigger_state(rows, direction, support=None, resistance=None):
 
 
 # ============================================================
-# ===== NEW: DATA QUALITY, SIGNAL LIFECYCLE, NO-TRADE ENGINES =====
+# ===== DATA QUALITY, SIGNAL LIFECYCLE, NO-TRADE ENGINES (Stage 1) =====
 # ============================================================
 
 def calculate_data_quality(result):
@@ -2316,8 +2321,6 @@ def calculate_data_quality(result):
 
 def generate_signal_id(coin, timeframe="4H"):
     """تولید شناسه یکتا برای هر سیگنال"""
-    import hashlib
-    import random
     timestamp = now_tehran().strftime("%Y%m%d-%H%M")
     random_part = hashlib.md5(f"{coin}{timeframe}{time.time()}{random.random()}".encode()).hexdigest()[:4].upper()
     return f"{coin}-{timeframe}-{timestamp}-{random_part}"
@@ -2397,7 +2400,202 @@ def build_no_trade_reasons(result):
 
 
 # ============================================================
-# ANALYZE COIN (modified to include new engines)
+# ===== REGIME MATRIX & VOLATILITY ENGINE (Stage 2) =====
+# ============================================================
+
+def detect_trend_state(btc_h4, btc_d1, breadth_score, h4_trend, d1_trend):
+    """تشخیص وضعیت روند با جزئیات بیشتر (6 حالت)"""
+    if btc_h4 == "BULLISH" and btc_d1 == "BULLISH" and breadth_score > 65:
+        return "TRENDING_BULL"
+    if btc_h4 == "BEARISH" and btc_d1 == "BEARISH" and breadth_score < 35:
+        return "TRENDING_BEAR"
+    if btc_h4 == "MIXED" or breadth_score < 45:
+        return "RANGE"
+    if btc_h4 == "BULLISH" and breadth_score < 45:
+        return "ACCUMULATION"
+    if btc_h4 == "BEARISH" and breadth_score > 55:
+        return "DISTRIBUTION"
+    return "NEUTRAL"
+
+def detect_volatility_state(atr_pct):
+    """تشخیص سطح نوسان بر اساس ATR"""
+    if atr_pct is None:
+        return "UNKNOWN"
+    if atr_pct < VOLATILITY_THRESHOLDS["LOW"]:
+        return "LOW"
+    if atr_pct < VOLATILITY_THRESHOLDS["NORMAL"]:
+        return "NORMAL"
+    if atr_pct < VOLATILITY_THRESHOLDS["HIGH"]:
+        return "HIGH"
+    return "EXTREME"
+
+def detect_derivatives_state(funding_rate, open_interest_change=None):
+    """تشخیص وضعیت مشتقات (شلوغی/خنثی)"""
+    if funding_rate is None:
+        return "UNAVAILABLE"
+    if funding_rate > 0.01:
+        return "LONG_CROWDED"
+    if funding_rate < -0.01:
+        return "SHORT_CROWDED"
+    return "NEUTRAL"
+
+def detect_liquidation_cascade(price_change, volume_ratio, oi_change, liquidation_volume):
+    """تشخیص آبشار لیکوئید بر اساس داده‌های CoinGlass"""
+    if None in (price_change, volume_ratio, oi_change, liquidation_volume):
+        return False, "NO_DATA"
+    
+    # نشانه‌های آبشار لیکوئید:
+    # - قیمت افت شدید (بیش از ۳٪)
+    # - حجم معاملات جهش (بیش از ۲ برابر میانگین)
+    # - Open Interest کاهش (بیش از ۵٪)
+    # - حجم لیکوئید بالا (بیش از ۱۰۰ میلیون دلار)
+    is_cascade = (
+        price_change < -3.0 and
+        volume_ratio > 2.0 and
+        oi_change < -5.0 and
+        liquidation_volume > 100_000_000
+    )
+    if is_cascade:
+        return True, "LONG_CASCADE"
+    return False, "NONE"
+
+def calculate_regime_score(trend_state, volatility_state, derivatives_state):
+    """محاسبه امتیاز کلی رژیم (۰-۱۰۰)"""
+    trend_scores = {
+        "TRENDING_BULL": 90, "ACCUMULATION": 70, "NEUTRAL": 50,
+        "RANGE": 50, "DISTRIBUTION": 30, "TRENDING_BEAR": 10
+    }
+    vol_scores = {"LOW": 80, "NORMAL": 60, "HIGH": 40, "EXTREME": 20, "UNKNOWN": 50}
+    deriv_scores = {"NEUTRAL": 70, "LONG_CROWDED": 40, "SHORT_CROWDED": 40, "UNAVAILABLE": 50}
+    
+    score = 0
+    score += trend_scores.get(trend_state, 50) * REGIME_WEIGHTS["trend"]
+    score += vol_scores.get(volatility_state, 50) * REGIME_WEIGHTS["volatility"]
+    score += deriv_scores.get(derivatives_state, 50) * REGIME_WEIGHTS["derivatives"]
+    
+    return int(round(score))
+
+
+# ============================================================
+# ===== SIGNAL SUMMARY ENGINE (Stage 3) =====
+# ============================================================
+
+def generate_signal_summary(results):
+    """تولید خلاصه هوشمند از سیگنال‌ها برای انتهای گزارش"""
+    if not results:
+        return "⚠️ داده‌ای برای تحلیل سیگنال وجود ندارد."
+    
+    lines = []
+    
+    # 1. آمار کلی
+    total = len(results)
+    actionable = [r for r in results if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and not r.get("repeat_signal")]
+    watch = [r for r in results if r.get("decision_state") in ("BULLISH WATCH", "BEARISH WATCH")]
+    no_trade = [r for r in results if r.get("decision_state") == "NO TRADE" or r.get("gate") == "BLOCK"]
+    
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("📊 خلاصه سیگنال‌های هوشمند")
+    lines.append("───────────────────")
+    lines.append(f"🔍 کل دارایی‌های تحلیل‌شده: {total}")
+    lines.append(f"🟢 سیگنال اجرایی: {len(actionable)}")
+    lines.append(f"🟡 در انتظار تأیید: {len(watch)}")
+    lines.append(f"⚪ بدون سیگنال: {len(no_trade)}")
+    
+    # 2. بهترین فرصت‌ها (حداکثر ۳ مورد)
+    if actionable:
+        lines.append("")
+        lines.append("🏆 بهترین فرصت‌های معاملاتی:")
+        top = sorted(actionable, key=lambda r: (r.get("confidence", 0), r.get("rr") or 0), reverse=True)[:3]
+        for i, r in enumerate(top, 1):
+            direction = "LONG" if r.get("direction") == "LONG" else "SHORT"
+            emoji = "🟢" if direction == "LONG" else "🔴"
+            rr = r.get("rr", 0)
+            conf = r.get("confidence", 0)
+            lines.append(f"  {i}. {emoji} {r['coin']} — {direction} — اطمینان {conf}% — R/R {rr:.2f}")
+    
+    # 3. هشدارهای مهم
+    warnings = []
+    for r in results:
+        if r.get("warning"):
+            warnings.append(f"⚠️ {r['coin']}: {r['warning']}")
+        if r.get("regime", {}).get("cascade_detected"):
+            warnings.append(f"🔥 {r['coin']}: آبشار لیکوئید شناسایی شد!")
+        if r.get("regime_volatility") == "EXTREME":
+            warnings.append(f"📈 {r['coin']}: نوسان فوق‌العاده بالا")
+        if r.get("data_quality", 100) < 50:
+            warnings.append(f"🔴 {r['coin']}: کیفیت داده پایین ({r.get('data_quality')}%)")
+    
+    if warnings:
+        lines.append("")
+        lines.append("⚠️ هشدارهای مهم:")
+        for w in warnings[:5]:
+            lines.append(f"  {w}")
+        if len(warnings) > 5:
+            lines.append(f"  ... و {len(warnings)-5} هشدار دیگر")
+    
+    # 4. وضعیت کلی بازار (بر اساس رژیم)
+    regime_scores = [r.get("regime_score", 50) for r in results if r.get("regime_score") is not None]
+    if regime_scores:
+        avg_regime = sum(regime_scores) / len(regime_scores)
+        if avg_regime >= 70:
+            market_state = "🟢 بازار صعودی"
+        elif avg_regime >= 45:
+            market_state = "🟡 بازار خنثی"
+        else:
+            market_state = "🔴 بازار نزولی"
+        lines.append("")
+        lines.append(f"📈 وضعیت کلی بازار: {market_state} (میانگین امتیاز رژیم: {avg_regime:.0f}/100)")
+    
+    # 5. پیشنهاد نهایی بر اساس تحلیل
+    if actionable:
+        best = actionable[0]
+        lines.append("")
+        if best.get("direction") == "LONG":
+            lines.append(f"💡 پیشنهاد: تمرکز روی خرید {best['coin']} با حد ضرر {fmt(best.get('sl'))} و هدف {fmt(best.get('tp2'))}")
+        else:
+            lines.append(f"💡 پیشنهاد: تمرکز روی فروش {best['coin']} با حد ضرر {fmt(best.get('sl'))} و هدف {fmt(best.get('tp2'))}")
+    else:
+        lines.append("")
+        lines.append("💡 پیشنهاد: فعلاً در جایگاه ناظر باشید. هیچ سیگنال اجرایی با کیفیت کافی یافت نشد.")
+    
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
+
+
+def generate_top_opportunities(results, limit=5):
+    """استخراج بهترین فرصت‌های معاملاتی با اولویت‌بندی"""
+    candidates = []
+    for r in results:
+        if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and not r.get("repeat_signal"):
+            # امتیاز ترکیبی: اطمینان + R/R + کیفیت داده + امتیاز رژیم
+            score = (
+                (r.get("confidence", 0) * 0.4) +
+                (min(r.get("rr", 0), 5.0) * 15) +
+                (r.get("data_quality", 0) * 0.1) +
+                (r.get("regime_score", 50) * 0.05)
+            )
+            candidates.append((score, r))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in candidates[:limit]]
+
+
+def generate_alert_summary(results):
+    """جمع‌آوری هشدارهای مهم از نتایج"""
+    alerts = []
+    for r in results:
+        if r.get("warning"):
+            alerts.append({"type": "warning", "coin": r["coin"], "message": r["warning"]})
+        if r.get("regime", {}).get("cascade_detected"):
+            alerts.append({"type": "cascade", "coin": r["coin"], "message": "آبشار لیکوئید"})
+        if r.get("regime_volatility") == "EXTREME":
+            alerts.append({"type": "volatility", "coin": r["coin"], "message": "نوسان فوق‌العاده بالا"})
+        if r.get("data_quality", 100) < 50:
+            alerts.append({"type": "data", "coin": r["coin"], "message": f"کیفیت داده پایین ({r.get('data_quality')}%)"})
+    return alerts
+
+
+# ============================================================
+# ANALYZE COIN (modified with Stage 1 + Stage 2)
 # ============================================================
 
 def analyze_coin(coin, market_news, weights):
@@ -2675,7 +2873,7 @@ def analyze_coin(coin, market_news, weights):
         if "همپوشانی سشن — نقدینگی بالا" not in str(reason_parts):
             reason_parts.append("همپوشانی سشن — نقدینگی بالا")
 
-    # ===== NEW: Data Quality =====
+    # ===== STAGE 1: Data Quality =====
     data_quality = calculate_data_quality({
         "sources": sources,
         "spread": spread_pct,
@@ -2690,16 +2888,73 @@ def analyze_coin(coin, market_news, weights):
         "price_source_errors": errors,
     })
     
-    # ===== NEW: Signal ID =====
+    # ===== STAGE 1: Signal ID =====
     signal_id = generate_signal_id(coin, "4H")
     
-    # ===== NEW: Apply Data Quality cap =====
+    # ===== STAGE 1: Apply Data Quality cap =====
     if data_quality < 70:
-        confidence = min(confidence, 65)  # cap at 65%
+        confidence = min(confidence, 65)
         if data_quality < 50:
             confidence = min(confidence, 40)
             gate = "BLOCK"
             gate_reason = "Data quality too low: " + gate_reason
+
+    # ===== STAGE 2: Regime Matrix =====
+    btc_regime = btc_market_regime()
+    breadth_score = market_breadth([]).get("score", 50)  # Will be updated later
+    
+    # دریافت داده‌های مشتقات
+    funding_rate = source_validation.get("coinglass", {}).get("funding_rate")
+    oi = source_validation.get("coinglass", {}).get("open_interest")
+    
+    # تشخیص روند با جزئیات
+    trend_state = detect_trend_state(
+        btc_regime.get("h4", "UNKNOWN"),
+        btc_regime.get("d1", "UNKNOWN"),
+        breadth_score,
+        h4, d1
+    )
+    
+    volatility_state = detect_volatility_state(atrp)
+    derivatives_state = detect_derivatives_state(funding_rate)
+    
+    # تشخیص آبشار لیکوئید (ساده‌شده)
+    cascade_detected, cascade_type = detect_liquidation_cascade(
+        change_24h,
+        vol_ratio,
+        None,  # oi_change - فعلاً در دسترس نیست
+        source_validation.get("coinglass", {}).get("liquidations")
+    )
+    
+    regime_score = calculate_regime_score(trend_state, volatility_state, derivatives_state)
+    
+    regime = {
+        "trend": trend_state,
+        "volatility": volatility_state,
+        "derivatives": derivatives_state,
+        "cascade_detected": cascade_detected,
+        "cascade_type": cascade_type,
+        "regime_score": regime_score
+    }
+    
+    # ===== STAGE 2: Regime-based adjustments =====
+    if volatility_state == "EXTREME":
+        warning = warning or "EXTREME VOLATILITY - Reduce position size"
+        if levels and "sl" in levels:
+            entry_price = levels["entry"]
+            sl_price = levels["sl"]
+            if direction == "LONG":
+                levels["sl"] = entry_price - abs(entry_price - sl_price) * 1.5
+            else:
+                levels["sl"] = entry_price + abs(entry_price - sl_price) * 1.5
+        leverage = max(1.0, leverage * 0.5)
+    
+    if derivatives_state == "LONG_CROWDED" and direction == "LONG":
+        gate = "BLOCK"
+        gate_reason = "Long crowded (high funding rate) - " + gate_reason
+    elif derivatives_state == "SHORT_CROWDED" and direction == "SHORT":
+        gate = "BLOCK"
+        gate_reason = "Short crowded (negative funding rate) - " + gate_reason
 
     temp_result = {
         "coin": coin,
@@ -2769,13 +3024,19 @@ def analyze_coin(coin, market_news, weights):
         "session": session,
         "session_label": session_label,
         "session_multiplier": session_multiplier,
-        "btc_regime": btc_market_regime(),
-        # ===== NEW FIELDS =====
+        "btc_regime": btc_regime,
+        # Stage 1 fields
         "data_quality": data_quality,
         "data_quality_label": "HIGH" if data_quality >= 80 else "MEDIUM" if data_quality >= 60 else "LOW",
         "signal_id": signal_id,
         "no_trade_reasons": [],
         "no_trade_summary": "",
+        # Stage 2 fields
+        "regime": regime,
+        "regime_trend": trend_state,
+        "regime_volatility": volatility_state,
+        "regime_derivatives": derivatives_state,
+        "regime_score": regime_score,
     }
 
     # Simple invalidation logic inline
@@ -2922,9 +3183,15 @@ def analyze_coin(coin, market_news, weights):
         "no_trade_reasons": no_trade_reasons,
         "should_trade": should_trade,
         "repeat_signal": repeat_signal,
-        # ===== NEW FIELDS =====
+        # Stage 1 fields
         "data_quality": data_quality,
         "data_quality_label": "HIGH" if data_quality >= 80 else "MEDIUM" if data_quality >= 60 else "LOW",
+        # Stage 2 fields
+        "regime": regime,
+        "regime_trend": trend_state,
+        "regime_volatility": volatility_state,
+        "regime_derivatives": derivatives_state,
+        "regime_score": regime_score,
     }
 
 
@@ -3138,6 +3405,22 @@ def apply_decision_engine(results, btc_regime, breadth):
             elif breadth["state"] == "BULLISH" and direction == "SHORT":
                 state = "BEARISH WATCH"
                 reasons.append("Market breadth مخالف SHORT")
+            
+            # ===== STAGE 2: Regime-based decision adjustment =====
+            if r.get("regime_volatility") == "EXTREME" and state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("Extreme volatility - entry postponed")
+            
+            if r.get("regime_derivatives") == "LONG_CROWDED" and direction == "LONG":
+                if state == "BUY CONFIRMATION":
+                    state = "BULLISH WATCH"
+                    reasons.append("Long crowded (funding rate too high)")
+            
+            if r.get("regime_derivatives") == "SHORT_CROWDED" and direction == "SHORT":
+                if state == "SELL CONFIRMATION":
+                    state = "BEARISH WATCH"
+                    reasons.append("Short crowded (negative funding rate)")
+            
             mem = _load_signal_memory(r["coin"])
             same_candle = bool(mem and mem.get("signal_candle_ts") == r.get("signal_candle_ts") and mem.get("direction") == direction)
             recent_same = False
@@ -3901,7 +4184,8 @@ CSV_COLUMNS = (
     "R/R", "Confidence", "H4Trend", "D1Trend", "W1Trend", "RSI", "MACD",
     "Volume", "VolumeRatio", "ATR_pct", "Liquidity", "Gate", "GateReason",
     "Direction", "RepeatSignal", "Reason", "ModelVersion",
-    "DataQuality", "SignalID",
+    "DataQuality", "SignalID", "RegimeTrend", "RegimeVolatility",
+    "RegimeDerivatives", "RegimeScore",
 )
 
 def _csv_group(symbol, top10, dynamic30, personal_symbols):
@@ -3995,6 +4279,8 @@ def generate_csv_report(results, top10, dynamic30):
             r.get("gate", ""), r.get("gate_reason", ""), r.get("direction", ""),
             bool(r.get("repeat_signal")), r.get("reason", ""), VERSION,
             r.get("data_quality", ""), r.get("signal_id", ""),
+            r.get("regime_trend", ""), r.get("regime_volatility", ""),
+            r.get("regime_derivatives", ""), r.get("regime_score", ""),
         ])
 
     out = io.StringIO(newline="")
@@ -4187,13 +4473,25 @@ def asset_block(r, metal=False, detail=False):
         f"S/R: {fmt(r.get('support'))} ↔ {fmt(r.get('resistance'))}",
     ]
 
-    # ===== NEW: Data Quality =====
+    # ===== Stage 1: Data Quality =====
     if r.get("data_quality") is not None:
         dq = r["data_quality"]
         label = r.get("data_quality_label", "UNKNOWN")
         lines.append(f"Data Quality: {dq:.0f}% — {label}")
 
-    # ===== NEW: Signal ID =====
+    # ===== Stage 2: Regime Display =====
+    if r.get("regime"):
+        reg = r["regime"]
+        lines.append(
+            f"📊 Regime: {reg.get('trend', 'N/A')} | "
+            f"Vol: {reg.get('volatility', 'N/A')} | "
+            f"Deriv: {reg.get('derivatives', 'N/A')} | "
+            f"Score: {reg.get('regime_score', 0)}/100"
+        )
+        if reg.get("cascade_detected"):
+            lines.append(f"⚠️ LIQUIDATION CASCADE: {reg.get('cascade_type', 'UNKNOWN')}")
+
+    # ===== Stage 1: Signal ID =====
     if r.get("signal_id"):
         lines.append(f"🆔 Signal ID: {r['signal_id']}")
 
@@ -4613,6 +4911,8 @@ def build_report(results, top10, dynamic30, macro, news, market_info, unavailabl
         _compact_section("📡 DYNAMIC TOP 30 — خارج از Top 10 و Personal", dyn30_rows),
         _compact_section("🪙 ATLAS METALS — GOLD / SILVER / COPPER", metal_rows, metal=True),
         _final_market_recommendation(results, top10_rows, dyn30_rows, macro, btc_regime),
+        # ===== Stage 3: Signal Summary =====
+        generate_signal_summary(results),
     ]
     return "\n\n".join(lines)
 
@@ -4622,7 +4922,7 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
     rows = _portfolio_rows(results)
     dt = now_tehran()
     session, session_label, session_multiplier = get_current_session()
-    return "\n\n".join([
+    report_lines = [
         "🤖 ATLAS AI — PERSONAL PORTFOLIO 4H",
         "━━━━━━━━━━━━━━━━━━",
         f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران",
@@ -4630,7 +4930,10 @@ def build_personal_report(results, macro=None, news=None, market_info=None, btc_
         # _best_setup_block removed to avoid text report duplication (CSV only)
         _compact_section("💼 PERSONAL PORTFOLIO — همه دارایی‌ها", rows),
         _final_market_recommendation(rows, [], [], macro, btc_regime),
-    ])
+        # ===== Stage 3: Signal Summary =====
+        generate_signal_summary(results),
+    ]
+    return "\n\n".join(report_lines)
 
 
 def personal_report(*args, **kwargs):
@@ -5350,7 +5653,6 @@ def _automatic_run_plan(now=None):
         "analysis": dt.hour % 4 == 0,
         "snapshot": dt.hour % 3 == 0,
     }
-
 
 
 # ============================================================
