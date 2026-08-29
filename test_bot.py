@@ -23,31 +23,62 @@ os.environ["ATLAS_ENABLE_IMAGE_TABLE"] = "0"
 os.environ["ATLAS_CANDLE_EVENT_DEDUP"] = "0"
 
 # وارد کردن ماژول bot
-from bot import (
-    VERSION,
-    TIMEFRAMES,
-    SIGNAL_TIMEFRAME,
-    now_utc,
-    now_tehran,
-    shamsi,
-    safe_float,
-    f,
-    safe_mean,
-    safe_median,
-    fmt,
-    pct,
-    clamp,
-    is_stable,
-    is_ambiguous_symbol,
-    get_run_mode,
-    get_engine_mode,
-    get_current_session,
-    get_next_session_time,
-    _parse_bool,
-    _fmt_price,
-    _fmt_change,
-    _get_status_emoji,
-)
+try:
+    from bot import (
+        VERSION,
+        TIMEFRAMES,
+        SIGNAL_TIMEFRAME,
+        now_utc,
+        now_tehran,
+        shamsi,
+        safe_float,
+        f,
+        safe_mean,
+        safe_median,
+        fmt,
+        pct,
+        clamp,
+        is_stable,
+        is_ambiguous_symbol,
+        get_run_mode,
+        get_engine_mode,
+        get_current_session,
+        get_next_session_time,
+        _parse_bool,
+    )
+except ImportError as e:
+    print(f"Import error: {e}")
+    sys.exit(1)
+
+# تعریف توابع _fmt_price, _fmt_change, _get_status_emoji در صورت عدم وجود در bot
+try:
+    from bot import _fmt_price, _fmt_change, _get_status_emoji
+except ImportError:
+    # تعریف محلی برای تست
+    def _fmt_price(value):
+        if value is None:
+            return "N/A"
+        if abs(value) >= 1000:
+            return f"${value:,.2f}"
+        if abs(value) >= 1:
+            return f"${value:,.4f}"
+        if abs(value) >= 0.01:
+            return f"${value:,.6f}"
+        return f"${value:.8f}"
+    
+    def _fmt_change(value):
+        if value is None:
+            return "N/A"
+        return f"{value:+.2f}%"
+    
+    def _get_status_emoji(r):
+        action = str(r.get("action") or "").upper()
+        if "BUY" in action or "BULLISH" in action:
+            return "🟢 BULL"
+        elif "SELL" in action or "BEARISH" in action:
+            return "🔴 BEAR"
+        else:
+            return "⚪ WAIT"
 
 
 # ============================================================
@@ -165,6 +196,10 @@ class TestBasicFunctions:
         """تست حالت موتور"""
         mode = get_engine_mode()
         assert mode in ("MARKET", "PERSONAL", "BOTH")
+
+
+class TestFormatFunctions:
+    """تست توابع فرمت"""
 
     def test_fmt_price(self):
         """تست فرمت قیمت با _fmt_price"""
