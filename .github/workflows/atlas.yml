@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # ← زمان اجرا رو به ۳۰ دقیقه افزایش بده
+    timeout-minutes: 45  # ← زمان کافی برای BOTH
     
     steps:
       - uses: actions/checkout@v3
@@ -28,21 +28,29 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
-          # تنظیمات برای اجرای سریع‌تر
+          
+          # ✅ اجرای BOTH (MARKET + PERSONAL)
           ATLAS_RUN_MODE: "ANALYSIS"
-          ATLAS_ENGINE: "MARKET"  # فقط مارکت، PERSONAL رو حذف کن
-          ATLAS_ENABLE_IMAGE_TABLE: "0"  # تصویر رو غیرفعال کن
-          ATLAS_ENABLE_VOICE: "0"  # صدا رو غیرفعال کن
+          ATLAS_ENGINE: "BOTH"
+          
+          # غیرفعال کردن ویژگی‌های سنگین برای سرعت
+          ATLAS_ENABLE_IMAGE_TABLE: "0"
+          ATLAS_ENABLE_VOICE: "0"
           ATLAS_AUTO_SEND_VOICE: "0"
           ATLAS_CANDLE_EVENT_DEDUP: "0"
+          
+          # کاهش آستانه‌ها برای تولید سیگنال
           ATLAS_MIN_CONFIDENCE: "35"
           ATLAS_MIN_EXECUTABLE_RR: "1.0"
           ATLAS_MIN_VOLUME_RATIO: "0.3"
+          
           # API Key ها (اختیاری)
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          
         run: |
-          echo "🚀 Starting ATLAS AI..."
+          echo "🚀 Starting ATLAS AI with BOTH engines..."
+          echo "📊 MARKET + PERSONAL portfolio analysis"
           python bot.py
           
       - name: Upload artifacts
@@ -55,7 +63,6 @@ jobs:
             *.png
             changelog.txt
             atlas_v11.sqlite3
-            output.log
 
   deploy:
     needs: test
@@ -68,4 +75,5 @@ jobs:
       - name: Deploy
         run: |
           echo "✅ ATLAS AI deployed successfully!"
-          echo "📊 Report sent to Telegram"
+          echo "📊 Both MARKET and PERSONAL reports sent to Telegram"
+          echo "📎 CSV file generated"
