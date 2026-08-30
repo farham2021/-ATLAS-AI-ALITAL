@@ -961,8 +961,8 @@ def init_sqlite():
         """)
 
         # اضافه کردن ستون feature_vector به صورت شرطی
-        c.execute("PRAGMA table_info(signal_outcomes)")
-        columns = [row[1] for row in c.fetchall()]
+        cursor = c.execute("PRAGMA table_info(signal_outcomes)")
+        columns = [row[1] for row in cursor.fetchall()]
         if "feature_vector" not in columns:
             c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
 
