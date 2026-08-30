@@ -316,126 +316,6 @@ COINGECKO_IDS = {
 # VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
 # ============================================================
 
-def generate_voice_summary(results, news=None, btc_regime=None):
-    """تولید خلاصه صوتی کامل از نتایج با اخبار و سیگنال‌ها"""
-    if not results:
-        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
-    
-    print(f"📝 generate_voice_summary: processing {len(results)} items")
-    
-    session, session_label, session_multiplier = get_current_session()
-    
-    up_count = 0
-    down_count = 0
-    stable_count = 0
-    changes = []
-    buy_signals = []
-    sell_signals = []
-    watch_signals = []
-    
-    for r in results:
-        price = f(r.get("price"))
-        change = f(r.get("change")) or f(r.get("change24"))
-        symbol = r.get("coin", "")
-        action = str(r.get("action") or "").upper()
-        confidence = r.get("confidence", 0)
-        
-        if price:
-            if change is not None:
-                changes.append((symbol, change))
-                if change > 0.5:
-                    up_count += 1
-                elif change < -0.5:
-                    down_count += 1
-                else:
-                    stable_count += 1
-        
-        if action in ("BUY CONFIRMATION", "BUY"):
-            buy_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("SELL CONFIRMATION", "SELL"):
-            sell_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("BULLISH WATCH", "BEARISH WATCH"):
-            watch_signals.append((symbol, action, confidence))
-    
-    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
-    print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
-    
-    lines = [
-        "به گزارش صوتی اطلس خوش آمدید.",
-        f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
-    ]
-    
-    if btc_regime:
-        regime = btc_regime.get("regime", "UNKNOWN")
-        if regime == "RISK_ON":
-            lines.append("بازار در حالت ریسک‌پذیر قرار دارد و تمایل به صعود دارد.")
-        elif regime == "RISK_OFF":
-            lines.append("بازار در حالت ریسک‌گریز قرار دارد و احتیاط بیشتری نیاز است.")
-        else:
-            lines.append("بازار در حالت خنثی قرار دارد.")
-    
-    if up_count > 0:
-        lines.append(f"{up_count} ارز صعودی هستند.")
-    if down_count > 0:
-        lines.append(f"{down_count} ارز نزولی هستند.")
-    if stable_count > 0:
-        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
-    
-    if changes:
-        best = max(changes, key=lambda x: x[1])
-        worst = min(changes, key=lambda x: x[1])
-        if best[1] > 0:
-            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
-        if worst[1] < 0:
-            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
-    
-    if buy_signals:
-        buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
-        lines.append(buy_text)
-    
-    if sell_signals:
-        sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
-        lines.append(sell_text)
-    
-    if watch_signals:
-        watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
-        lines.append(watch_text)
-    
-    if news:
-        bias = news.get("bias", "")
-        impact = news.get("impact", "")
-        if bias == "POSITIVE":
-            lines.append("اخبار بازار عمدتاً مثبت است.")
-        elif bias == "NEGATIVE":
-            lines.append("اخبار بازار عمدتاً منفی است.")
-        elif bias == "MIXED/LIMITED":
-            lines.append("اخبار بازار مختلط است.")
-        
-        if impact == "HIGH":
-            lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
-        
-        items = news.get("items", [])[:3]
-        if items:
-            headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
-            if headlines:
-                lines.append("خبرهای مهم: " + "، ".join(headlines))
-    
-    usdt = fetch_usdt_toman_public()
-    if usdt:
-        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
-    
-    if buy_signals:
-        lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
-    elif watch_signals:
-        lines.append("توصیه: در حال حاضر در جایگاه ناظر باشید و منتظر تأیید سیگنال‌ها بمانید.")
-    else:
-        lines.append("توصیه: فعلاً در جایگاه ناظر باشید و منتظر شکل‌گیری سیگنال معتبر بمانید.")
-    
-    lines.append("این پیام به صورت خودکار هر ۴ ساعت بروزرسانی می‌شود.")
-    
-    result = " ".join(lines)
-    print(f"📝 Voice text length: {len(result)} characters")
-    return result
 
 
 def generate_voice_summary_from_snapshot(results):
@@ -967,7 +847,7 @@ def init_sqlite():
             c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
 
         # ایجاد جدول price_history اگر وجود نداشته باشد
-       c.execute("""
+        c.execute("""
             CREATE TABLE IF NOT EXISTS price_history(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -4319,67 +4199,6 @@ def _csv_safe_plan(r):
         return None
     return entry, sl, tp1, tp2
 
-def generate_csv_report(results, top10, dynamic30):
-    """Generate a complete, dynamic export from current engine results.
-
-    No values are hard-coded. The CSV contains every current Dynamic Top-30
-    candidate, every personal asset, every priority Top-10 asset and all three
-    metals, with invalid trade geometry suppressed rather than exported.
-    """
-    import csv, io
-    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    top10_set = {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}
-    dynamic_set = {str(x).upper() for x in (dynamic30 or [])}
-    result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
-
-    ordered = []
-    for sym in list(top10 or ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS):
-        s = str(sym).upper()
-        if s and s not in ordered:
-            ordered.append(s)
-    for metal in ATLAS_METALS:
-        if metal not in ordered:
-            ordered.append(metal)
-
-    rows = []
-    for sym in ordered:
-        r = result_map.get(sym)
-        if r is None and sym in ATLAS_METALS:
-            r = _metal_analysis(sym)
-        if not r:
-            continue
-        plan = _csv_safe_plan(r)
-        entry = sl = tp1 = tp2 = tp3 = tp4 = rr = ""
-        if plan:
-            entry, sl, tp1, tp2 = plan
-            tp3, tp4 = f(r.get("tp3")), f(r.get("tp4"))
-            rr = _rr_from_values(entry, sl, tp2)
-        rows.append([
-            _csv_group(sym, top10, dynamic30, personal_symbols),
-            sym,
-            _csv_status(r),
-            str(r.get("decision_state") or r.get("action") or "WAIT"),
-            _csv_number(r.get("price")), _csv_number(r.get("change"), 4),
-            _csv_number(r.get("support")), _csv_number(r.get("resistance")),
-            _csv_number(entry), _csv_number(sl), _csv_number(tp1), _csv_number(tp2),
-            _csv_number(tp3), _csv_number(tp4),
-            _csv_number(rr, 3), _csv_number(r.get("confidence"), 2),
-            r.get("h4_trend", "UNKNOWN"), r.get("d1_trend", "UNKNOWN"),
-            r.get("w1_trend", "UNKNOWN"), _csv_number(r.get("rsi"), 2),
-            r.get("macd", ""), r.get("volume", ""), _csv_number(r.get("volume_ratio"), 3),
-            _csv_number(r.get("atr_pct"), 3), r.get("liquidity", ""),
-            r.get("gate", ""), r.get("gate_reason", ""), r.get("direction", ""),
-            bool(r.get("repeat_signal")), r.get("reason", ""), VERSION,
-            r.get("data_quality", ""), r.get("signal_id", ""),
-            r.get("regime_trend", ""), r.get("regime_volatility", ""),
-            r.get("regime_derivatives", ""), r.get("regime_score", ""),
-        ])
-
-    out = io.StringIO(newline="")
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(CSV_COLUMNS)
-    writer.writerows(rows)
-    return out.getvalue()
 
 def _telegram_send_document(chat_id, content, filename, caption=None):
     """Send a UTF-8 CSV as a real Telegram document using stdlib only."""
@@ -5036,14 +4855,6 @@ def atlas_engine_mode():
     return get_engine_mode()
 
 
-def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
-    mode=get_engine_mode()
-    if mode=="MARKET": return [market]
-    personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
-    if mode=="PERSONAL": return [personal]
-    # Only return the two engine reports; the dashboard table and full table report are sent as CSV only
-    return [market, personal]
 
 
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
@@ -5914,42 +5725,6 @@ def v11_evidence(r):
         else: neg.append(f"RR below threshold ({rr:.2f}R)")
     return pos,neg,rr
 
-def v11_apply_intelligence(r):
-    # Preserve original decision fields
-    r["decision_confidence"] = r.get("confidence")
-    r["decision_regime_trend"] = r.get("regime_trend")
-    r["decision_regime_volatility"] = r.get("regime_volatility")
-    
-    q=v11_data_quality(r)
-    r["v11_data_quality"]=q
-    r["v11_volatility_regime"]=v11_volatility_regime(r)
-    r["v11_derivatives_regime"]=v11_derivatives_regime(r)
-    pos,neg,rr=v11_evidence(r)
-    r["v11_positive_evidence"]=pos
-    r["v11_negative_evidence"]=neg
-    r["v11_rr"]=round(rr,3) if rr is not None else None
-    base=_v11_num(r.get("confidence"),50)
-    heuristic=_v11_clamp(base+(q-70)*0.08+min(len(pos),6)*1.5-min(len(neg),6)*2.5,5,95)
-    r["v11_estimated_probability"]=round(heuristic,1)
-    r["v11_probability_status"]="HEURISTIC_NOT_CALIBRATED"
-    invalid=[]
-    if q<ATLAS_V11_MIN_DATA_QUALITY: invalid.append("data quality below threshold")
-    if rr is not None and rr<ATLAS_V11_MIN_RR: invalid.append("RR below threshold")
-    if _v11_num(r.get("confidence"),0)<55: invalid.append("confidence below threshold")
-    d=str(r.get("direction","")).upper()
-    if d=="LONG" and ("BEAR" in str(r.get("h4_trend","")).upper() or "BEAR" in str(r.get("d1_trend","")).upper()):
-        invalid.append("higher-timeframe bearish conflict")
-    if d=="SHORT" and ("BULL" in str(r.get("h4_trend","")).upper() or "BULL" in str(r.get("d1_trend","")).upper()):
-        invalid.append("higher-timeframe bullish conflict")
-    r["v11_invalidated"]=bool(invalid)
-    r["v11_invalidation_reasons"]=invalid
-    r["v11_decision"]="WAIT" if invalid else str(r.get("action") or "WATCH").upper()
-    r["v11_signal_id"]=v11_signal_id(r)
-    score=heuristic*q/100-min(len(neg),6)*3
-    if r["v11_volatility_regime"]=="EXTREME": score-=8
-    elif r["v11_volatility_regime"]=="HIGH": score-=3
-    r["v11_opportunity_score"]=round(_v11_clamp(min(score,35) if invalid else score),1)
-    return r
 
 def v11_portfolio_diagnostics(results):
     active = [r for r in results if r.get("executable")]
@@ -6260,130 +6035,6 @@ def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=No
     return "\n".join(lines)
 
 
-def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
-    """ساخت جدول تصویری از سیگنال‌ها"""
-    if not ENABLE_IMAGE_TABLE:
-        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
-        return None
-    
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib.font_manager as fm
-        
-        try:
-            font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-            if os.path.exists(font_path):
-                fm.fontManager.addfont(font_path)
-                plt.rcParams['font.family'] = 'DejaVu Sans'
-            else:
-                plt.rcParams['font.family'] = 'sans-serif'
-        except:
-            plt.rcParams['font.family'] = 'sans-serif'
-        
-        signals = []
-        for r in results:
-            action = str(r.get("action") or "").upper()
-            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
-                quality_score = 0
-                quality_score += r.get("confidence", 0) * 0.4
-                quality_score += min(r.get("rr", 0) or 0, 5) * 15
-                quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
-                quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
-                quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
-                r["quality_score"] = min(100, quality_score)
-                signals.append(r)
-        
-        if not signals:
-            signals = sorted(
-                [r for r in results if r.get("price") is not None],
-                key=lambda x: x.get("price", 0) or 0,
-                reverse=True
-            )[:10]
-            for r in signals:
-                r["quality_score"] = 50
-        
-        signals.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-        top_signals = signals[:10]
-        
-        fig, ax = plt.subplots(figsize=(14, 10))
-        ax.axis('off')
-        
-        cell_text = []
-        headers = ['#', 'Asset', 'Direction', 'Confidence', 'R/R', 'Quality']
-        cell_text.append(headers)
-        
-        for i, r in enumerate(top_signals, 1):
-            action = str(r.get("action") or "WAIT").upper()
-            if "BUY" in action:
-                direction = '🟢 BUY'
-            elif "SELL" in action:
-                direction = '🔴 SELL'
-            else:
-                direction = '🟡 WATCH'
-            
-            row = [
-                str(i),
-                r.get('coin', 'UNKNOWN'),
-                direction,
-                f"{r.get('confidence', 0)}%",
-                f"{r.get('rr', 0):.2f}" if r.get('rr') else "N/A",
-                f"{r.get('quality_score', 0):.0f}%"
-            ]
-            cell_text.append(row)
-        
-        while len(cell_text) < 11:
-            cell_text.append(['', '', '', '', '', ''])
-        
-        table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
-        table.auto_set_font_size(False)
-        table.set_fontsize(11)
-        table.scale(1, 2.5)
-        
-        for i, row in enumerate(cell_text):
-            for j, cell in enumerate(row):
-                if i == 0:
-                    table[(i, j)].set_facecolor('#2c3e50')
-                    table[(i, j)].set_text_props(color='white', weight='bold')
-                elif i % 2 == 0:
-                    table[(i, j)].set_facecolor('#ecf0f1')
-                else:
-                    table[(i, j)].set_facecolor('#ffffff')
-                
-                if i > 0 and j == 5 and cell:
-                    try:
-                        val = int(cell.replace('%', ''))
-                        if val >= 80:
-                            table[(i, j)].set_facecolor('#27ae60')
-                            table[(i, j)].set_text_props(color='white')
-                        elif val >= 60:
-                            table[(i, j)].set_facecolor('#f1c40f')
-                        else:
-                            table[(i, j)].set_facecolor('#e74c3c')
-                            table[(i, j)].set_text_props(color='white')
-                    except:
-                        pass
-                
-                if i > 0 and j == 2:
-                    if 'BUY' in cell:
-                        table[(i, j)].set_facecolor('#27ae60')
-                        table[(i, j)].set_text_props(color='white')
-                    elif 'SELL' in cell:
-                        table[(i, j)].set_facecolor('#e74c3c')
-                        table[(i, j)].set_text_props(color='white')
-        
-        ax.set_title('📊 ATLAS SIGNAL RANKING', fontsize=16, weight='bold', pad=20)
-        
-        plt.tight_layout()
-        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
-        plt.close()
-        
-        return filename
-    except ImportError as e:
-        print(f"⚠️ Matplotlib not installed: {e}")
-        return None
-    except Exception as e:
-        print(f"⚠️ Image generation error: {e}")
-        return None
 
 
 def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
@@ -7277,4 +6928,8 @@ def main():
         return 1
 
 if __name__ == "__main__":
+    try:
+        init_sqlite()
+    except Exception as e:
+        print(f"⚠️ SQLite initialization warning: {e}")
     raise SystemExit(main())
