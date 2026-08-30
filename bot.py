@@ -157,6 +157,20 @@ SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOL
 SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.5"))
 
 # ============================================================
+# SNAPSHOT DIRECTION THRESHOLDS (NEW)
+# ============================================================
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.10"))
+SNAPSHOT_4H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_4H_THRESHOLD", "0.15"))
+SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.30"))
+SNAPSHOT_7D_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_7D_THRESHOLD", "0.50"))
+
+# ============================================================
+# SELF-HEALING SETTINGS
+# ============================================================
+ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
+ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
+
+# ============================================================
 # CACHE & MEMORY SETTINGS
 # ============================================================
 BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
@@ -944,6 +958,24 @@ def init_sqlite():
             passed integer,
             details text
         );
+        """)
+
+        # اضافه کردن ستون feature_vector به صورت شرطی
+        c.execute("PRAGMA table_info(signal_outcomes)")
+        columns = [row[1] for row in c.fetchall()]
+        if "feature_vector" not in columns:
+            c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
+
+        # ایجاد جدول price_history اگر وجود نداشته باشد
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS price_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                captured_at TEXT NOT NULL,
+                timeframe TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
         """)
 
 
@@ -3357,7 +3389,11 @@ def risk_quality_score(r, rr=None):
         score -= 20
     return int(clamp(round(score), 0, 100))
 
+_LAST_BACKTEST_OK = True
+_LAST_BACKTEST_DETAILS = {}
+
 def apply_decision_engine(results, btc_regime, breadth):
+    global _LAST_BACKTEST_OK
     for r in results:
         raw = r.get("action", "NO TRADE")
         rr = decision_rr(r)
@@ -3420,6 +3456,11 @@ def apply_decision_engine(results, btc_regime, breadth):
                 if state == "SELL CONFIRMATION":
                     state = "BEARISH WATCH"
                     reasons.append("Short crowded (negative funding rate)")
+            
+            # FIX: backtest gate blocks executable signals
+            if not _LAST_BACKTEST_OK and state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("Backtest gate failed — execution frozen, watch-only")
             
             mem = _load_signal_memory(r["coin"])
             same_candle = bool(mem and mem.get("signal_candle_ts") == r.get("signal_candle_ts") and mem.get("direction") == direction)
@@ -3556,35 +3597,86 @@ def update_weight(feature, factor, reason, evidence):
                   (feature,new,DEFAULT_WEIGHTS[feature],evidence.get("samples",0),evidence.get("wins",0),evidence.get("losses",0),payload["updated_at"],reason))
     append_changelog(feature,old,new,reason,evidence)
 
+def _compute_sharpe(pnls, period=20):
+    if len(pnls) < period:
+        return None
+    recent = pnls[-period:]
+    avg = safe_mean(recent)
+    std = (sum((x - avg) ** 2 for x in recent) / len(recent)) ** 0.5 if len(recent) > 1 else 0
+    return avg / std if std > 0 else 0
+
 def self_diagnostic():
     init_sqlite()
     with sqlite_conn() as c:
-        rows=c.execute("""
-            select s.id,s.coin,s.direction,s.outcome,s.notes
-            from signal_outcomes s
-            left join self_healing_processed p on p.signal_id=s.id
-            where s.status='CLOSED' and p.signal_id is null
-            order by s.id asc
+        rows = c.execute("""
+            SELECT s.id, s.coin, s.direction, s.outcome, s.pnl_pct, s.feature_vector, s.notes
+            FROM signal_outcomes s
+            LEFT JOIN self_healing_processed p ON p.signal_id = s.id
+            WHERE s.status = 'CLOSED' AND p.signal_id IS NULL
+            ORDER BY s.id ASC
         """).fetchall()
-    if len(rows)<3:return
-    batch=rows[:(len(rows)//3)*3]
-    for start_i in range(0,len(batch),3):
-        recent=batch[start_i:start_i+3]
-        losses=sum(1 for r in recent if r["outcome"]=="SL")
-        error_pct=losses/3*100
-        if error_pct>5:
-            counts={}
-            for r in recent:
-                text=(r["notes"] or "").lower()
-                for token in ("rsi","macd","volume","sma","hammer","engulfing"):
-                    if token in text: counts[token]=counts.get(token,0)+1
-            feature=max(counts,key=counts.get) if counts else "rsi"
-            mapped={"rsi":"rsi","macd":"macd","volume":"volume","sma":"higher_trend","hammer":"candle_pattern","engulfing":"candle_pattern"}
-            feature=mapped.get(feature,"rsi")
-            update_weight(feature,0.80,"خطای پیش‌بینی > 5% پس از batch جدید؛ وزن 20% کاهش یافت",
-                          {"samples":3,"wins":3-losses,"losses":losses,"error_pct":error_pct,"signal_ids":[r["id"] for r in recent]})
+    if len(rows) < ATLAS_SELF_HEAL_BATCH:
+        return
+
+    batch_size = ATLAS_SELF_HEAL_BATCH
+    for start_i in range(0, len(rows), batch_size):
+        chunk = rows[start_i:start_i + batch_size]
+        n = len(chunk)
+        outcomes = [r["outcome"] for r in chunk]
+        pnls = [f(r["pnl_pct"]) for r in chunk if f(r["pnl_pct"]) is not None]
+        losses = sum(1 for o in outcomes if o == "SL")
+        wins = sum(1 for o in outcomes if o in ("TP", "TP1", "TP2"))
+        error_pct = losses / n * 100 if n else 0
+        win_pct = wins / n * 100 if n else 0
+        sharpe = _compute_sharpe(pnls, min(ATLAS_SHARPE_MIN_PERIOD, len(pnls)))
+
+        loss_feature_counts = {}
+        win_feature_counts = {}
+        for r in chunk:
+            feature_vector = r["feature_vector"]
+            if feature_vector:
+                try:
+                    features = json.loads(feature_vector)
+                    for feat, weight in features.items():
+                        if r["outcome"] in ("SL", "SL"):
+                            loss_feature_counts[feat] = loss_feature_counts.get(feat, 0) + weight
+                        else:
+                            win_feature_counts[feat] = win_feature_counts.get(feat, 0) + weight
+                except:
+                    pass
+            else:
+                text = (r["notes"] or "").lower()
+                token_map = {
+                    "rsi": "rsi", "macd": "macd", "sma": "higher_trend",
+                    "hammer": "candle_pattern", "shooting star": "candle_pattern",
+                    "engulfing": "candle_pattern", "pin bar": "candle_pattern",
+                    "doji": "candle_pattern", "حجم": "volume", "واگرایی": "rsi"
+                }
+                for token, feat in token_map.items():
+                    if token in text:
+                        if r["outcome"] in ("SL", "SL"):
+                            loss_feature_counts[feat] = loss_feature_counts.get(feat, 0) + 1
+                        else:
+                            win_feature_counts[feat] = win_feature_counts.get(feat, 0) + 1
+                        break
+
+        if error_pct > 55 and loss_feature_counts:
+            feature = max(loss_feature_counts, key=loss_feature_counts.get)
+            update_weight(feature, 0.85,
+                f"Error rate {error_pct:.0f}% in batch of {n}; reduced weight of {feature} by 15%",
+                {"samples": n, "wins": wins, "losses": losses, "error_pct": error_pct, "sharpe": sharpe})
+
+        if win_pct > 60 and win_feature_counts and (sharpe is None or sharpe > 0.5):
+            feature = max(win_feature_counts, key=win_feature_counts.get)
+            update_weight(feature, 1.10,
+                f"Win rate {win_pct:.0f}% and Sharpe {sharpe:.2f} in batch of {n}; increased weight of {feature} by 10%",
+                {"samples": n, "wins": wins, "losses": losses, "win_pct": win_pct, "sharpe": sharpe})
+
         with sqlite_conn() as c:
-            c.executemany("insert or ignore into self_healing_processed(signal_id,processed_at) values(?,?)",[(r["id"],now_utc().isoformat()) for r in recent])
+            c.executemany(
+                "INSERT OR IGNORE INTO self_healing_processed(signal_id, processed_at) VALUES (?,?)",
+                [(r["id"], now_utc().isoformat()) for r in chunk]
+            )
 
 
 # ============================================================
@@ -3912,6 +4004,7 @@ def store_signal(result):
         "confidence_breakdown": result.get("score_components", {}),
         "model_version": VERSION,
     }
+    row["feature_vector"] = safe_json(result.get("score_components", {}))
     STORE.insert("atlas_signals", row)
     init_sqlite()
     with sqlite_conn() as c:
@@ -5319,15 +5412,15 @@ def save_run(results, parts, macro, news, unavailable=0):
 _LAST_TOP10 = []
 _LAST_DYNAMIC30 = []
 
-
 def report():
     init_sqlite()
     evaluate_open_outcomes()
     universe, top10, dynamic30 = build_universe()
-    global _LAST_TOP10, _LAST_DYNAMIC30
+    global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
     backtest_ok, bt = mandatory_backtest_gate(universe)
+    _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
         self_diagnostic()
     else:
@@ -5494,6 +5587,67 @@ def fetch_snapshot_results():
             rows.append(best)
     return rows
 
+def _save_price_history(symbol, price, timeframe, captured_at):
+    if not symbol or price is None:
+        return
+    row = {"symbol": symbol.upper(), "price": price, "captured_at": captured_at, "timeframe": timeframe}
+    STORE.insert("price_history", row)
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            con.execute(
+                "INSERT INTO price_history (symbol, price, captured_at, timeframe) VALUES (?,?,?,?)",
+                (symbol.upper(), price, captured_at, timeframe)
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Price history save error: {e}")
+
+def _get_historical_price(symbol, timeframe_hours, captured_at):
+    tolerance_hours = 1 if timeframe_hours <= 24 else 6
+    try:
+        rows = STORE.select(
+            "price_history",
+            {
+                "select": "price,captured_at",
+                "symbol": f"eq.{symbol.upper()}",
+                "order": "captured_at.desc",
+                "limit": "10"
+            }
+        )
+        if rows:
+            target = captured_at - timedelta(hours=timeframe_hours)
+            for r in rows:
+                try:
+                    ts = datetime.fromisoformat(r["captured_at"].replace("Z", "+00:00"))
+                    diff = abs((ts - target).total_seconds() / 3600)
+                    if diff <= tolerance_hours:
+                        return f(r["price"]), ts
+                except:
+                    continue
+    except:
+        pass
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT price, captured_at FROM price_history WHERE symbol = ? ORDER BY captured_at DESC LIMIT 10",
+                (symbol.upper(),)
+            ).fetchall()
+            target = captured_at - timedelta(hours=timeframe_hours)
+            for r in rows:
+                ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
+                diff = abs((ts - target).total_seconds() / 3600)
+                if diff <= tolerance_hours:
+                    return f(r["price"]), ts
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Historical price error: {e}")
+    return None, None
 
 def _snapshot_previous_prices():
     """دریافت قیمت‌های قبلی از Supabase (با Fallback به SQLite)"""
@@ -5523,7 +5677,6 @@ def _snapshot_previous_prices():
         print(f"⚠️ Snapshot previous prices error (SQLite): {e}")
         return {}
 
-
 def _snapshot_direction(current, previous):
     """تشخیص جهت تغییر قیمت نسبت به قیمت قبلی (فال‌بک)"""
     current = f(current)
@@ -5535,19 +5688,27 @@ def _snapshot_direction(current, previous):
         return "➡️"
     return "⬆️" if delta_pct > 0 else "⬇️"
 
-
-def _get_snapshot_arrow(price, previous_price, change24=None):
+def _get_snapshot_arrow(price, previous_prices, change24=None):
     """
     تعیین فلش جهت تغییر قیمت با اولویت تغییرات ۲۴ ساعته.
-    اگر change24 موجود باشد، بر اساس آن و آستانه‌ی SNAPSHOT_24H_THRESHOLD_PCT تصمیم‌گیری می‌شود.
-    در غیر این صورت به _snapshot_direction فال‌بک می‌شود.
     """
     if change24 is not None:
         if abs(change24) < SNAPSHOT_24H_THRESHOLD_PCT:
-            return "➡️"
-        return "⬆️" if change24 > 0 else "⬇️"
-    return _snapshot_direction(price, previous_price)
-
+            return "➡️", "24h"
+        return "⬆️" if change24 > 0 else "⬇️", "24h"
+    if previous_prices.get("24h") is not None:
+        delta = (price - previous_prices["24h"]) / previous_prices["24h"] * 100
+        if abs(delta) >= SNAPSHOT_24H_THRESHOLD_PCT:
+            return "⬆️" if delta > 0 else "⬇️", "24h"
+    if previous_prices.get("4h") is not None:
+        delta = (price - previous_prices["4h"]) / previous_prices["4h"] * 100
+        if abs(delta) >= SNAPSHOT_4H_THRESHOLD_PCT:
+            return "⬆️" if delta > 0 else "⬇️", "4h"
+    if previous_prices.get("current") is not None:
+        delta = (price - previous_prices["current"]) / previous_prices["current"] * 100
+        if abs(delta) >= SNAPSHOT_FLAT_THRESHOLD_PCT:
+            return "⬆️" if delta > 0 else "⬇️", "prev"
+    return "➡️", "none"
 
 def _save_snapshot_prices(results, captured_at):
     """ذخیره قیمت‌ها در Supabase (با Fallback به SQLite)"""
@@ -5586,7 +5747,6 @@ def _save_snapshot_prices(results, captured_at):
     
     print(f"📊 Saved {saved_count} prices to Supabase (and fallback)")
 
-
 def build_price_snapshot(results, updated_at=None, previous_prices=None):
     by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
     dt = updated_at or now_tehran()
@@ -5600,7 +5760,7 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         "",
         f"⏰ آخرین بروزرسانی : {dt.strftime('%H:%M:%S')}",
         "",
-        "📊 وضعیت بازار ارزهای دیجیتال:",
+        "📊 وضعیت بازار ارزهای دیجیتال (مقایسه با 4H، 24H، 7D):",
         "───────────────────",
     ]
     
@@ -5615,11 +5775,29 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
         if price is None:
             lines.append(f"🔹 ➖{sym:<6}:   N/A")
             continue
+        
         # دریافت change24 از داده‌های ticker
         change24 = f(r.get("change24"))
-        arrow = _get_snapshot_arrow(price, previous_prices.get(sym), change24)
+        
+        # دریافت قیمت‌های تاریخی
+        hist = {}
+        hist["4h"], _ = _get_historical_price(sym, 4, dt)
+        hist["24h"], _ = _get_historical_price(sym, 24, dt)
+        hist["7d"], _ = _get_historical_price(sym, 168, dt)
+        
+        arrow, deciding_tf = _get_snapshot_arrow(price, hist, change24)
         arrow_stats[arrow] = arrow_stats.get(arrow, 0) + 1
-        lines.append(f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}")
+        
+        line = f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}"
+        details = []
+        for tf in ["4h", "24h", "7d"]:
+            if hist.get(tf) is not None:
+                delta = (price - hist[tf]) / hist[tf] * 100
+                details.append(f"{tf}: {delta:+.2f}%")
+            else:
+                details.append(f"{tf}: N/A")
+        line += f"  ({' | '.join(details)})"
+        lines.append(line)
     
     print(f"📊 Arrow stats: ⬆️={arrow_stats.get('⬆️', 0)}, ⬇️={arrow_stats.get('⬇️', 0)}, ➡️={arrow_stats.get('➡️', 0)}")
     
@@ -5635,15 +5813,10 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\n".join(lines)
 
-
 def send_price_snapshot(results):
     """Send snapshot separately; persist comparison state only after successful delivery."""
-    captured_at = now_tehran().isoformat()
-    previous = _snapshot_previous_prices()
-    payload = build_price_snapshot(results, previous_prices=previous)
+    payload = build_price_snapshot(results)
     parts, sent, errors = send_report(payload)
-    if sent == parts and sent > 0:
-        _save_snapshot_prices(results, captured_at)
     return sent, errors
 
 def _automatic_run_plan(now=None):
@@ -5743,6 +5916,11 @@ def v11_evidence(r):
     return pos,neg,rr
 
 def v11_apply_intelligence(r):
+    # Preserve original decision fields
+    r["decision_confidence"] = r.get("confidence")
+    r["decision_regime_trend"] = r.get("regime_trend")
+    r["decision_regime_volatility"] = r.get("regime_volatility")
+    
     q=v11_data_quality(r)
     r["v11_data_quality"]=q
     r["v11_volatility_regime"]=v11_volatility_regime(r)
@@ -5775,13 +5953,12 @@ def v11_apply_intelligence(r):
     return r
 
 def v11_portfolio_diagnostics(results):
-    active=[r for r in results if str(r.get("action","")).upper() in
-            {"BUY","STRONG BUY","SELL","STRONG SELL","LONG","SHORT"}]
-    weights={str(r.get("coin","")).upper():max(0,_v11_num(r.get("v11_opportunity_score"),0)) for r in active}
-    total=sum(weights.values())
-    concentration={k:round(v/total,3) for k,v in weights.items()} if total else {}
-    warning="HIGH_CONCENTRATION" if any(v>=ATLAS_V11_MAX_CONCENTRATION for v in concentration.values()) else None
-    return {"concentration":concentration,"warning":warning,"high_correlation_pairs":[]}
+    active = [r for r in results if r.get("executable")]
+    weights = {str(r.get("coin", "")).upper(): max(0, _v11_num(r.get("opportunity_score"), 0)) for r in active}
+    total = sum(weights.values())
+    concentration = {k: round(v/total, 3) for k, v in weights.items()} if total else {}
+    warning = "HIGH_CONCENTRATION" if any(v >= ATLAS_V11_MAX_CONCENTRATION for v in concentration.values()) else None
+    return {"concentration": concentration, "warning": warning, "high_correlation_pairs": []}
 
 def build_v11_intelligence_report(results, portfolio):
     ranked=sorted(results,key=lambda r:_v11_num(r.get("v11_opportunity_score"),0),reverse=True)
