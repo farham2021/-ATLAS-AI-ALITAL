@@ -1,5 +1,5 @@
 #============================================================
-# ATLAS AI v11.3 — SIGNAL SUMMARY ENGINE
+# ATLAS AI v11.3.1 — SIGNAL SUMMARY ENGINE (bugfix pass)
 # ============================================================
 # Stage 1: Data Quality + Signal Lifecycle + No-Trade
 # Stage 2: Regime Matrix + Volatility Engine + Liquidation Cascade
@@ -23,6 +23,39 @@
 # IMPORTANT:
 #   This is an analytical engine. It does not place orders.
 #   No model can guarantee low-error signals or profits.
+#
+# ------------------------------------------------------------
+# v11.3.1 CHANGELOG (decision-engine bugfix pass)
+# ------------------------------------------------------------
+# 1. Removed dead, silently-shadowed duplicate function definitions that never
+#    executed (Python only keeps the last def of a repeated name): the old
+#    generate_voice_summary, generate_csv_report, build_two_engine_reports,
+#    build_image_table, and the v11.1 apply_intelligence/build_v11_intelligence_report
+#    block. No behavior change — these bodies were already unreachable — but they
+#    were a correctness/maintenance hazard, since editing the "obvious" earlier
+#    copy of any of these functions previously had no effect at all.
+# 2. Fixed v11_portfolio_diagnostics(): it read a field (v11_opportunity_score)
+#    that no live code populated, so the portfolio-concentration warning was a
+#    permanent no-op. It now reads the fields the live intel engine sets
+#    (opportunity_score, executable).
+# 3. The mandatory backtest gate previously only froze self-learning (weight
+#    updates) on failure — it never restricted live BUY/SELL signals. A new
+#    _LAST_BACKTEST_OK flag is now read inside apply_decision_engine(): when the
+#    gate fails, no signal is allowed past WATCH state until it passes again.
+# 4. v11_apply_intelligence() used to silently overwrite r["confidence"],
+#    r["regime_trend"], r["regime_volatility"] — fields already set, with a
+#    different meaning, by the engine that actually gated BUY/SELL. The original
+#    values are now preserved as decision_confidence / decision_regime_trend /
+#    decision_regime_volatility (also exported to CSV) so the number that drove
+#    the trade decision remains visible after the intel-scoring pass runs.
+# 5. self_diagnostic() (automatic weight tuning) was one-directional (only ever
+#    decayed weights, never reinforced a feature behind a winning streak), used
+#    a 3-trade batch (not statistically meaningful — one loss looked like a
+#    "5%+ error rate"), and matched feature names against free-text notes with a
+#    short token list that missed several real candle-pattern names. Batch size
+#    is now configurable (ATLAS_SELF_HEAL_BATCH, default 15), the logic now
+#    rewards a dominant winning feature as well as punishing a dominant losing
+#    one, and the token list covers every pattern name candle_pattern() emits.
 # ============================================================
 
 import os
@@ -49,7 +82,7 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.3 SIGNAL SUMMARY ENGINE"
+VERSION = "ATLAS v11.3.1 SIGNAL SUMMARY ENGINE"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -299,130 +332,12 @@ COINGECKO_IDS = {
 }
 
 # ============================================================
-# VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
+# VOICE SUMMARY & OUTPUT
 # ============================================================
-
-def generate_voice_summary(results, news=None, btc_regime=None):
-    """تولید خلاصه صوتی کامل از نتایج با اخبار و سیگنال‌ها"""
-    if not results:
-        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
-    
-    print(f"📝 generate_voice_summary: processing {len(results)} items")
-    
-    session, session_label, session_multiplier = get_current_session()
-    
-    up_count = 0
-    down_count = 0
-    stable_count = 0
-    changes = []
-    buy_signals = []
-    sell_signals = []
-    watch_signals = []
-    
-    for r in results:
-        price = f(r.get("price"))
-        change = f(r.get("change")) or f(r.get("change24"))
-        symbol = r.get("coin", "")
-        action = str(r.get("action") or "").upper()
-        confidence = r.get("confidence", 0)
-        
-        if price:
-            if change is not None:
-                changes.append((symbol, change))
-                if change > 0.5:
-                    up_count += 1
-                elif change < -0.5:
-                    down_count += 1
-                else:
-                    stable_count += 1
-        
-        if action in ("BUY CONFIRMATION", "BUY"):
-            buy_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("SELL CONFIRMATION", "SELL"):
-            sell_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("BULLISH WATCH", "BEARISH WATCH"):
-            watch_signals.append((symbol, action, confidence))
-    
-    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
-    print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
-    
-    lines = [
-        "به گزارش صوتی اطلس خوش آمدید.",
-        f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
-    ]
-    
-    if btc_regime:
-        regime = btc_regime.get("regime", "UNKNOWN")
-        if regime == "RISK_ON":
-            lines.append("بازار در حالت ریسک‌پذیر قرار دارد و تمایل به صعود دارد.")
-        elif regime == "RISK_OFF":
-            lines.append("بازار در حالت ریسک‌گریز قرار دارد و احتیاط بیشتری نیاز است.")
-        else:
-            lines.append("بازار در حالت خنثی قرار دارد.")
-    
-    if up_count > 0:
-        lines.append(f"{up_count} ارز صعودی هستند.")
-    if down_count > 0:
-        lines.append(f"{down_count} ارز نزولی هستند.")
-    if stable_count > 0:
-        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
-    
-    if changes:
-        best = max(changes, key=lambda x: x[1])
-        worst = min(changes, key=lambda x: x[1])
-        if best[1] > 0:
-            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
-        if worst[1] < 0:
-            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
-    
-    if buy_signals:
-        buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
-        lines.append(buy_text)
-    
-    if sell_signals:
-        sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
-        lines.append(sell_text)
-    
-    if watch_signals:
-        watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
-        lines.append(watch_text)
-    
-    if news:
-        bias = news.get("bias", "")
-        impact = news.get("impact", "")
-        if bias == "POSITIVE":
-            lines.append("اخبار بازار عمدتاً مثبت است.")
-        elif bias == "NEGATIVE":
-            lines.append("اخبار بازار عمدتاً منفی است.")
-        elif bias == "MIXED/LIMITED":
-            lines.append("اخبار بازار مختلط است.")
-        
-        if impact == "HIGH":
-            lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
-        
-        items = news.get("items", [])[:3]
-        if items:
-            headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
-            if headlines:
-                lines.append("خبرهای مهم: " + "، ".join(headlines))
-    
-    usdt = fetch_usdt_toman_public()
-    if usdt:
-        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
-    
-    if buy_signals:
-        lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
-    elif watch_signals:
-        lines.append("توصیه: در حال حاضر در جایگاه ناظر باشید و منتظر تأیید سیگنال‌ها بمانید.")
-    else:
-        lines.append("توصیه: فعلاً در جایگاه ناظر باشید و منتظر شکل‌گیری سیگنال معتبر بمانید.")
-    
-    lines.append("این پیام به صورت خودکار هر ۴ ساعت بروزرسانی می‌شود.")
-    
-    result = " ".join(lines)
-    print(f"📝 Voice text length: {len(result)} characters")
-    return result
-
+# NOTE: an earlier generate_voice_summary (the "خلاصه صوتی کامل" version working
+# off raw action/confidence fields) used to live here. It was silently shadowed by
+# the later, intel-engine-aware generate_voice_summary defined further below and
+# never ran. Removed to avoid confusion.
 
 def generate_voice_summary_from_snapshot(results):
     """تولید خلاصه صوتی از داده‌های اسنپ‌شات"""
@@ -3420,6 +3335,14 @@ def apply_decision_engine(results, btc_regime, breadth):
                 if state == "SELL CONFIRMATION":
                     state = "BEARISH WATCH"
                     reasons.append("Short crowded (negative funding rate)")
+
+            # FIX: wire the mandatory backtest gate into live decisions, not just
+            # into whether weights are allowed to self-adjust. If the model most
+            # recently failed its backtest, no signal may reach an executable
+            # CONFIRMATION state — cap it at WATCH until backtest passes again.
+            if not _LAST_BACKTEST_OK and state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("Backtest gate failed — execution frozen, watch-only")
             
             mem = _load_signal_memory(r["coin"])
             same_candle = bool(mem and mem.get("signal_candle_ts") == r.get("signal_candle_ts") and mem.get("direction") == direction)
@@ -3557,6 +3480,26 @@ def update_weight(feature, factor, reason, evidence):
     append_changelog(feature,old,new,reason,evidence)
 
 def self_diagnostic():
+    """Self-healing weight adjustment based on closed signal outcomes.
+
+    FIXES applied here vs. the previous version:
+    1. Batch size of 3 was not statistically meaningful (a single bad trade
+       flips the batch's error rate). Raised to a configurable, larger batch
+       (ATLAS_SELF_HEAL_BATCH, default 15) so a genuine pattern is required
+       before any weight moves.
+    2. The old logic was one-directional: it only ever punished a feature after
+       losses, and never rewarded a feature that kept showing up in winning
+       trades. Left running long enough, every weight decays toward the floor.
+       This version also nudges a feature's weight up when it shows up
+       disproportionately in wins.
+    3. Feature attribution used to grep for raw indicator tokens inside the
+       Persian-mixed free-text 'notes' field, which is fragile (breaks
+       silently if wording changes, misses some candle-pattern names like
+       "SHOOTING STAR" / "PIN BAR"). The token list now matches every pattern
+       name candle_pattern() can actually produce, plus the indicator/volume
+       tokens, so attribution degrades to "no clear feature" instead of
+       silently picking the wrong one.
+    """
     init_sqlite()
     with sqlite_conn() as c:
         rows=c.execute("""
@@ -3566,25 +3509,69 @@ def self_diagnostic():
             where s.status='CLOSED' and p.signal_id is null
             order by s.id asc
         """).fetchall()
-    if len(rows)<3:return
-    batch=rows[:(len(rows)//3)*3]
-    for start_i in range(0,len(batch),3):
-        recent=batch[start_i:start_i+3]
-        losses=sum(1 for r in recent if r["outcome"]=="SL")
-        error_pct=losses/3*100
-        if error_pct>5:
-            counts={}
-            for r in recent:
-                text=(r["notes"] or "").lower()
-                for token in ("rsi","macd","volume","sma","hammer","engulfing"):
-                    if token in text: counts[token]=counts.get(token,0)+1
-            feature=max(counts,key=counts.get) if counts else "rsi"
-            mapped={"rsi":"rsi","macd":"macd","volume":"volume","sma":"higher_trend","hammer":"candle_pattern","engulfing":"candle_pattern"}
-            feature=mapped.get(feature,"rsi")
-            update_weight(feature,0.80,"خطای پیش‌بینی > 5% پس از batch جدید؛ وزن 20% کاهش یافت",
-                          {"samples":3,"wins":3-losses,"losses":losses,"error_pct":error_pct,"signal_ids":[r["id"] for r in recent]})
+    batch_size = max(10, int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15")))
+    if len(rows) < batch_size:
+        return
+    batch = rows[:(len(rows)//batch_size)*batch_size]
+
+    token_map = {
+        "rsi": "rsi", "macd": "macd", "sma": "higher_trend",
+        "hammer": "candle_pattern", "shooting star": "candle_pattern",
+        "engulfing": "candle_pattern", "pin bar": "candle_pattern",
+        "doji": "candle_pattern", "حجم": "volume", "واگرایی": "rsi",
+    }
+
+    def attribute_feature(note_text):
+        text = (note_text or "").lower()
+        for token, feature in token_map.items():
+            if token in text:
+                return feature
+        return None
+
+    for start_i in range(0, len(batch), batch_size):
+        chunk = batch[start_i:start_i + batch_size]
+        n = len(chunk)
+        losses = sum(1 for r in chunk if r["outcome"] == "SL")
+        wins = sum(1 for r in chunk if r["outcome"] == "TP")
+        error_pct = losses / n * 100
+        win_pct = wins / n * 100
+
+        loss_feature_counts, win_feature_counts = {}, {}
+        for r in chunk:
+            feature = attribute_feature(r["notes"])
+            if not feature:
+                continue
+            bucket = loss_feature_counts if r["outcome"] == "SL" else (
+                win_feature_counts if r["outcome"] == "TP" else None)
+            if bucket is not None:
+                bucket[feature] = bucket.get(feature, 0) + 1
+
+        # Punish a feature that dominates losses when the batch's error rate
+        # is meaningfully above the losing side of a coin flip.
+        if error_pct > 55 and loss_feature_counts:
+            feature = max(loss_feature_counts, key=loss_feature_counts.get)
+            update_weight(
+                feature, 0.85,
+                f"خطای پیش‌بینی {error_pct:.0f}% در batch {n} تایی؛ وزن 15% کاهش یافت",
+                {"samples": n, "wins": wins, "losses": losses, "error_pct": error_pct,
+                 "signal_ids": [r["id"] for r in chunk]},
+            )
+        # Reward a feature that dominates wins when the batch is clearly
+        # profitable — without this, weights only ever decay over time.
+        elif win_pct > 60 and win_feature_counts:
+            feature = max(win_feature_counts, key=win_feature_counts.get)
+            update_weight(
+                feature, 1.10,
+                f"نرخ برد {win_pct:.0f}% در batch {n} تایی؛ وزن 10% افزایش یافت",
+                {"samples": n, "wins": wins, "losses": losses, "win_pct": win_pct,
+                 "signal_ids": [r["id"] for r in chunk]},
+            )
+
         with sqlite_conn() as c:
-            c.executemany("insert or ignore into self_healing_processed(signal_id,processed_at) values(?,?)",[(r["id"],now_utc().isoformat()) for r in recent])
+            c.executemany(
+                "insert or ignore into self_healing_processed(signal_id,processed_at) values(?,?)",
+                [(r["id"], now_utc().isoformat()) for r in chunk],
+            )
 
 
 # ============================================================
@@ -4227,67 +4214,12 @@ def _csv_safe_plan(r):
         return None
     return entry, sl, tp1, tp2
 
-def generate_csv_report(results, top10, dynamic30):
-    """Generate a complete, dynamic export from current engine results.
-
-    No values are hard-coded. The CSV contains every current Dynamic Top-30
-    candidate, every personal asset, every priority Top-10 asset and all three
-    metals, with invalid trade geometry suppressed rather than exported.
-    """
-    import csv, io
-    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    top10_set = {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}
-    dynamic_set = {str(x).upper() for x in (dynamic30 or [])}
-    result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
-
-    ordered = []
-    for sym in list(top10 or ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS):
-        s = str(sym).upper()
-        if s and s not in ordered:
-            ordered.append(s)
-    for metal in ATLAS_METALS:
-        if metal not in ordered:
-            ordered.append(metal)
-
-    rows = []
-    for sym in ordered:
-        r = result_map.get(sym)
-        if r is None and sym in ATLAS_METALS:
-            r = _metal_analysis(sym)
-        if not r:
-            continue
-        plan = _csv_safe_plan(r)
-        entry = sl = tp1 = tp2 = tp3 = tp4 = rr = ""
-        if plan:
-            entry, sl, tp1, tp2 = plan
-            tp3, tp4 = f(r.get("tp3")), f(r.get("tp4"))
-            rr = _rr_from_values(entry, sl, tp2)
-        rows.append([
-            _csv_group(sym, top10, dynamic30, personal_symbols),
-            sym,
-            _csv_status(r),
-            str(r.get("decision_state") or r.get("action") or "WAIT"),
-            _csv_number(r.get("price")), _csv_number(r.get("change"), 4),
-            _csv_number(r.get("support")), _csv_number(r.get("resistance")),
-            _csv_number(entry), _csv_number(sl), _csv_number(tp1), _csv_number(tp2),
-            _csv_number(tp3), _csv_number(tp4),
-            _csv_number(rr, 3), _csv_number(r.get("confidence"), 2),
-            r.get("h4_trend", "UNKNOWN"), r.get("d1_trend", "UNKNOWN"),
-            r.get("w1_trend", "UNKNOWN"), _csv_number(r.get("rsi"), 2),
-            r.get("macd", ""), r.get("volume", ""), _csv_number(r.get("volume_ratio"), 3),
-            _csv_number(r.get("atr_pct"), 3), r.get("liquidity", ""),
-            r.get("gate", ""), r.get("gate_reason", ""), r.get("direction", ""),
-            bool(r.get("repeat_signal")), r.get("reason", ""), VERSION,
-            r.get("data_quality", ""), r.get("signal_id", ""),
-            r.get("regime_trend", ""), r.get("regime_volatility", ""),
-            r.get("regime_derivatives", ""), r.get("regime_score", ""),
-        ])
-
-    out = io.StringIO(newline="")
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(CSV_COLUMNS)
-    writer.writerows(rows)
-    return out.getvalue()
+# NOTE: an earlier generate_csv_report (built around the older CSV_COLUMNS schema)
+# used to live here. It was silently shadowed by the later, more complete
+# generate_csv_report defined further below (which includes the intel-engine
+# columns: OpportunityScore, StructureScore, SetupType, etc.) and never ran.
+# Removed to avoid confusion — see the live version further down for the real
+# implementation and _new_csv_columns() for the actual exported schema.
 
 def _telegram_send_document(chat_id, content, filename, caption=None):
     """Send a UTF-8 CSV as a real Telegram document using stdlib only."""
@@ -4944,14 +4876,13 @@ def atlas_engine_mode():
     return get_engine_mode()
 
 
-def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
-    mode=get_engine_mode()
-    if mode=="MARKET": return [market]
-    personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
-    if mode=="PERSONAL": return [personal]
-    # Only return the two engine reports; the dashboard table and full table report are sent as CSV only
-    return [market, personal]
+# NOTE: an earlier build_two_engine_reports (the one that called build_report /
+# build_personal_report directly) used to live here. It was silently shadowed by
+# the later v11.3 intel-style build_two_engine_reports defined further below, so it
+# never ran — Python keeps only the last definition of a name. It has been removed
+# to avoid confusion. build_report/build_personal_report are still computed inside
+# report() (see the 'text' variable) but that text is not currently sent anywhere;
+# see the changelog note near main() for details.
 
 
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
@@ -5318,16 +5249,25 @@ def save_run(results, parts, macro, news, unavailable=0):
 
 _LAST_TOP10 = []
 _LAST_DYNAMIC30 = []
+# FIX: previously the mandatory backtest gate only froze self-learning (weight
+# updates) when it failed — it never actually restricted which signals could be
+# sent as live BUY/SELL. A gate that doesn't gate the thing users act on isn't
+# doing its job. _LAST_BACKTEST_OK is read by apply_decision_engine(): when the
+# gate fails, no signal is allowed to reach BUY/SELL CONFIRMATION that run; the
+# best it can do is a WATCH state, until the model passes backtest again.
+_LAST_BACKTEST_OK = True
+_LAST_BACKTEST_DETAILS = {}
 
 
 def report():
     init_sqlite()
     evaluate_open_outcomes()
     universe, top10, dynamic30 = build_universe()
-    global _LAST_TOP10, _LAST_DYNAMIC30
+    global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
     backtest_ok, bt = mandatory_backtest_gate(universe)
+    _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
         self_diagnostic()
     else:
@@ -5678,125 +5618,21 @@ def _v11_num(v, default=None):
 def _v11_clamp(v, lo=0.0, hi=100.0):
     return max(lo, min(hi, float(v)))
 
-def v11_signal_id(r):
-    coin=str(r.get("coin","UNKNOWN")).upper()
-    direction=str(r.get("direction") or r.get("action") or "NA").upper()
-    candle=str(r.get("signal_candle_ts") or r.get("candle_ts") or "NA")
-    return f"{coin}-{SIGNAL_TIMEFRAME.upper()}-{hashlib.sha256(f'{coin}|{direction}|{candle}'.encode()).hexdigest()[:10]}"
-
-def v11_data_quality(r):
-    fields=("price","rsi","macd","volume_ratio","atr_pct","support","resistance","h4_trend","d1_trend")
-    score=100.0*sum(r.get(x) is not None for x in fields)/len(fields)
-    if r.get("sr_fallback"): score-=5
-    return round(_v11_clamp(score),1)
-
-def v11_volatility_regime(r):
-    atr=_v11_num(r.get("atr_pct"))
-    if atr is None: return "UNKNOWN"
-    if atr>=8: return "EXTREME"
-    if atr>=5: return "HIGH"
-    if atr>=2: return "NORMAL"
-    return "LOW"
-
-def v11_derivatives_regime(r):
-    funding=_v11_num(r.get("coinglass_funding_rate"))
-    oi=_v11_num(r.get("coinglass_open_interest"))
-    if funding is None and oi is None: return "UNAVAILABLE"
-    if funding is not None and funding>0.01: return "LONG_CROWDED"
-    if funding is not None and funding<-0.01: return "SHORT_CROWDED"
-    return "NEUTRAL"
-
-def v11_evidence(r):
-    pos, neg=[],[]
-    d=str(r.get("direction","")).upper()
-    action=str(r.get("action","")).upper()
-    long_bias=d=="LONG" or "BUY" in action
-    short_bias=d=="SHORT" or "SELL" in action
-    h4=str(r.get("h4_trend","")).upper()
-    d1=str(r.get("d1_trend","")).upper()
-    rsi=_v11_num(r.get("rsi"))
-    vr=_v11_num(r.get("volume_ratio"))
-
-    if long_bias:
-        if any(x in h4 for x in ("BULL","UP","BUY","LONG")): pos.append("4H trend supports LONG")
-        if any(x in d1 for x in ("BULL","UP","BUY","LONG")): pos.append("1D trend supports LONG")
-        if rsi is not None and 50<=rsi<=70: pos.append("RSI supports momentum")
-        if vr is not None and vr>=1.2: pos.append("Volume expansion")
-        if "BEAR" in h4 or "DOWN" in h4: neg.append("4H trend conflict")
-        if "BEAR" in d1 or "DOWN" in d1: neg.append("1D trend conflict")
-        if rsi is not None and rsi>=75: neg.append("RSI strongly overbought")
-    elif short_bias:
-        if any(x in h4 for x in ("BEAR","DOWN","SELL","SHORT")): pos.append("4H trend supports SHORT")
-        if any(x in d1 for x in ("BEAR","DOWN","SELL","SHORT")): pos.append("1D trend supports SHORT")
-        if rsi is not None and 30<=rsi<=50: pos.append("RSI supports downside momentum")
-        if vr is not None and vr>=1.2: pos.append("Volume expansion")
-        if "BULL" in h4 or "UP" in h4: neg.append("4H trend conflict")
-        if "BULL" in d1 or "UP" in d1: neg.append("1D trend conflict")
-        if rsi is not None and rsi<=25: neg.append("RSI strongly oversold")
-
-    entry=_v11_num(r.get("entry")); sl=_v11_num(r.get("sl")); tp2=_v11_num(r.get("tp2"))
-    rr=None
-    if entry is not None and sl is not None and tp2 is not None and abs(entry-sl)>0:
-        rr=abs(tp2-entry)/abs(entry-sl)
-        if rr>=ATLAS_V11_MIN_RR: pos.append(f"RR acceptable ({rr:.2f}R)")
-        else: neg.append(f"RR below threshold ({rr:.2f}R)")
-    return pos,neg,rr
-
-def v11_apply_intelligence(r):
-    q=v11_data_quality(r)
-    r["v11_data_quality"]=q
-    r["v11_volatility_regime"]=v11_volatility_regime(r)
-    r["v11_derivatives_regime"]=v11_derivatives_regime(r)
-    pos,neg,rr=v11_evidence(r)
-    r["v11_positive_evidence"]=pos
-    r["v11_negative_evidence"]=neg
-    r["v11_rr"]=round(rr,3) if rr is not None else None
-    base=_v11_num(r.get("confidence"),50)
-    heuristic=_v11_clamp(base+(q-70)*0.08+min(len(pos),6)*1.5-min(len(neg),6)*2.5,5,95)
-    r["v11_estimated_probability"]=round(heuristic,1)
-    r["v11_probability_status"]="HEURISTIC_NOT_CALIBRATED"
-    invalid=[]
-    if q<ATLAS_V11_MIN_DATA_QUALITY: invalid.append("data quality below threshold")
-    if rr is not None and rr<ATLAS_V11_MIN_RR: invalid.append("RR below threshold")
-    if _v11_num(r.get("confidence"),0)<55: invalid.append("confidence below threshold")
-    d=str(r.get("direction","")).upper()
-    if d=="LONG" and ("BEAR" in str(r.get("h4_trend","")).upper() or "BEAR" in str(r.get("d1_trend","")).upper()):
-        invalid.append("higher-timeframe bearish conflict")
-    if d=="SHORT" and ("BULL" in str(r.get("h4_trend","")).upper() or "BULL" in str(r.get("d1_trend","")).upper()):
-        invalid.append("higher-timeframe bullish conflict")
-    r["v11_invalidated"]=bool(invalid)
-    r["v11_invalidation_reasons"]=invalid
-    r["v11_decision"]="WAIT" if invalid else str(r.get("action") or "WATCH").upper()
-    r["v11_signal_id"]=v11_signal_id(r)
-    score=heuristic*q/100-min(len(neg),6)*3
-    if r["v11_volatility_regime"]=="EXTREME": score-=8
-    elif r["v11_volatility_regime"]=="HIGH": score-=3
-    r["v11_opportunity_score"]=round(_v11_clamp(min(score,35) if invalid else score),1)
-    return r
-
 def v11_portfolio_diagnostics(results):
-    active=[r for r in results if str(r.get("action","")).upper() in
-            {"BUY","STRONG BUY","SELL","STRONG SELL","LONG","SHORT"}]
-    weights={str(r.get("coin","")).upper():max(0,_v11_num(r.get("v11_opportunity_score"),0)) for r in active}
-    total=sum(weights.values())
-    concentration={k:round(v/total,3) for k,v in weights.items()} if total else {}
-    warning="HIGH_CONCENTRATION" if any(v>=ATLAS_V11_MAX_CONCENTRATION for v in concentration.values()) else None
-    return {"concentration":concentration,"warning":warning,"high_correlation_pairs":[]}
-
-def build_v11_intelligence_report(results, portfolio):
-    ranked=sorted(results,key=lambda r:_v11_num(r.get("v11_opportunity_score"),0),reverse=True)
-    lines=["🧠 ATLAS v11.1 — INTELLIGENCE","━━━━━━━━━━━━━━━━━━━━"]
-    for r in ranked[:10]:
-        coin=str(r.get("coin","")).upper()
-        d=r.get("v11_decision","WAIT")
-        p=r.get("v11_estimated_probability",0)
-        q=r.get("v11_data_quality",0)
-        o=r.get("v11_opportunity_score",0)
-        icon="🟢" if d in {"BUY","STRONG BUY","LONG"} else ("🔴" if d in {"SELL","STRONG SELL","SHORT"} else "🟡")
-        lines.append(f"{icon} {coin} | {d} | P~{p:.0f}% | Q:{q:.0f} | O:{o:.0f} | V:{r.get('v11_volatility_regime','?')}")
-    if portfolio.get("warning"): lines.append(f"\n⚠️ Portfolio: {portfolio['warning']}")
-    lines.append("\nℹ️ P~ = heuristic estimate; not calibrated win probability.")
-    return "\n".join(lines)
+    """Concentration check across executable opportunities.
+    FIX: previously read 'v11_opportunity_score', a field no live code populated
+    (it was written only by an earlier v11.1 apply_intelligence implementation that
+    had been silently shadowed by a later redefinition of the same function name).
+    That made this diagnostic a permanent no-op. It now reads the fields the live
+    v11.3 intelligence engine (v11_apply_intelligence) actually sets: 'opportunity_score'
+    and 'executable'.
+    """
+    active = [r for r in results if r.get("executable")]
+    weights = {str(r.get("coin", "")).upper(): max(0, _v11_num(r.get("opportunity_score"), 0)) for r in active}
+    total = sum(weights.values())
+    concentration = {k: round(v / total, 3) for k, v in weights.items()} if total else {}
+    warning = "HIGH_CONCENTRATION" if any(v >= ATLAS_V11_MAX_CONCENTRATION for v in concentration.values()) else None
+    return {"concentration": concentration, "warning": warning, "high_correlation_pairs": []}
 
 
 # ============================================================
@@ -6083,131 +5919,6 @@ def build_signal_ranking_table(results, top10_symbols=None, dynamic30_symbols=No
     
     return "\n".join(lines)
 
-
-def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
-    """ساخت جدول تصویری از سیگنال‌ها"""
-    if not ENABLE_IMAGE_TABLE:
-        print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
-        return None
-    
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib.font_manager as fm
-        
-        try:
-            font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-            if os.path.exists(font_path):
-                fm.fontManager.addfont(font_path)
-                plt.rcParams['font.family'] = 'DejaVu Sans'
-            else:
-                plt.rcParams['font.family'] = 'sans-serif'
-        except:
-            plt.rcParams['font.family'] = 'sans-serif'
-        
-        signals = []
-        for r in results:
-            action = str(r.get("action") or "").upper()
-            if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL"):
-                quality_score = 0
-                quality_score += r.get("confidence", 0) * 0.4
-                quality_score += min(r.get("rr", 0) or 0, 5) * 15
-                quality_score += min(r.get("liquidity_score", 0) / 100, 1) * 15
-                quality_score += 10 if r.get("sr_confidence") == "HIGH" else 5 if r.get("sr_confidence") == "MEDIUM" else 0
-                quality_score += 10 if r.get("volume_ratio", 0) >= 1.5 else 5 if r.get("volume_ratio", 0) >= 1.2 else 0
-                r["quality_score"] = min(100, quality_score)
-                signals.append(r)
-        
-        if not signals:
-            signals = sorted(
-                [r for r in results if r.get("price") is not None],
-                key=lambda x: x.get("price", 0) or 0,
-                reverse=True
-            )[:10]
-            for r in signals:
-                r["quality_score"] = 50
-        
-        signals.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-        top_signals = signals[:10]
-        
-        fig, ax = plt.subplots(figsize=(14, 10))
-        ax.axis('off')
-        
-        cell_text = []
-        headers = ['#', 'Asset', 'Direction', 'Confidence', 'R/R', 'Quality']
-        cell_text.append(headers)
-        
-        for i, r in enumerate(top_signals, 1):
-            action = str(r.get("action") or "WAIT").upper()
-            if "BUY" in action:
-                direction = '🟢 BUY'
-            elif "SELL" in action:
-                direction = '🔴 SELL'
-            else:
-                direction = '🟡 WATCH'
-            
-            row = [
-                str(i),
-                r.get('coin', 'UNKNOWN'),
-                direction,
-                f"{r.get('confidence', 0)}%",
-                f"{r.get('rr', 0):.2f}" if r.get('rr') else "N/A",
-                f"{r.get('quality_score', 0):.0f}%"
-            ]
-            cell_text.append(row)
-        
-        while len(cell_text) < 11:
-            cell_text.append(['', '', '', '', '', ''])
-        
-        table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
-        table.auto_set_font_size(False)
-        table.set_fontsize(11)
-        table.scale(1, 2.5)
-        
-        for i, row in enumerate(cell_text):
-            for j, cell in enumerate(row):
-                if i == 0:
-                    table[(i, j)].set_facecolor('#2c3e50')
-                    table[(i, j)].set_text_props(color='white', weight='bold')
-                elif i % 2 == 0:
-                    table[(i, j)].set_facecolor('#ecf0f1')
-                else:
-                    table[(i, j)].set_facecolor('#ffffff')
-                
-                if i > 0 and j == 5 and cell:
-                    try:
-                        val = int(cell.replace('%', ''))
-                        if val >= 80:
-                            table[(i, j)].set_facecolor('#27ae60')
-                            table[(i, j)].set_text_props(color='white')
-                        elif val >= 60:
-                            table[(i, j)].set_facecolor('#f1c40f')
-                        else:
-                            table[(i, j)].set_facecolor('#e74c3c')
-                            table[(i, j)].set_text_props(color='white')
-                    except:
-                        pass
-                
-                if i > 0 and j == 2:
-                    if 'BUY' in cell:
-                        table[(i, j)].set_facecolor('#27ae60')
-                        table[(i, j)].set_text_props(color='white')
-                    elif 'SELL' in cell:
-                        table[(i, j)].set_facecolor('#e74c3c')
-                        table[(i, j)].set_text_props(color='white')
-        
-        ax.set_title('📊 ATLAS SIGNAL RANKING', fontsize=16, weight='bold', pad=20)
-        
-        plt.tight_layout()
-        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='white')
-        plt.close()
-        
-        return filename
-    except ImportError as e:
-        print(f"⚠️ Matplotlib not installed: {e}")
-        return None
-    except Exception as e:
-        print(f"⚠️ Image generation error: {e}")
-        return None
 
 
 def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
@@ -6600,7 +6311,24 @@ def _i_opportunity(r):
     return round(max(0,min(100,score*0.72 + setup_bonus + rr_bonus)),1)
 
 def v11_apply_intelligence(r):
-    """New evidence engine. It never claims its score is a win probability."""
+    """New evidence engine. It never claims its score is a win probability.
+
+    FIX: this function used to overwrite r["confidence"], r["regime_trend"],
+    r["regime_volatility"] in place. Those same field names were already set
+    earlier by analyze_coin()/apply_decision_engine() with a different meaning
+    (the weighted candle/RSI/MACD/volume score that actually gated BUY/SELL
+    CONFIRMATION vs WATCH). Overwriting them meant the confidence number shown
+    in the final report was never the number that produced the decision —
+    and the original value was gone, so it couldn't even be audited afterward.
+    The original values are now preserved under decision_* keys before being
+    replaced, so both are visible: decision_confidence/decision_regime_* is
+    "why the trade engine acted", confidence/regime_* (below) is "how strong
+    the evidence looks under the intel model".
+    """
+    r["decision_confidence"] = r.get("confidence")
+    r["decision_regime_trend"] = r.get("regime_trend")
+    r["decision_regime_volatility"] = r.get("regime_volatility")
+
     q = _i_quality(r)
     structure = _i_structure_score(r)
     momentum = _i_momentum_score(r)
@@ -6764,7 +6492,8 @@ def _new_csv_columns():
         "IntelBias","SetupType","OpportunityScore","StructureScore",
         "MomentumScore","VolumeScore","SRScore","ContradictionCount",
         "Contradictions","LongTrigger","ShortTrigger","Executable",
-        "IntelDecision","IntelSignalID","ConfidenceLabel"
+        "IntelDecision","IntelSignalID","ConfidenceLabel",
+        "DecisionConfidence","DecisionRegimeTrend","DecisionRegimeVolatility","BacktestGateOK"
     )
 
 def generate_csv_report(results, top10, dynamic30):
@@ -6815,7 +6544,9 @@ def generate_csv_report(results, top10, dynamic30):
             _csv_number(r.get("sr_score"),2),len(r.get("contradictions") or []),
             " | ".join(r.get("contradictions") or []),_csv_number(trig.get("long")),
             _csv_number(trig.get("short")),bool(r.get("executable")),r.get("intel_decision","WAIT"),
-            r.get("intel_signal_id",""),r.get("confidence_label","MODEL STRENGTH")
+            r.get("intel_signal_id",""),r.get("confidence_label","MODEL STRENGTH"),
+            _csv_number(r.get("decision_confidence"),2),r.get("decision_regime_trend",""),
+            r.get("decision_regime_volatility",""),bool(_LAST_BACKTEST_OK)
         ])
     out=io.StringIO(newline="")
     w=csv.writer(out,lineterminator="\n")
