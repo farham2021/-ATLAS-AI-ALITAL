@@ -54,15 +54,12 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    # دسترسی نوشتن به مخزن با PAT_TOKEN انجام می‌شود
     permissions:
       contents: write
-
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        # استفاده از PAT توکن جدید به جای GITHUB_TOKEN
         token: ${{ secrets.PAT_TOKEN }}
 
     - name: Set up Python
@@ -76,27 +73,26 @@ jobs:
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install matplotlib edge-tts gtts
 
-    - name: Apply v11.5 patches (once)
+    - name: Remove old patch marker (force re-apply)
+      run: rm -f .patched
+
+    - name: Apply v11.5 patches (always)
       id: apply_patches
       run: |
-        if [ -f patch_bot.py ] && [ ! -f .patched ]; then
+        if [ -f patch_bot.py ]; then
           echo "📦 Applying v11.5 patches..."
           python patch_bot.py bot.py
           if [ -f bot_updated.py ]; then
             mv bot_updated.py bot.py
             touch .patched
-            echo "✅ Patches applied successfully (marked as done)"
+            echo "✅ Patches applied successfully"
             echo "patched=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ Patches applied but no output file found"
+            echo "⚠️ patch did not produce bot_updated.py"
             echo "patched=false" >> $GITHUB_OUTPUT
           fi
         else
-          if [ -f .patched ]; then
-            echo "ℹ️ Patches already applied (skipping)"
-          else
-            echo "ℹ️ patch_bot.py not found (skipping)"
-          fi
+          echo "ℹ️ patch_bot.py not found"
           echo "patched=false" >> $GITHUB_OUTPUT
         fi
 
@@ -106,8 +102,7 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git add bot.py .patched
-        git commit -m "chore: auto-apply v11.5 patches via patch_bot.py" || echo "No changes to commit"
-        # اکنون با PAT_TOKEN این دستور به راحتی اجرا می‌شود
+        git commit -m "chore: auto-apply v11.5 patches (fix duplicate column)" || echo "No changes to commit"
         git push origin HEAD:${{ github.ref_name }}
 
     - name: Create .env file
@@ -129,9 +124,7 @@ jobs:
         echo "ATLAS_ENGINE=BOTH" >> .env
         echo "ATLAS_MIN_CONFIDENCE=55" >> .env
         echo "ATLAS_MIN_EXECUTABLE_RR=2.0" >> .env
-        echo "=== .env file contents ==="
         cat .env
-        echo "=========================="
 
     - name: Run ATLAS AI
       env:
