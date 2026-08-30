@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ATLAS v11.5 Self-Updater
-این اسکریپت تمام اصلاحات مورد نیاز را روی bot.py اعمال می‌کند.
+ATLAS v11.5 Self-Updater (Fixed)
+این اسکریپت اصلاحات را بدون ایجاد خطای duplicate column اعمال می‌کند.
 استفاده: python patch_bot.py
 """
 
@@ -11,21 +11,15 @@ import re
 import shutil
 from datetime import datetime
 
-# ============================================================
-# 1. لیست تغییرات (به صورت توابع)
-# ============================================================
-
 def apply_patches(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
-    # تبدیل به لیست برای ویرایش
     new_lines = []
     i = 0
     total = len(lines)
 
-    # ========== تغییر ۱: اضافه کردن تنظیمات جدید (بعد از SNAPSHOT_24H_THRESHOLD_PCT) ==========
-    # جستجوی خط حاوی SNAPSHOT_24H_THRESHOLD_PCT
+    # ========== تغییر ۱: اضافه کردن تنظیمات جدید ==========
     config_insert = """
 # ============================================================
 # SNAPSHOT DIRECTION THRESHOLDS (NEW)
@@ -41,88 +35,61 @@ SNAPSHOT_7D_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_7D_THRESHOLD", 
 ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
 ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
 """
-    # پیدا کردن خط SNAPSHOT_24H_THRESHOLD_PCT
     found = False
     for idx, line in enumerate(lines):
         if "SNAPSHOT_24H_THRESHOLD_PCT" in line:
-            # درج بعد از این خط
             lines.insert(idx+1, config_insert)
             found = True
             break
     if not found:
-        print("⚠️ خط SNAPSHOT_24H_THRESHOLD_PCT پیدا نشد. تنظیمات جدید اضافه نشد.")
+        print("⚠️ تنظیمات جدید اضافه نشد (SNAPSHOT_24H_THRESHOLD_PCT یافت نشد).")
     else:
         print("✅ تنظیمات جدید اضافه شد.")
 
-    # ========== تغییر ۲: به‌روزرسانی تابع init_sqlite ==========
-    # جستجوی create table if not exists signal_outcomes و اضافه کردن feature_vector
-    # همچنین ایجاد جدول price_history
-    new_sql = """
-        create table if not exists signal_outcomes(
-            id integer primary key autoincrement,
-            coin text not null,
-            direction text not null,
-            entry real, sl real, tp1 real, tp2 real,
-            issued_at text not null,
-            status text default 'OPEN',
-            outcome text,
-            exit_price real,
-            exit_at text,
-            pnl_pct real,
-            bars_to_exit integer,
-            notes text,
-            feature_vector text
-        );
-"""
-    # جستجوی خط create table signal_outcomes و جایگزینی با نسخه جدید
-    # ساده‌تر: پیدا کردن خط حاوی "create table if not exists signal_outcomes" و سپس جایگزینی کل بلوک تا ");"
-    # پیاده‌سازی ساده‌تر: با استفاده از regex کل CREATE TABLE را بیابیم و جایگزین کنیم.
-    # اما برای اطمینان، ما یک تابع کمکی برای جایگزینی بلوک می‌نویسیم.
-    # به دلیل پیچیدگی، بهتر است که به‌جای جایگزینی، دستور ALTER TABLE را اضافه کنیم.
-    # اما SQLite از ALTER TABLE برای اضافه کردن ستون پشتیبانی می‌کند.
-    # بنابراین در انتهای init_sqlite، بعد از executescript، دستورات ALTER را اضافه می‌کنیم.
-    # همچنین جدول price_history را اضافه می‌کنیم.
-
-    alter_commands = """
-        -- اضافه کردن ستون feature_vector به signal_outcomes
-        ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;
-        -- ایجاد جدول price_history
-        CREATE TABLE IF NOT EXISTS price_history(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            price REAL NOT NULL,
-            captured_at TEXT NOT NULL,
-            timeframe TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
-"""
-    # پیدا کردن انتهای تابع init_sqlite (با جستجوی "def init_sqlite():" و سپس "with sqlite_conn() as c:")
-    # و سپس درج alter_commands قبل از closing of with.
-    # ساده‌تر: بعد از c.executescript(""" ... """)، یک c.executescript دیگر با alter_commands اضافه کنیم.
-    # جستجوی خطی که شامل "c.executescript(""" است و بعد از آن یک c.executescript دیگر درج کنیم.
+    # ========== تغییر ۲: اصلاح تابع init_sqlite ==========
+    # به‌جای اضافه کردن ALTER TABLE غیرشرطی، یک بلوک شرطی اضافه می‌کنیم.
+    # یک نشانه‌گذاری: بعد از executescript اصلی، یک بخش جدید برای بررسی و اضافه کردن ستون قرار می‌دهیم.
+    # جستجوی "c.executescript(""" ... """)" و بعد از آن یک بلوک جدید درج می‌کنیم.
     init_found = False
     for idx, line in enumerate(lines):
         if "def init_sqlite():" in line:
-            # پیدا کردن خطی که شامل "c.executescript(\"\"\"" است
-            for j in range(idx, min(idx+50, total)):
+            # پیدا کردن انتهای executescript اولیه
+            for j in range(idx, min(idx+200, total)):
                 if 'c.executescript("""' in lines[j]:
-                    # درج بعد از خطی که با """ بسته می‌شود (پیدا کردن خط بعد از """)
-                    for k in range(j, min(j+200, total)):
+                    # پیدا کردن خط بسته‌کننده """)
+                    for k in range(j, min(j+300, total)):
                         if '""")' in lines[k] and '"""' in lines[k]:
-                            # درج کد جدید بعد از این خط
-                            lines.insert(k+1, f'        c.executescript("""{alter_commands}""")')
+                            # بعد از این خط، کد جدید را درج می‌کنیم که شامل بررسی و اضافه کردن ستون است
+                            new_code = """
+        # اضافه کردن ستون feature_vector به صورت شرطی
+        c.execute("PRAGMA table_info(signal_outcomes)")
+        columns = [row[1] for row in c.fetchall()]
+        if "feature_vector" not in columns:
+            c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
+
+        # ایجاد جدول price_history اگر وجود نداشته باشد
+        c.execute(\"\"\"
+            CREATE TABLE IF NOT EXISTS price_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                captured_at TEXT NOT NULL,
+                timeframe TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
+        \"\"\")
+"""
+                            lines.insert(k+1, new_code)
                             init_found = True
                             break
                     break
             break
     if not init_found:
-        print("⚠️ نتوانستیم init_sqlite را پیدا کنیم. تغییرات دیتابیس اعمال نشد.")
+        print("⚠️ اصلاح دیتابیس انجام نشد (تابع init_sqlite پیدا نشد).")
     else:
-        print("✅ تغییرات دیتابیس اعمال شد.")
+        print("✅ اصلاح دیتابیس اعمال شد (با بررسی شرطی).")
 
-    # ========== تغییر ۳: اضافه کردن توابع کمکی جدید (قبل از build_price_snapshot) ==========
-    # ما یک نشانه‌گذاری داریم: "# ============================================================\n# ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT"
-    # قبل از آن، توابع جدید را اضافه می‌کنیم.
+    # ========== تغییر ۳: اضافه کردن توابع کمکی ==========
     new_functions = """
 # ============================================================
 # NEW FUNCTIONS FOR PRICE HISTORY (v11.5)
@@ -198,19 +165,16 @@ def _compute_sharpe(pnls, period=20):
     std = (sum((x - avg) ** 2 for x in recent) / len(recent)) ** 0.5 if len(recent) > 1 else 0
     return avg / std if std > 0 else 0
 """
-    # پیدا کردن خطی که شامل "# ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT" است
     snapshot_marker = "# ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT"
     for idx, line in enumerate(lines):
         if snapshot_marker in line:
-            # درج توابع جدید قبل از این خط
             lines.insert(idx, new_functions)
             print("✅ توابع کمکی جدید اضافه شد.")
             break
     else:
-        print("⚠️ نشانه SNAPSHOT پیدا نشد. توابع جدید اضافه نشد.")
+        print("⚠️ نشانه SNAPSHOT پیدا نشد، توابع جدید اضافه نشد.")
 
     # ========== تغییر ۴: جایگزینی تابع _get_snapshot_arrow ==========
-    # یافتن تعریف تابع و جایگزینی با کد جدید
     new_arrow_func = """
 def _get_snapshot_arrow(price, previous_prices, change24=None):
     if change24 is not None:
@@ -231,11 +195,9 @@ def _get_snapshot_arrow(price, previous_prices, change24=None):
             return "⬆️" if delta > 0 else "⬇️", "prev"
     return "➡️", "none"
 """
-    # پیدا کردن خط "def _get_snapshot_arrow"
     arrow_found = False
     for idx, line in enumerate(lines):
         if line.strip().startswith("def _get_snapshot_arrow("):
-            # پیدا کردن انتهای تابع (تا خط بعدی که با def شروع شود یا به انتها برسد)
             start = idx
             end = start
             for j in range(idx+1, total):
@@ -244,7 +206,6 @@ def _get_snapshot_arrow(price, previous_prices, change24=None):
                     break
             if end == start:
                 end = total
-            # جایگزینی با تابع جدید
             lines[start:end] = new_arrow_func.splitlines(True)
             arrow_found = True
             print("✅ تابع _get_snapshot_arrow جایگزین شد.")
@@ -252,7 +213,7 @@ def _get_snapshot_arrow(price, previous_prices, change24=None):
     if not arrow_found:
         print("⚠️ تابع _get_snapshot_arrow پیدا نشد.")
 
-    # ========== تغییر ۵: جایگزینی تابع build_price_snapshot ==========
+    # ========== تغییر ۵: جایگزینی build_price_snapshot ==========
     new_build_func = """
 def build_price_snapshot(results, updated_at=None):
     by_coin = {str(r.get("coin") or "").upper(): r for r in (results or [])}
@@ -319,7 +280,6 @@ def build_price_snapshot(results, updated_at=None):
     lines.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
     return "\\n".join(lines)
 """
-    # پیدا کردن تابع build_price_snapshot
     build_found = False
     for idx, line in enumerate(lines):
         if line.strip().startswith("def build_price_snapshot("):
@@ -338,7 +298,7 @@ def build_price_snapshot(results, updated_at=None):
     if not build_found:
         print("⚠️ تابع build_price_snapshot پیدا نشد.")
 
-    # ========== تغییر ۶: جایگزینی تابع send_price_snapshot ==========
+    # ========== تغییر ۶: send_price_snapshot ==========
     new_send_func = """
 def send_price_snapshot(results):
     payload = build_price_snapshot(results)
@@ -363,7 +323,7 @@ def send_price_snapshot(results):
     if not send_found:
         print("⚠️ تابع send_price_snapshot پیدا نشد.")
 
-    # ========== تغییر ۷: جایگزینی تابع self_diagnostic ==========
+    # ========== تغییر ۷: self_diagnostic ==========
     new_self_diagnostic = """
 def self_diagnostic():
     init_sqlite()
@@ -456,7 +416,7 @@ def self_diagnostic():
     if not self_diag_found:
         print("⚠️ تابع self_diagnostic پیدا نشد.")
 
-    # ========== تغییر ۸: جایگزینی تابع v11_portfolio_diagnostics ==========
+    # ========== تغییر ۸: v11_portfolio_diagnostics ==========
     new_portfolio_diag = """
 def v11_portfolio_diagnostics(results):
     active = [r for r in results if r.get("executable")]
@@ -484,33 +444,25 @@ def v11_portfolio_diagnostics(results):
     if not port_found:
         print("⚠️ تابع v11_portfolio_diagnostics پیدا نشد.")
 
-    # ========== تغییر ۹: اصلاح تابع v11_apply_intelligence ==========
-    # اضافه کردن دو خط در ابتدای تابع
+    # ========== تغییر ۹: اصلاح v11_apply_intelligence ==========
     v11_apply_found = False
     for idx, line in enumerate(lines):
         if line.strip().startswith("def v11_apply_intelligence(r):"):
-            # درج بعد از خط بعدی (بعد از def)
             lines.insert(idx+1, '    r["decision_confidence"] = r.get("confidence")\n')
             lines.insert(idx+2, '    r["decision_regime_trend"] = r.get("regime_trend")\n')
             lines.insert(idx+3, '    r["decision_regime_volatility"] = r.get("regime_volatility")\n')
             v11_apply_found = True
-            print("✅ تابع v11_apply_intelligence اصلاح شد (اضافه کردن decision_*).")
+            print("✅ تابع v11_apply_intelligence اصلاح شد.")
             break
     if not v11_apply_found:
         print("⚠️ تابع v11_apply_intelligence پیدا نشد.")
 
-    # ========== تغییر ۱۰: اصلاح تابع store_signal ==========
-    # اضافه کردن feature_vector
+    # ========== تغییر ۱۰: اصلاح store_signal ==========
     store_found = False
     for idx, line in enumerate(lines):
         if line.strip().startswith("def store_signal(result):"):
-            # پیدا کردن جایی که row = { ... } تعریف شده و feature_vector را اضافه کنیم
-            # ساده‌تر: بعد از تعریف row، یک خط اضافه کنیم که feature_vector بسازد
-            # و در dictionary insert آن را اضافه کنیم
-            # ما به دنبال خطی هستیم که شامل "STORE.insert("atlas_signals", row)" است و قبل از آن feature_vector را به row اضافه کنیم.
             for j in range(idx, min(idx+100, total)):
                 if "STORE.insert(\"atlas_signals\", row)" in lines[j]:
-                    # قبل از این خط، feature_vector را به row اضافه کنیم
                     lines.insert(j, '    row["feature_vector"] = safe_json(result.get("score_components", {}))\n')
                     store_found = True
                     break
@@ -520,51 +472,35 @@ def v11_portfolio_diagnostics(results):
     else:
         print("✅ feature_vector به store_signal اضافه شد.")
 
-    # ========== تغییر ۱۱: اصلاح تابع apply_decision_engine ==========
-    # اضافه کردن global _LAST_BACKTEST_OK در ابتدا و کد backtest gate
+    # ========== تغییر ۱۱: اصلاح apply_decision_engine ==========
     apply_found = False
     for idx, line in enumerate(lines):
         if line.strip().startswith("def apply_decision_engine(results, btc_regime, breadth):"):
-            # بعد از خط def، global اضافه کنیم
             lines.insert(idx+1, '    global _LAST_BACKTEST_OK\n')
-            # پیدا کردن جایی که بعد از بخش derivatives، کد backtest gate را اضافه کنیم
-            # جستجوی "if r.get(\"regime_derivatives\") == \"SHORT_CROWDED\""
             for j in range(idx, min(idx+200, total)):
-                if 'if r.get("regime_derivatives") == "SHORT_CROWDED"' in lines[j]:
-                    # بعد از این بلوک (پیدا کردن خط بعدی که با if شروع نشود) کد جدید را اضافه کنیم
-                    # برای سادگی، بعد از خط j+1 (که احتمالاً "if state == \"SELL CONFIRMATION\"" است) اضافه می‌کنیم.
-                    # بهتر است بعد از کل بلوک derivatives
-                    # من یک نشانه‌گذاری می‌کنم: بعد از "reasons.append(\"Short crowded (negative funding rate)\")" اضافه کنم.
-                    for k in range(j, min(j+20, total)):
-                        if 'reasons.append("Short crowded (negative funding rate)")' in lines[k]:
-                            # بعد از این خط، کد backtest gate را درج کنیم
-                            backtest_gate_code = '''
+                if 'reasons.append("Short crowded (negative funding rate)")' in lines[j]:
+                    backtest_gate_code = '''
             # FIX: backtest gate blocks executable signals
             if not _LAST_BACKTEST_OK and state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
                 state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
                 reasons.append("Backtest gate failed — execution frozen, watch-only")
 '''
-                            lines.insert(k+1, backtest_gate_code)
-                            apply_found = True
-                            break
+                    lines.insert(j+1, backtest_gate_code)
+                    apply_found = True
                     break
             break
     if not apply_found:
-        print("⚠️ تابع apply_decision_engine اصلاح نشد (Backtest gate اضافه نشد).")
+        print("⚠️ تابع apply_decision_engine اصلاح نشد.")
     else:
         print("✅ Backtest gate به apply_decision_engine اضافه شد.")
 
-    # ========== تغییر ۱۲: اصلاح تابع report() ==========
-    # اضافه کردن global _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
+    # ========== تغییر ۱۲: اصلاح report() ==========
     report_found = False
     for idx, line in enumerate(lines):
         if line.strip().startswith("def report():"):
-            # بعد از خط def، global اضافه کنیم
             lines.insert(idx+1, '    global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS\n')
-            # پیدا کردن خط "backtest_ok, bt = mandatory_backtest_gate(universe)"
             for j in range(idx, min(idx+50, total)):
                 if 'backtest_ok, bt = mandatory_backtest_gate(universe)' in lines[j]:
-                    # بعد از این خط، کد تنظیم _LAST_BACKTEST_OK را اضافه کنیم
                     code = '    _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})\n'
                     lines.insert(j+1, code)
                     report_found = True
@@ -575,16 +511,13 @@ def v11_portfolio_diagnostics(results):
     else:
         print("✅ report() اصلاح شد.")
 
-    # ========== تغییر ۱۳: اضافه کردن متغیرهای global در ابتدای فایل (بعد از بخش DATABASE) ==========
-    # جستجوی جایی که _LAST_TOP10 و _LAST_DYNAMIC30 تعریف شده‌اند و بعد از آنها اضافه کنیم
+    # ========== تغییر ۱۳: اضافه کردن متغیرهای global ==========
     global_vars = '''
 _LAST_BACKTEST_OK = True
 _LAST_BACKTEST_DETAILS = {}
 '''
     for idx, line in enumerate(lines):
         if '_LAST_TOP10 = []' in line:
-            # بعد از این خط و خط بعدی که _LAST_DYNAMIC30 = [] است، اضافه کنیم
-            # پیدا کردن خط بعدی که شامل _LAST_DYNAMIC30 باشد
             for j in range(idx, min(idx+5, total)):
                 if '_LAST_DYNAMIC30 = []' in lines[j]:
                     lines.insert(j+1, global_vars)
