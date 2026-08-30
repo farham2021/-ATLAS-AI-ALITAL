@@ -62,12 +62,13 @@ jobs:
 
   deploy:
     needs: test
-    # حذف شرط برای اجرا روی همه شاخه‌ها
-    # if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -79,6 +80,42 @@ jobs:
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install matplotlib edge-tts gtts
+    
+    - name: Apply v11.5 patches (once)
+      id: apply_patches
+      run: |
+        # اگر patch_bot.py وجود داشته باشد و قبلاً اعمال نشده باشد
+        if [ -f patch_bot.py ] && [ ! -f .patched ]; then
+          echo "📦 Applying v11.5 patches..."
+          python patch_bot.py bot.py
+          
+          # اگر فایل جدید ایجاد شد، جایگزین کن
+          if [ -f bot_updated.py ]; then
+            mv bot_updated.py bot.py
+            touch .patched
+            echo "✅ Patches applied successfully (marked as done)"
+            echo "patched=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Patches applied but no output file found"
+            echo "patched=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          if [ -f .patched ]; then
+            echo "ℹ️ Patches already applied (skipping)"
+          else
+            echo "ℹ️ patch_bot.py not found (skipping)"
+          fi
+          echo "patched=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Commit patched files (if any)
+      if: steps.apply_patches.outputs.patched == 'true'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add bot.py .patched
+        git commit -m "chore: auto-apply v11.5 patches via patch_bot.py" || echo "No changes to commit"
+        git push
     
     - name: Create .env file
       run: |
@@ -164,4 +201,3 @@ jobs:
     - name: Print status
       run: |
         echo "::notice::${{ steps.status.outputs.status }}"
-
