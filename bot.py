@@ -187,7 +187,21 @@ MIN_EXECUTABLE_RR = float(os.environ.get("ATLAS_MIN_EXECUTABLE_RR", "2.0"))
 MIN_WATCH_CONFIDENCE = float(os.environ.get("ATLAS_MIN_WATCH_CONFIDENCE", "55"))
 TRADE_GEOMETRY_EPSILON = float(os.environ.get("ATLAS_TRADE_GEOMETRY_EPSILON", "1e-12"))
 SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.05"))
-SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.5"))
+SNAPSHOT_24H_THRESHOLD_PCT
+# ============================================================
+# SNAPSHOT DIRECTION THRESHOLDS (NEW)
+# ============================================================
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.10"))
+SNAPSHOT_4H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_4H_THRESHOLD", "0.15"))
+SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.30"))
+SNAPSHOT_7D_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_7D_THRESHOLD", "0.50"))
+
+# ============================================================
+# SELF-HEALING SETTINGS
+# ============================================================
+ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
+ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
+ = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.5"))
 
 # ============================================================
 # CACHE & MEMORY SETTINGS
@@ -861,82 +875,23 @@ def init_sqlite():
         );
         """)
 
+        # اضافه کردن ستون feature_vector به صورت شرطی
+        c.execute("PRAGMA table_info(signal_outcomes)")
+        columns = [row[1] for row in c.fetchall()]
+        if "feature_vector" not in columns:
+            c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
 
-# ============================================================
-# SUPABASE STORAGE
-# ============================================================
-
-class SupabaseStore:
-    def __init__(self):
-        self.enabled = bool(SUPABASE_URL and SUPABASE_KEY)
-        self.headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal",
-        }
-
-    def insert(self, table, row):
-        if not self.enabled:
-            return False
-        try:
-            url = f"{SUPABASE_URL}/rest/v1/{table}"
-            req = urllib.request.Request(
-                url,
-                data=safe_json(row).encode(),
-                headers=self.headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=15):
-                return True
-        except Exception as e:
-            if table != "atlas_changelog":
-                try:
-                    with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
-                        fh.write(f"{now_utc().isoformat()} | SUPABASE | insert failed: {table}: {e}\n")
-                except Exception:
-                    pass
-            return False
-
-    def update(self, table, match, row):
-        if not self.enabled:
-            return False
-        try:
-            q = urllib.parse.urlencode(match)
-            url = f"{SUPABASE_URL}/rest/v1/{table}?{q}"
-            req = urllib.request.Request(
-                url,
-                data=safe_json(row).encode(),
-                headers=self.headers,
-                method="PATCH",
-            )
-            with urllib.request.urlopen(req, timeout=15):
-                return True
-        except Exception as e:
-            if table != "atlas_changelog":
-                try:
-                    with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
-                        fh.write(f"{now_utc().isoformat()} | SUPABASE | update failed: {table}: {e}\n")
-                except Exception:
-                    pass
-            return False
-
-    def select(self, table, params=None):
-        if not self.enabled:
-            return []
-        try:
-            q = urllib.parse.urlencode(params or {})
-            url = f"{SUPABASE_URL}/rest/v1/{table}?{q}"
-            req = urllib.request.Request(url, headers=self.headers)
-            with urllib.request.urlopen(req, timeout=15) as r:
-                return json.loads(r.read().decode())
-        except Exception:
-            return []
-
-
-STORE = SupabaseStore()
-
-
+        # ایجاد جدول price_history
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS price_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                captured_at TEXT NOT NULL,
+                timeframe TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
+        """)
 def append_changelog(component, old, new, reason, evidence=None):
     ts = now_utc().isoformat()
     line = (
@@ -5317,6 +5272,81 @@ def _conditional_trade_plan(result):
             if result.get(k) is not None}
 
 # ============================================================
+
+# ============================================================
+# NEW FUNCTIONS FOR PRICE HISTORY (v11.5)
+# ============================================================
+
+def _save_price_history(symbol, price, timeframe, captured_at):
+    if not symbol or price is None:
+        return
+    row = {"symbol": symbol.upper(), "price": price, "captured_at": captured_at, "timeframe": timeframe}
+    STORE.insert("price_history", row)
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            con.execute(
+                "INSERT INTO price_history (symbol, price, captured_at, timeframe) VALUES (?,?,?,?)",
+                (symbol.upper(), price, captured_at, timeframe)
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Price history save error: {e}")
+
+def _get_historical_price(symbol, timeframe_hours, captured_at):
+    tolerance_hours = 1 if timeframe_hours <= 24 else 6
+    try:
+        rows = STORE.select(
+            "price_history",
+            {
+                "select": "price,captured_at",
+                "symbol": f"eq.{symbol.upper()}",
+                "order": "captured_at.desc",
+                "limit": "10"
+            }
+        )
+        if rows:
+            target = captured_at - timedelta(hours=timeframe_hours)
+            for r in rows:
+                try:
+                    ts = datetime.fromisoformat(r["captured_at"].replace("Z", "+00:00"))
+                    diff = abs((ts - target).total_seconds() / 3600)
+                    if diff <= tolerance_hours:
+                        return f(r["price"]), ts
+                except:
+                    continue
+    except:
+        pass
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT price, captured_at FROM price_history WHERE symbol = ? ORDER BY captured_at DESC LIMIT 10",
+                (symbol.upper(),)
+            ).fetchall()
+            target = captured_at - timedelta(hours=timeframe_hours)
+            for r in rows:
+                ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
+                diff = abs((ts - target).total_seconds() / 3600)
+                if diff <= tolerance_hours:
+                    return f(r["price"]), ts
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Historical price error: {e}")
+    return None, None
+
+def _compute_sharpe(pnls, period=20):
+    if len(pnls) < period:
+        return None
+    recent = pnls[-period:]
+    avg = safe_mean(recent)
+    std = (sum((x - avg) ** 2 for x in recent) / len(recent)) ** 0.5 if len(recent) > 1 else 0
+    return avg / std if std > 0 else 0
+
 # ATLAS v11.0 — SEPARATE 3H PRICE SNAPSHOT
 # ============================================================
 
@@ -5479,11 +5509,39 @@ def _snapshot_direction(current, previous):
 def _get_snapshot_arrow(price, previous_price, change24=None):
     """
     تعیین فلش جهت تغییر قیمت با اولویت تغییرات ۲۴ ساعته.
-    اگر change24 موجود باشد، بر اساس آن و آستانه‌ی SNAPSHOT_24H_THRESHOLD_PCT تصمیم‌گیری می‌شود.
+    اگر change24 موجود باشد، بر اساس آن و آستانه‌ی SNAPSHOT_24H_THRESHOLD_PCT
+# ============================================================
+# SNAPSHOT DIRECTION THRESHOLDS (NEW)
+# ============================================================
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.10"))
+SNAPSHOT_4H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_4H_THRESHOLD", "0.15"))
+SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.30"))
+SNAPSHOT_7D_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_7D_THRESHOLD", "0.50"))
+
+# ============================================================
+# SELF-HEALING SETTINGS
+# ============================================================
+ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
+ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
+ تصمیم‌گیری می‌شود.
     در غیر این صورت به _snapshot_direction فال‌بک می‌شود.
     """
     if change24 is not None:
-        if abs(change24) < SNAPSHOT_24H_THRESHOLD_PCT:
+        if abs(change24) < SNAPSHOT_24H_THRESHOLD_PCT
+# ============================================================
+# SNAPSHOT DIRECTION THRESHOLDS (NEW)
+# ============================================================
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.10"))
+SNAPSHOT_4H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_4H_THRESHOLD", "0.15"))
+SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.30"))
+SNAPSHOT_7D_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_7D_THRESHOLD", "0.50"))
+
+# ============================================================
+# SELF-HEALING SETTINGS
+# ============================================================
+ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
+ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
+:
             return "➡️"
         return "⬆️" if change24 > 0 else "⬇️"
     return _snapshot_direction(price, previous_price)
