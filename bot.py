@@ -204,6 +204,20 @@ ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
 ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
 
 # ============================================================
+# SNAPSHOT DIRECTION THRESHOLDS (NEW)
+# ============================================================
+SNAPSHOT_FLAT_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT", "0.10"))
+SNAPSHOT_4H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_4H_THRESHOLD", "0.15"))
+SNAPSHOT_24H_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_24H_THRESHOLD", "0.30"))
+SNAPSHOT_7D_THRESHOLD_PCT = float(os.environ.get("ATLAS_SNAPSHOT_7D_THRESHOLD", "0.50"))
+
+# ============================================================
+# SELF-HEALING SETTINGS
+# ============================================================
+ATLAS_SELF_HEAL_BATCH = int(os.environ.get("ATLAS_SELF_HEAL_BATCH", "15"))
+ATLAS_SHARPE_MIN_PERIOD = int(os.environ.get("ATLAS_SHARPE_MIN_PERIOD", "20"))
+
+# ============================================================
 # CACHE & MEMORY SETTINGS
 # ============================================================
 BTC_REGIME_CACHE_MINUTES = int(os.environ.get("ATLAS_BTC_REGIME_CACHE_MINUTES", "30"))
@@ -767,8 +781,10 @@ def sqlite_conn():
     c.execute("PRAGMA journal_mode=WAL")
     return c
 
+
 def init_sqlite():
     with sqlite_conn() as c:
+        # ایجاد جدول‌های اصلی (بدون feature_vector)
         c.executescript("""
         create table if not exists signal_outcomes(
             id integer primary key autoincrement,
@@ -874,25 +890,25 @@ def init_sqlite():
             details text
         );
         """)
-        c.executescript("""
-        -- اضافه کردن ستون feature_vector به signal_outcomes
-        ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;
-        -- ایجاد جدول price_history
-        CREATE TABLE IF NOT EXISTS price_history(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            price REAL NOT NULL,
-            captured_at TEXT NOT NULL,
-            timeframe TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
-""")
 
-# ============================================================
-# SUPABASE STORAGE
-# ============================================================
+        # اضافه کردن ستون feature_vector به صورت شرطی
+        c.execute("PRAGMA table_info(signal_outcomes)")
+        columns = [row[1] for row in c.fetchall()]
+        if "feature_vector" not in columns:
+            c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
+            print("✅ ستون feature_vector به signal_outcomes اضافه شد.")
 
-class SupabaseStore:
+        # ایجاد جدول price_history به صورت شرطی
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS price_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                captured_at TEXT NOT NULL,
+                timeframe TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
+        """)
     def __init__(self):
         self.enabled = bool(SUPABASE_URL and SUPABASE_KEY)
         self.headers = {
@@ -3300,6 +3316,7 @@ def risk_quality_score(r, rr=None):
 
 def apply_decision_engine(results, btc_regime, breadth):
     global _LAST_BACKTEST_OK
+    global _LAST_BACKTEST_OK
     for r in results:
         raw = r.get("action", "NO TRADE")
         rr = decision_rr(r)
@@ -3362,6 +3379,11 @@ def apply_decision_engine(results, btc_regime, breadth):
                 if state == "SELL CONFIRMATION":
                     state = "BEARISH WATCH"
                     reasons.append("Short crowded (negative funding rate)")
+
+            # FIX: backtest gate blocks executable signals
+            if not _LAST_BACKTEST_OK and state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+                state = "BULLISH WATCH" if direction == "LONG" else "BEARISH WATCH"
+                reasons.append("Backtest gate failed — execution frozen, watch-only")
 
             # FIX: backtest gate blocks executable signals
             if not _LAST_BACKTEST_OK and state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
@@ -3510,6 +3532,7 @@ def update_weight(feature, factor, reason, evidence):
         c.execute("insert into model_weights(feature,weight,baseline_weight,samples,wins,losses,updated_at,reason) values(?,?,?,?,?,?,?,?) on conflict(feature) do update set weight=excluded.weight,samples=excluded.samples,wins=excluded.wins,losses=excluded.losses,updated_at=excluded.updated_at,reason=excluded.reason",
                   (feature,new,DEFAULT_WEIGHTS[feature],evidence.get("samples",0),evidence.get("wins",0),evidence.get("losses",0),payload["updated_at"],reason))
     append_changelog(feature,old,new,reason,evidence)
+
 
 
 def self_diagnostic():
@@ -3962,6 +3985,7 @@ def store_signal(result):
         "confidence_breakdown": result.get("score_components", {}),
         "model_version": VERSION,
     }
+    row["feature_vector"] = safe_json(result.get("score_components", {}))
     row["feature_vector"] = safe_json(result.get("score_components", {}))
     STORE.insert("atlas_signals", row)
     init_sqlite()
@@ -5316,6 +5340,9 @@ _LAST_DYNAMIC30 = []
 
 _LAST_BACKTEST_OK = True
 _LAST_BACKTEST_DETAILS = {}
+
+_LAST_BACKTEST_OK = True
+_LAST_BACKTEST_DETAILS = {}
 # FIX: previously the mandatory backtest gate only froze self-learning (weight
 # updates) when it failed — it never actually restricted which signals could be
 # sent as live BUY/SELL. A gate that doesn't gate the thing users act on isn't
@@ -5328,6 +5355,7 @@ _LAST_BACKTEST_DETAILS = {}
 
 def report():
     global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
+    global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
     init_sqlite()
     evaluate_open_outcomes()
     universe, top10, dynamic30 = build_universe()
@@ -5335,6 +5363,7 @@ def report():
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
     backtest_ok, bt = mandatory_backtest_gate(universe)
+    _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
@@ -5386,6 +5415,80 @@ def _conditional_trade_plan(result):
             if result.get(k) is not None}
 
 # ============================================================
+
+# ============================================================
+# NEW FUNCTIONS FOR PRICE HISTORY (v11.5)
+# ============================================================
+
+def _save_price_history(symbol, price, timeframe, captured_at):
+    if not symbol or price is None:
+        return
+    row = {"symbol": symbol.upper(), "price": price, "captured_at": captured_at, "timeframe": timeframe}
+    STORE.insert("price_history", row)
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            con.execute(
+                "INSERT INTO price_history (symbol, price, captured_at, timeframe) VALUES (?,?,?,?)",
+                (symbol.upper(), price, captured_at, timeframe)
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Price history save error: {e}")
+
+def _get_historical_price(symbol, timeframe_hours, captured_at):
+    tolerance_hours = 1 if timeframe_hours <= 24 else 6
+    try:
+        rows = STORE.select(
+            "price_history",
+            {
+                "select": "price,captured_at",
+                "symbol": f"eq.{symbol.upper()}",
+                "order": "captured_at.desc",
+                "limit": "10"
+            }
+        )
+        if rows:
+            target = captured_at - timedelta(hours=timeframe_hours)
+            for r in rows:
+                try:
+                    ts = datetime.fromisoformat(r["captured_at"].replace("Z", "+00:00"))
+                    diff = abs((ts - target).total_seconds() / 3600)
+                    if diff <= tolerance_hours:
+                        return f(r["price"]), ts
+                except:
+                    continue
+    except:
+        pass
+    try:
+        con = sqlite3.connect(DB_FILE, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT price, captured_at FROM price_history WHERE symbol = ? ORDER BY captured_at DESC LIMIT 10",
+                (symbol.upper(),)
+            ).fetchall()
+            target = captured_at - timedelta(hours=timeframe_hours)
+            for r in rows:
+                ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
+                diff = abs((ts - target).total_seconds() / 3600)
+                if diff <= tolerance_hours:
+                    return f(r["price"]), ts
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ Historical price error: {e}")
+    return None, None
+
+def _compute_sharpe(pnls, period=20):
+    if len(pnls) < period:
+        return None
+    recent = pnls[-period:]
+    avg = safe_mean(recent)
+    std = (sum((x - avg) ** 2 for x in recent) / len(recent)) ** 0.5 if len(recent) > 1 else 0
+    return avg / std if std > 0 else 0
 
 # ============================================================
 # NEW FUNCTIONS FOR PRICE HISTORY (v11.5)
@@ -5620,6 +5723,7 @@ def _snapshot_direction(current, previous):
 
 
 
+
 def _get_snapshot_arrow(price, previous_prices, change24=None):
     if change24 is not None:
         if abs(change24) < SNAPSHOT_24H_THRESHOLD_PCT:
@@ -5674,6 +5778,7 @@ def _save_snapshot_prices(results, captured_at):
                     print(f"⚠️ Snapshot save error (SQLite): {e}")
     
     print(f"📊 Saved {saved_count} prices to Supabase (and fallback)")
+
 
 
 
@@ -5777,6 +5882,7 @@ def _v11_num(v, default=None):
 
 def _v11_clamp(v, lo=0.0, hi=100.0):
     return max(lo, min(hi, float(v)))
+
 
 
 def v11_portfolio_diagnostics(results):
@@ -6458,6 +6564,9 @@ def _i_opportunity(r):
     return round(max(0,min(100,score*0.72 + setup_bonus + rr_bonus)),1)
 
 def v11_apply_intelligence(r):
+    r["decision_confidence"] = r.get("confidence")
+    r["decision_regime_trend"] = r.get("regime_trend")
+    r["decision_regime_volatility"] = r.get("regime_volatility")
     r["decision_confidence"] = r.get("confidence")
     r["decision_regime_trend"] = r.get("regime_trend")
     r["decision_regime_volatility"] = r.get("regime_volatility")
