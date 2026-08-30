@@ -967,7 +967,7 @@ def init_sqlite():
             c.execute("ALTER TABLE signal_outcomes ADD COLUMN feature_vector text;")
 
         # ایجاد جدول price_history اگر وجود نداشته باشد
-        c.execute("""
+       c.execute("""
             CREATE TABLE IF NOT EXISTS price_history(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -977,7 +977,6 @@ def init_sqlite():
             );
             CREATE INDEX IF NOT EXISTS idx_price_history_symbol_timeframe ON price_history(symbol, timeframe, captured_at DESC);
         """)
-
 
 # ============================================================
 # SUPABASE STORAGE
