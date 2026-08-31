@@ -123,7 +123,54 @@ import ccxt
 # CONFIG
 # ============================================================
 
-VERSION = "ATLAS v11.5 ARCHITECTURE REDESIGN"
+# ------------------------------------------------------------
+# v11.6 CHANGELOG (backtest engine redesign)
+# ------------------------------------------------------------
+# 13. backtest_coin() used to book a hardcoded -1.5% / +3.0% equity change
+#     on every SL/TP hit, regardless of the actual ATR-to-price ratio,
+#     position sizing, fees, or slippage — i.e. it silently assumed a fixed
+#     1.5%-of-equity risk with zero trading costs. The new engine
+#     (_run_backtest_window) derives the real R-multiple per trade, applies
+#     RISK_PER_TRADE_PCT for position sizing, and subtracts round-trip fees
+#     (ATLAS_BACKTEST_FEE_PCT) and entry/exit slippage
+#     (ATLAS_BACKTEST_SLIPPAGE_PCT).
+# 14. Each trade now records MAE, MFE, holding time (bars), and exit reason
+#     (TP/SL/TIMEOUT) instead of only a win/loss flag — previously a trade
+#     that hit neither SL nor TP within the horizon was silently dropped
+#     from the sample entirely.
+# 15. Added Expectancy (R), Net Return, Sharpe, and Sortino to the
+#     performance stats alongside the existing Win Rate / Profit Factor /
+#     Max Drawdown — so a misleadingly high win rate on a net-losing
+#     strategy is now visible.
+# 16. Added walk_forward_backtest(): splits history into sequential
+#     Train/Validate/Test windows (120/30/30 days by default) and runs the
+#     same fixed rule on each independently, flagging when the out-of-sample
+#     test period diverges sharply from train (possible overfit to one
+#     window). This runs as a diagnostic on one representative coin per
+#     gate check and is logged to the changelog — it does not (yet) change
+#     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
+# ============================================================
+
+# ------------------------------------------------------------
+# v11.6.1 CHANGELOG (hotfix, from a live GitHub Actions run)
+# ------------------------------------------------------------
+# 17. "no such table: snapshot_prices" / "no such table: snapshot_price_history"
+#     on every SNAPSHOT-only run: init_sqlite() was only ever called from
+#     report() (the ANALYSIS path). On a snapshot-only scheduled run (no
+#     analysis this cycle) and on GitHub Actions' ephemeral filesystem, the
+#     SQLite file had no tables yet by the time _snapshot_previous_prices(),
+#     _save_snapshot_prices(), and _save_snapshot_history() tried to use it —
+#     this is a PRE-EXISTING bug (it affected snapshot_prices before this
+#     redesign pass too, just more quietly). All three functions now call
+#     init_sqlite() defensively themselves (cheap — CREATE TABLE IF NOT
+#     EXISTS) instead of depending on some earlier caller having done it.
+# NOTE: PNG image table and CSV exports are intentionally absent from
+#     SNAPSHOT-only runs — they're only generated on ANALYSIS runs. This is
+#     the existing by-design split (see get_run_mode/_automatic_run_plan),
+#     not something this hotfix changed.
+# ============================================================
+
+VERSION = "ATLAS v11.6.1 SNAPSHOT HOTFIX"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -288,32 +335,6 @@ def get_engine_mode():
     return mode
 
 # ============================================================
-# SCHEDULER - با پشتیبانی از ATLAS_SCHEDULED_CADENCE
-# ============================================================
-def _automatic_run_plan():
-    """برنامه‌ریزی اجرا بر اساس حالت و منبع زمان‌بندی"""
-    run_mode = os.environ.get("ATLAS_RUN_MODE", "AUTO").upper()
-    cadence = os.environ.get("ATLAS_SCHEDULED_CADENCE", "").lower()
-
-    # ===== GitHub Actions owns the schedule =====
-    if cadence == "workflow":
-        if run_mode == "ANALYSIS":
-            return {"analysis": True, "snapshot": False}
-        if run_mode == "SNAPSHOT":
-            return {"analysis": False, "snapshot": True}
-        if run_mode == "BOTH":
-            return {"analysis": True, "snapshot": True}
-        # Fallback: if run_mode is unrecognized, default to BOTH
-        return {"analysis": True, "snapshot": True}
-
-    # ===== Legacy / manual AUTO mode (internal scheduler) =====
-    now = now_tehran()
-    return {
-        "analysis": now.hour % 4 == 0,
-        "snapshot": now.hour % 3 == 0,
-    }
-
-# ============================================================
 # MARKET SESSIONS
 # ============================================================
 
@@ -411,130 +432,12 @@ COINGECKO_IDS = {
 }
 
 # ============================================================
-# VOICE SUMMARY & OUTPUT - نسخه کامل با اخبار و سیگنال‌ها
+# VOICE SUMMARY & OUTPUT
 # ============================================================
-
-def generate_voice_summary(results, news=None, btc_regime=None):
-    """تولید خلاصه صوتی کامل از نتایج با اخبار و سیگنال‌ها"""
-    if not results:
-        return "هیچ داده‌ای برای گزارش صوتی موجود نیست."
-    
-    print(f"📝 generate_voice_summary: processing {len(results)} items")
-    
-    session, session_label, session_multiplier = get_current_session()
-    
-    up_count = 0
-    down_count = 0
-    stable_count = 0
-    changes = []
-    buy_signals = []
-    sell_signals = []
-    watch_signals = []
-    
-    for r in results:
-        price = f(r.get("price"))
-        change = f(r.get("change")) or f(r.get("change24"))
-        symbol = r.get("coin", "")
-        action = str(r.get("action") or "").upper()
-        confidence = r.get("confidence", 0)
-        
-        if price:
-            if change is not None:
-                changes.append((symbol, change))
-                if change > 0.5:
-                    up_count += 1
-                elif change < -0.5:
-                    down_count += 1
-                else:
-                    stable_count += 1
-        
-        if action in ("BUY CONFIRMATION", "BUY"):
-            buy_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("SELL CONFIRMATION", "SELL"):
-            sell_signals.append((symbol, confidence, r.get("rr", 0)))
-        elif action in ("BULLISH WATCH", "BEARISH WATCH"):
-            watch_signals.append((symbol, action, confidence))
-    
-    print(f"📊 Voice stats: up={up_count}, down={down_count}, stable={stable_count}")
-    print(f"📊 Signals: BUY={len(buy_signals)}, SELL={len(sell_signals)}, WATCH={len(watch_signals)}")
-    
-    lines = [
-        "به گزارش صوتی اطلس خوش آمدید.",
-        f"زمان: {now_tehran().strftime('%H:%M')} - سشن {session_label}.",
-    ]
-    
-    if btc_regime:
-        regime = btc_regime.get("regime", "UNKNOWN")
-        if regime == "RISK_ON":
-            lines.append("بازار در حالت ریسک‌پذیر قرار دارد و تمایل به صعود دارد.")
-        elif regime == "RISK_OFF":
-            lines.append("بازار در حالت ریسک‌گریز قرار دارد و احتیاط بیشتری نیاز است.")
-        else:
-            lines.append("بازار در حالت خنثی قرار دارد.")
-    
-    if up_count > 0:
-        lines.append(f"{up_count} ارز صعودی هستند.")
-    if down_count > 0:
-        lines.append(f"{down_count} ارز نزولی هستند.")
-    if stable_count > 0:
-        lines.append(f"{stable_count} ارز بدون تغییر قابل توجه هستند.")
-    
-    if changes:
-        best = max(changes, key=lambda x: x[1])
-        worst = min(changes, key=lambda x: x[1])
-        if best[1] > 0:
-            lines.append(f"بهترین عملکرد: {best[0]} با رشد {best[1]:.2f} درصد.")
-        if worst[1] < 0:
-            lines.append(f"ضعیف‌ترین عملکرد: {worst[0]} با کاهش {abs(worst[1]):.2f} درصد.")
-    
-    if buy_signals:
-        buy_text = "سیگنال خرید برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in buy_signals[:3]])
-        lines.append(buy_text)
-    
-    if sell_signals:
-        sell_text = "سیگنال فروش برای: " + "، ".join([f"{s[0]} با اطمینان {s[1]:.0f} درصد" for s in sell_signals[:3]])
-        lines.append(sell_text)
-    
-    if watch_signals:
-        watch_text = "در انتظار تأیید برای: " + "، ".join([f"{s[0]}" for s in watch_signals[:3]])
-        lines.append(watch_text)
-    
-    if news:
-        bias = news.get("bias", "")
-        impact = news.get("impact", "")
-        if bias == "POSITIVE":
-            lines.append("اخبار بازار عمدتاً مثبت است.")
-        elif bias == "NEGATIVE":
-            lines.append("اخبار بازار عمدتاً منفی است.")
-        elif bias == "MIXED/LIMITED":
-            lines.append("اخبار بازار مختلط است.")
-        
-        if impact == "HIGH":
-            lines.append("اخبار با تأثیر بالا - احتیاط بیشتری نیاز است.")
-        
-        items = news.get("items", [])[:3]
-        if items:
-            headlines = [item.get("title", "")[:50] for item in items if item.get("title")]
-            if headlines:
-                lines.append("خبرهای مهم: " + "، ".join(headlines))
-    
-    usdt = fetch_usdt_toman_public()
-    if usdt:
-        lines.append(f"نرخ تتر: {usdt:,.0f} تومان.")
-    
-    if buy_signals:
-        lines.append("توصیه: با توجه به سیگنال‌های خرید، می‌توانید ورودهای کنترل‌شده داشته باشید.")
-    elif watch_signals:
-        lines.append("توصیه: در حال حاضر در جایگاه ناظر باشید و منتظر تأیید سیگنال‌ها بمانید.")
-    else:
-        lines.append("توصیه: فعلاً در جایگاه ناظر باشید و منتظر شکل‌گیری سیگنال معتبر بمانید.")
-    
-    lines.append("این پیام به صورت خودکار هر ۴ ساعت بروزرسانی می‌شود.")
-    
-    result = " ".join(lines)
-    print(f"📝 Voice text length: {len(result)} characters")
-    return result
-
+# NOTE: an earlier generate_voice_summary (the "خلاصه صوتی کامل" version working
+# off raw action/confidence fields) used to live here. It was silently shadowed by
+# the later, intel-engine-aware generate_voice_summary defined further below and
+# never ran. Removed to avoid confusion.
 
 def generate_voice_summary_from_snapshot(results):
     """تولید خلاصه صوتی از داده‌های اسنپ‌شات"""
@@ -1066,6 +969,12 @@ def init_sqlite():
             details text
         );
         """)
+        # Migration for DBs created before signal_score was added to
+        # signal_outcomes (needed for calibration — see _win_probability_for_score).
+        try:
+            c.execute("alter table signal_outcomes add column signal_score real")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 # ============================================================
@@ -4741,6 +4650,13 @@ def _csv_safe_plan(r):
         return None
     return entry, sl, tp1, tp2
 
+# NOTE: an earlier generate_csv_report (built around the older CSV_COLUMNS schema)
+# used to live here. It was silently shadowed by the later, more complete
+# generate_csv_report defined further below (which includes the intel-engine
+# columns: OpportunityScore, StructureScore, SetupType, etc.) and never ran.
+# Removed to avoid confusion — see the live version further down for the real
+# implementation and _new_csv_columns() for the actual exported schema.
+
 def _telegram_send_document(chat_id, content, filename, caption=None):
     """Send a UTF-8 CSV as a real Telegram document using stdlib only."""
     import uuid
@@ -5411,13 +5327,13 @@ def atlas_engine_mode():
     return get_engine_mode()
 
 
-def build_two_engine_reports(results, top10, dynamic30, macro, news, market_info, unavailable=0, btc_regime=None, breadth=None):
-    market=build_report(results,top10,dynamic30,macro,news,market_info,unavailable,btc_regime,breadth)
-    mode=get_engine_mode()
-    if mode=="MARKET": return [market]
-    personal=build_personal_report(results,macro,news,market_info,btc_regime,breadth)
-    if mode=="PERSONAL": return [personal]
-    return [market,personal]
+# NOTE: an earlier build_two_engine_reports (the one that called build_report /
+# build_personal_report directly) used to live here. It was silently shadowed by
+# the later v11.3 intel-style build_two_engine_reports defined further below, so it
+# never ran — Python keeps only the last definition of a name. It has been removed
+# to avoid confusion. build_report/build_personal_report are still computed inside
+# report() (see the 'text' variable) but that text is not currently sent anywhere;
+# see the changelog note near main() for details.
 
 
 # MARKET INTELLIGENCE — GLOBAL / SENTIMENT / DOMINANCE / MOVERS
@@ -5972,6 +5888,14 @@ def fetch_snapshot_results():
 
 def _snapshot_previous_prices():
     """دریافت قیمت‌های قبلی از Supabase (با Fallback به SQLite)"""
+    # FIX: this run only reproduces the pre-existing "no such table" bug —
+    # SNAPSHOT-only runs never called init_sqlite() before touching SQLite
+    # (only ANALYSIS runs did, via report()). On GitHub Actions' ephemeral
+    # filesystem, a snapshot-only run therefore always started from zero
+    # tables. init_sqlite() is idempotent (CREATE TABLE IF NOT EXISTS), so
+    # calling it here on every use is cheap and makes this work regardless
+    # of which run mode calls it first.
+    init_sqlite()
     # اولویت ۱: خواندن از Supabase
     rows = STORE.select("snapshot_prices", {"select": "symbol,price"})
     if rows and isinstance(rows, list) and len(rows) > 0:
@@ -6026,6 +5950,7 @@ def _get_snapshot_arrow(price, previous_price, change24=None):
 
 def _save_snapshot_prices(results, captured_at):
     """ذخیره آخرین قیمت‌ها در Supabase (با Fallback به SQLite) — فقط جدیدترین مقدار."""
+    init_sqlite()  # FIX: same missing-init issue as _snapshot_previous_prices()
     saved_count = 0
     for r in results or []:
         sym = str(r.get("coin") or "").upper()
@@ -6079,6 +6004,7 @@ def _save_snapshot_history(results, captured_at):
         create index if not exists idx_snapshot_history_symbol_time
             on snapshot_price_history(symbol, captured_at);
     """
+    init_sqlite()  # FIX: same missing-init issue as _snapshot_previous_prices()
     saved_count = 0
     for r in results or []:
         sym = str(r.get("coin") or "").upper()
@@ -6675,6 +6601,7 @@ def _get_status_emoji(r):
         return "⚪ WAIT"
 
 
+
 # ============================================================
 # ATLAS v11.4 — INTELLIGENCE / DECISION REDESIGN
 # ============================================================
@@ -6905,6 +6832,11 @@ def why_not_trade(r):
     if not reasons:
         reasons.append("No multi-factor confirmation yet")
     return reasons
+
+# NOTE: _i_regime() used to live here — a second, independent regime computation
+# that collided with RegimeEngine() (see Stage 2 in analyze_coin). Removed; the
+# canonical regime dict is now read from r["regime"]["engine"] instead. See
+# v11_apply_intelligence() for where it's consumed.
 
 def _i_trigger(r):
     p = _i_num(r.get("price"), None)
@@ -7534,24 +7466,27 @@ def main():
     try:
         print(f"\n{'='*50}")
         print(f"🚀 {VERSION}")
-        print(f"📅 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} تهران")
+        print(f"📅 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran")
         print(f"{'='*50}\n")
         
         telegram_preflight()
         run_mode = get_run_mode()
-        cadence = os.environ.get("ATLAS_SCHEDULED_CADENCE", "").lower()
-
         print(f"📌 Run Mode: {run_mode}")
-        print(f"📌 Scheduler: {cadence or 'internal'}")
-        
+        print(f"📌 Engine Mode: {get_engine_mode()}")
         print(f"📌 Voice Enabled: {ENABLE_VOICE_REPORT}")
         print(f"📌 Auto Voice: {AUTO_SEND_VOICE}")
         print(f"📌 Image Table: {ENABLE_IMAGE_TABLE}")
         print()
         
-        # ===== Use the unified plan function, which respects SCHEDULED_CADENCE =====
-        plan = _automatic_run_plan()
-        do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
+        if run_mode == "AUTO":
+            plan = _automatic_run_plan()
+            do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
+        elif run_mode == "SNAPSHOT":
+            do_analysis, do_snapshot = False, True
+        elif run_mode == "ANALYSIS":
+            do_analysis, do_snapshot = True, False
+        else:
+            do_analysis, do_snapshot = True, True
         
         print(f"📋 Plan: Analysis={do_analysis}, Snapshot={do_snapshot}")
         print()
