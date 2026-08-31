@@ -151,26 +151,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-# ------------------------------------------------------------
-# v11.6.1 CHANGELOG (hotfix, from a live GitHub Actions run)
-# ------------------------------------------------------------
-# 17. "no such table: snapshot_prices" / "no such table: snapshot_price_history"
-#     on every SNAPSHOT-only run: init_sqlite() was only ever called from
-#     report() (the ANALYSIS path). On a snapshot-only scheduled run (no
-#     analysis this cycle) and on GitHub Actions' ephemeral filesystem, the
-#     SQLite file had no tables yet by the time _snapshot_previous_prices(),
-#     _save_snapshot_prices(), and _save_snapshot_history() tried to use it —
-#     this is a PRE-EXISTING bug (it affected snapshot_prices before this
-#     redesign pass too, just more quietly). All three functions now call
-#     init_sqlite() defensively themselves (cheap — CREATE TABLE IF NOT
-#     EXISTS) instead of depending on some earlier caller having done it.
-# NOTE: PNG image table and CSV exports are intentionally absent from
-#     SNAPSHOT-only runs — they're only generated on ANALYSIS runs. This is
-#     the existing by-design split (see get_run_mode/_automatic_run_plan),
-#     not something this hotfix changed.
-# ============================================================
-
-VERSION = "ATLAS v11.6.1 SNAPSHOT HOTFIX"
+VERSION = "ATLAS v11.5 WORKFLOW + SUPABASE REDESIGN"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -1199,11 +1180,64 @@ def multi_source_validation(symbol, exchange_price=None):
     }
 
 # ============================================================
-# CCXT
+# CCXT — FAULT-TOLERANT EXCHANGE LAYER
+# ============================================================
+# Provider failures are isolated. A missing CCXT adapter, unsupported venue,
+# geo-block (403), empty market catalogue, or transient network error must
+# never terminate the ATLAS analysis pipeline.
+#
+# Canonical CCXT IDs are used here. In particular, Gate.io is `gate`, not
+# `gateio`. KCEX is optional because the installed CCXT build may not expose
+# a KCEX adapter. Bybit may be unavailable from a GitHub runner because of
+# regional/CloudFront restrictions; ATLAS records that state and continues.
 # ============================================================
 
+EXCHANGE_SPECS = (
+    ("kcex", "kcex"),
+    ("lbank", "lbank"),
+    ("xt", "xt"),
+    ("okx", "okx"),
+    ("bybit", "bybit"),
+    ("kucoin", "kucoin"),
+    ("gateio", "gate"),
+    ("bitget", "bitget"),
+    ("mexc", "mexc"),
+    ("kraken", "kraken"),
+)
+
+# Public-facing names retained for reports/backward compatibility.
+EXCHANGE_IDS = tuple(name for name, _ccxt_id in EXCHANGE_SPECS)
+EXCHANGE_CCXT_IDS = {name: ccxt_id for name, ccxt_id in EXCHANGE_SPECS}
+EXCHANGE_STATUS = {}
+
+def _classify_exchange_error(exc):
+    msg = str(exc or "").lower()
+    if "no attribute" in msg or "not supported" in msg or "unsupported" in msg:
+        return "UNSUPPORTED"
+    if "403" in msg or "forbidden" in msg or "cloudfront" in msg or "configured to block access" in msg:
+        return "GEO_BLOCKED"
+    if "429" in msg or "rate limit" in msg:
+        return "RATE_LIMITED"
+    if "timeout" in msg or "timed out" in msg:
+        return "TIMEOUT"
+    return "ERROR"
+
+def _record_exchange_status(name, status, error=None, ccxt_id=None, markets=0):
+    EXCHANGE_STATUS[name] = {
+        "name": name.upper(),
+        "ccxt_id": ccxt_id or EXCHANGE_CCXT_IDS.get(name, name),
+        "status": status,
+        "markets": int(markets or 0),
+        "error": str(error)[:500] if error else None,
+        "updated_at": now_utc().isoformat(),
+    }
+
 def make_exchange(exchange_id):
-    cls = getattr(ccxt, exchange_id)
+    # Accept either our public alias (gateio) or a native CCXT id (gate).
+    native_id = EXCHANGE_CCXT_IDS.get(exchange_id, exchange_id)
+    cls = getattr(ccxt, native_id, None)
+    if cls is None:
+        raise RuntimeError(f"{exchange_id}: CCXT adapter '{native_id}' is not supported by installed ccxt")
     return cls({
         "enableRateLimit": True,
         "timeout": 15000,
@@ -1214,20 +1248,42 @@ def init_exchanges():
     global EX, MARKETS
     EX = {}
     MARKETS = {}
-    for eid in ("kcex", "lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
+    EXCHANGE_STATUS.clear()
+
+    for public_id, native_id in EXCHANGE_SPECS:
         try:
-            ex = make_exchange(eid)
+            ex = make_exchange(public_id)
             markets = ex.load_markets()
             if not markets:
-                raise RuntimeError(f"{eid}: empty market catalog")
-            EX[eid] = ex
-            MARKETS[eid] = markets
-            print(f"✅ {eid} initialized with {len(markets)} markets")
+                raise RuntimeError(f"{public_id}: empty market catalog")
+
+            EX[public_id] = ex
+            MARKETS[public_id] = markets
+            _record_exchange_status(public_id, "OK", ccxt_id=native_id, markets=len(markets))
+            print(f"✅ {public_id} initialized with {len(markets)} markets [ccxt={native_id}]")
+
         except Exception as e:
-            EX.pop(eid, None)
-            MARKETS.pop(eid, None)
-            append_changelog("EXCHANGE_INIT", None, None, f"{eid}: {e}")
-            print(f"❌ {eid} failed: {e}")
+            EX.pop(public_id, None)
+            MARKETS.pop(public_id, None)
+            kind = _classify_exchange_error(e)
+            _record_exchange_status(public_id, kind, e, native_id)
+
+            # These are expected provider-level failures and must be non-fatal.
+            if kind == "UNSUPPORTED":
+                print(f"⚠️ {public_id} skipped: CCXT adapter '{native_id}' unavailable")
+            elif kind == "GEO_BLOCKED":
+                print(f"⚠️ {public_id} unavailable: provider/geographic access restriction; continuing with other sources")
+            else:
+                print(f"⚠️ {public_id} unavailable ({kind}): {e}")
+
+            try:
+                append_changelog(
+                    "EXCHANGE_INIT", None, None,
+                    f"{public_id}: {kind}: {e}",
+                    {"ccxt_id": native_id, "status": kind},
+                )
+            except Exception:
+                pass
 
 EX = {}
 MARKETS = {}
@@ -1237,6 +1293,21 @@ def ensure_exchanges(force=False):
         return True
     init_exchanges()
     return bool(EX)
+
+def exchange_health_report():
+    """Return a serializable health snapshot for diagnostics/Telegram/CSV."""
+    ok = [x for x in EXCHANGE_STATUS.values() if x.get("status") == "OK"]
+    unavailable = [x for x in EXCHANGE_STATUS.values() if x.get("status") != "OK"]
+    return {
+        "total": len(EXCHANGE_STATUS),
+        "healthy": len(ok),
+        "unavailable": len(unavailable),
+        "healthy_exchanges": [x["name"] for x in ok],
+        "unavailable_exchanges": [
+            {"name": x["name"], "status": x["status"], "error": x.get("error")}
+            for x in unavailable
+        ],
+    }
 
 def coingecko_headers():
     if COINGECKO_API_KEY:
@@ -1347,12 +1418,27 @@ def candle_event(coin, timeframe, rows):
 
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
-    for eid in ("kcex", "lbank", "xt", "okx", "bybit", "kucoin", "gateio", "bitget", "mexc", "kraken"):
-        try:
-            return exchange_ohlcv(eid, coin, timeframe, limit), eid.upper()
-        except Exception:
+    errors = []
+    # Prefer currently healthy providers; unavailable providers never get
+    # retried in the same pass because that only adds latency/noise.
+    for eid in EXCHANGE_IDS:
+        if eid not in EX:
             continue
-    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin}")
+        try:
+            rows = exchange_ohlcv(eid, coin, timeframe, limit)
+            if rows:
+                return rows, eid.upper()
+        except Exception as e:
+            kind = _classify_exchange_error(e)
+            errors.append(f"{eid}:{kind}")
+            # A provider may become unhealthy after initialization. Record it
+            # but keep searching other venues.
+            _record_exchange_status(
+                eid, kind, e, EXCHANGE_CCXT_IDS.get(eid), len(MARKETS.get(eid, {}))
+            )
+            continue
+    detail = ", ".join(errors[-8:])
+    raise RuntimeError(f"{timeframe} DATA UNAVAILABLE: {coin} | providers tried={detail or 'none'}")
 
 
 # ============================================================
@@ -5888,14 +5974,6 @@ def fetch_snapshot_results():
 
 def _snapshot_previous_prices():
     """دریافت قیمت‌های قبلی از Supabase (با Fallback به SQLite)"""
-    # FIX: this run only reproduces the pre-existing "no such table" bug —
-    # SNAPSHOT-only runs never called init_sqlite() before touching SQLite
-    # (only ANALYSIS runs did, via report()). On GitHub Actions' ephemeral
-    # filesystem, a snapshot-only run therefore always started from zero
-    # tables. init_sqlite() is idempotent (CREATE TABLE IF NOT EXISTS), so
-    # calling it here on every use is cheap and makes this work regardless
-    # of which run mode calls it first.
-    init_sqlite()
     # اولویت ۱: خواندن از Supabase
     rows = STORE.select("snapshot_prices", {"select": "symbol,price"})
     if rows and isinstance(rows, list) and len(rows) > 0:
@@ -5950,7 +6028,6 @@ def _get_snapshot_arrow(price, previous_price, change24=None):
 
 def _save_snapshot_prices(results, captured_at):
     """ذخیره آخرین قیمت‌ها در Supabase (با Fallback به SQLite) — فقط جدیدترین مقدار."""
-    init_sqlite()  # FIX: same missing-init issue as _snapshot_previous_prices()
     saved_count = 0
     for r in results or []:
         sym = str(r.get("coin") or "").upper()
@@ -6004,7 +6081,6 @@ def _save_snapshot_history(results, captured_at):
         create index if not exists idx_snapshot_history_symbol_time
             on snapshot_price_history(symbol, captured_at);
     """
-    init_sqlite()  # FIX: same missing-init issue as _snapshot_previous_prices()
     saved_count = 0
     for r in results or []:
         sym = str(r.get("coin") or "").upper()
@@ -6152,12 +6228,53 @@ def send_price_snapshot(results):
     return sent, errors
 
 def _automatic_run_plan(now=None):
-    """Unified scheduler: analysis every 4H, snapshot every 3H, both at overlaps."""
+    """Unified scheduler.
+
+    When GitHub Actions owns the schedule (ATLAS_SCHEDULED_CADENCE=workflow),
+    the workflow event itself selects ANALYSIS vs SNAPSHOT.  This avoids the
+    fragile hour-modulo gate that can miss a run when a GitHub runner starts
+    a few minutes late.
+    """
+    cadence = os.environ.get("ATLAS_SCHEDULED_CADENCE", "").strip().lower()
+    mode = os.environ.get("ATLAS_RUN_MODE", "AUTO").strip().upper()
+
+    if cadence == "workflow":
+        # Explicit mode remains useful for workflow_dispatch.
+        if mode == "ANALYSIS":
+            return {"analysis": True, "snapshot": False}
+        if mode == "SNAPSHOT":
+            return {"analysis": False, "snapshot": True}
+        if mode == "BOTH":
+            return {"analysis": True, "snapshot": True}
+
+        # Scheduled GitHub event: recover the exact cron expression.
+        schedule = os.environ.get("ATLAS_SCHEDULE_CRON", "").strip()
+        if not schedule:
+            event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+            if event_path:
+                try:
+                    with open(event_path, "r", encoding="utf-8") as fh:
+                        schedule = str((json.load(fh) or {}).get("schedule") or "").strip()
+                except Exception:
+                    schedule = ""
+
+        if schedule:
+            if "5 */4 * * *" in schedule:
+                return {"analysis": True, "snapshot": False}
+            if "20 */3 * * *" in schedule:
+                return {"analysis": False, "snapshot": True}
+
+        # Safe fallback for an unknown workflow schedule: do not run an
+        # unintended analysis. The workflow can explicitly select BOTH.
+        return {"analysis": False, "snapshot": False}
+
+    # Legacy/manual AUTO scheduling remains available.
     dt = now or now_tehran()
     return {
         "analysis": dt.hour % 4 == 0,
         "snapshot": dt.hour % 3 == 0,
     }
+
 
 
 # ============================================================
@@ -7064,9 +7181,15 @@ def v11_apply_intelligence(r):
     r["setup_type"] = _i_setup(r)
     r["contradictions"] = _i_contradictions(r, bias)
     r["intel_score"] = round(_i_score(r),1)
-    # "confidence" becomes a transparent model-strength score, not probability.
-    r["confidence"] = int(round(max(0,min(100, 42 + abs(r["intel_score"]-50)*1.15))))
-    r["confidence_label"] = "MODEL STRENGTH"
+    # Preserve the confidence that actually produced the decision.  Intelligence
+    # strength is a separate field and must never overwrite decision confidence.
+    decision_conf = r.get("decision_confidence")
+    if decision_conf is not None:
+        try:
+            r["confidence"] = int(round(float(decision_conf)))
+        except (TypeError, ValueError):
+            pass
+    r["confidence_label"] = "DECISION CONFIDENCE"
     # ------------------------------------------------------------------
     # Three-way score separation (architecture review, point 1):
     #   signal_score    = raw technical evidence strength (0-100)
@@ -7472,6 +7595,7 @@ def main():
         telegram_preflight()
         run_mode = get_run_mode()
         print(f"📌 Run Mode: {run_mode}")
+        print(f"📌 Scheduler: {os.environ.get('ATLAS_SCHEDULED_CADENCE', 'internal')}")
         print(f"📌 Engine Mode: {get_engine_mode()}")
         print(f"📌 Voice Enabled: {ENABLE_VOICE_REPORT}")
         print(f"📌 Auto Voice: {AUTO_SEND_VOICE}")
