@@ -4,8 +4,9 @@
 # مسیر صحیح این فایل در ریپوی شما: .github/workflows/atlas.yml
 #
 # زمان‌بندی: هر ۶ ساعت یک بار در دقیقه ۳۰ UTC اجرا می‌شود.
-# با ATLAS_RUN_MODE=BOTH، اسکریپت همیشه تحلیل و اسنپ‌شات را
-# با هم اجرا می‌کند و گزارش کامل ارسال می‌شود.
+# با ATLAS_RUN_MODE=BOTH و ATLAS_SCHEDULED_CADENCE=workflow،
+# اسکریپت کاملاً از زمان‌بندی GitHub تبعیت می‌کند و دیگر
+# از منطق داخلی (dt.hour % 4 == 0) استفاده نمی‌کند.
 # ============================================================
 
 name: ATLAS AI Bot
@@ -50,7 +51,10 @@ jobs:
 
       - name: Run ATLAS
         env:
+          # --- حالت اجرا (تعیین‌کننده نوع تحلیل) ---
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
+          # --- منبع زمان‌بندی (غیرفعال‌سازی منطق داخلی bot) ---
+          ATLAS_SCHEDULED_CADENCE: "workflow"
           ATLAS_ENGINE: BOTH
 
           # --- Telegram ---
