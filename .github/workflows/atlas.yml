@@ -20,8 +20,8 @@ name: ATLAS AI Bot
 
 on:
   schedule:
-    # هر ساعت در دقیقه‌ی ۳۰ UTC (مطابق با ساعت‌های ۰۳:۰۰، ۰۴:۰۰، ... تهران)
-    - cron: "30 * * * *"
+    # هر نیم‌ساعت در دقیقه‌های ۰ و ۳۰ UTC
+    - cron: "0,30 * * * *"
   workflow_dispatch:
     inputs:
       run_mode:
@@ -36,8 +36,6 @@ on:
           - BOTH
 
 concurrency:
-  # اگر اجرای قبلی هنوز تمام نشده، اجرای جدید صف بایستد نه هم‌زمان اجرا شود —
-  # از رقابت روی همان ردیف‌های SQLite/Supabase جلوگیری می‌کند.
   group: atlas-bot
   cancel-in-progress: false
 
@@ -74,7 +72,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # --- APIهای اختیاری (هرکدام نبود، فقط همان منبع غیرفعال می‌شود) ---
+          # --- APIهای اختیاری ---
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
