@@ -1,21 +1,28 @@
-name: ATLAS v11.5 — Intelligence + Supabase + PNG + CSV + Voice + Workflow Scheduler
+# ============================================================
+# ATLAS AI v11.5 — GitHub Actions workflow
+# ============================================================
+# مسیر صحیح این فایل در ریپوی شما: .github/workflows/atlas.yml
+#
+# منطق زمان‌بندی: با ATLAS_RUN_MODE=BOTH، اسکریپت همیشه تحلیل و
+# اسنپ‌شات را اجرا می‌کند. برای جلوگیری از از دست رفتن پنجره‌های
+# زمانی، workflow هر ۲۰ دقیقه اجرا می‌شود.
+#
+# ⚠️ محدودیت شناخته‌شده‌ی GitHub Actions: cron در GH Actions
+# "بهترین تلاش" است، نه دقیق‌به‌دقیقه. اجرای هر ۲۰ دقیقه این
+# محدودیت را جبران می‌کند.
+# ============================================================
+
+name: ATLAS AI Bot
 
 on:
+  schedule:
+    # هر ۲۰ دقیقه یک بار (دقیقه‌های ۰، ۲۰، ۴۰ هر ساعت)
+    - cron: "*/20 * * * *"
   workflow_dispatch:
     inputs:
-      engine:
-        description: "MARKET / PERSONAL / BOTH"
-        required: false
-        default: "BOTH"
-        type: choice
-        options:
-          - MARKET
-          - PERSONAL
-          - BOTH
-
       run_mode:
-        description: "ANALYSIS / SNAPSHOT / BOTH"
-        required: false
+        description: "حالت اجرا"
+        required: true
         default: "BOTH"
         type: choice
         options:
@@ -23,400 +30,67 @@ on:
           - SNAPSHOT
           - BOTH
 
-  schedule:
-    # Main 4H analysis
-    - cron: "5 */4 * * *"
-
-    # 3H market snapshot
-    - cron: "20 */3 * * *"
-
-permissions:
-  contents: read
-
 concurrency:
-  group: atlas-v11-${{ github.ref }}
+  # اگر اجرای قبلی هنوز تمام نشده، اجرای جدید صف بایستد نه هم‌زمان اجرا شود —
+  # از رقابت روی همان ردیف‌های SQLite/Supabase جلوگیری می‌کند.
+  group: atlas-bot
   cancel-in-progress: false
 
 jobs:
-
-  atlas:
-
+  run-atlas:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 60
-
-    env:
-
-      # ============================================================
-      # ATLAS CORE
-      # ============================================================
-
-      PYTHONUNBUFFERED: "1"
-
-      ATLAS_VERSION: "11.5"
-
-      ATLAS_ENGINE: ${{ github.event.inputs.engine || 'BOTH' }}
-
-      ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
-
-      # IMPORTANT:
-      # GitHub Actions owns the scheduled cadence.
-      # bot.py must not block workflow runs with hour % 3 / hour % 4.
-      ATLAS_SCHEDULED_CADENCE: "workflow"
-
-
-      # ============================================================
-      # RISK / DECISION ENGINE
-      # ============================================================
-
-      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
-
-      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
-
-      ATLAS_TIMEFRAME: "4H"
-
-      ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
-
-      ATLAS_TRADINGVIEW_INTERVAL: "240"
-
-      RISK_PER_TRADE_PCT: "1.5"
-
-      MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
-
-      ATLAS_MIN_CONFIDENCE: "55"
-
-      ATLAS_MAX_LEVERAGE: "10"
-
-      ATLAS_MIN_EXECUTABLE_RR: "1.5"
-
-      ATLAS_MIN_WATCH_CONFIDENCE: "45"
-
-      ATLAS_MIN_VOLUME_RATIO: "0.60"
-
-
-      # ============================================================
-      # BACKTEST / CALIBRATION
-      # ============================================================
-
-      ATLAS_BACKTEST_DAYS: "180"
-
-      ATLAS_SIGNAL_HORIZON_BARS: "36"
-
-      ATLAS_BACKTEST_IMPROVEMENT: "10"
-
-      ATLAS_BACKTEST_REFRESH_HOURS: "24"
-
-      ATLAS_CANDLE_EVENT_DEDUP: "1"
-
-
-      # ============================================================
-      # LOCAL STATE
-      # ============================================================
-
-      # SQLite is LOCAL execution state/cache.
-      # Long-term ATLAS memory must be stored in Supabase.
-      ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
-
-      ATLAS_CHANGELOG: "changelog.txt"
-
-
-      # ============================================================
-      # SUPABASE — PERMANENT ATLAS MEMORY
-      # ============================================================
-
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-
-      # ============================================================
-      # TELEGRAM
-      # ============================================================
-
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-      TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
-
-
-      # ============================================================
-      # MARKET / DATA SOURCES
-      # ============================================================
-
-      COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-
-      CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
-
-      COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
-
-      CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
-
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-
-      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
-
-
-      # ============================================================
-      # TRADINGVIEW
-      # ============================================================
-
-      TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
-
-      ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
-
-      ATLAS_TRADINGVIEW_INTERVAL: "240"
-
-
-      # ============================================================
-      # EXCHANGE FALLBACK
-      # ============================================================
-
-      ATLAS_H4_FALLBACK_MIN_SCORE: ${{ vars.ATLAS_H4_FALLBACK_MIN_SCORE || '60' }}
-
-
-      # ============================================================
-      # VOICE OUTPUT
-      # ============================================================
-
-      ATLAS_ENABLE_VOICE: "1"
-
-      ATLAS_VOICE_TYPE: "female"
-
-      ATLAS_VOICE_LANGUAGE: "fa"
-
-      ATLAS_AUTO_SEND_VOICE: "1"
-
-
-      # ============================================================
-      # PNG IMAGE REPORT
-      # ============================================================
-
-      ATLAS_ENABLE_IMAGE_TABLE: "1"
-
+    timeout-minutes: 20
 
     steps:
-
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-
-      # ============================================================
-      # PYTHON
-      # ============================================================
-
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-
-      # ============================================================
-      # INSTALL DEPENDENCIES
-      # ============================================================
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
-        run: |
-          set -euo pipefail
+        run: pip install -r requirements.txt
 
-          python -m pip install --upgrade pip setuptools wheel
+      - name: Run ATLAS
+        env:
+          # override دستی (اگر از workflow_dispatch با run_mode پر شده باشد)
+          ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
+          ATLAS_ENGINE: BOTH
 
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          else
-            python -m pip install \
-              ccxt \
-              pandas \
-              numpy \
-              requests \
-              python-dotenv \
-              gTTS \
-              edge-tts \
-              matplotlib \
-              Pillow \
-              scikit-learn
-          fi
+          # --- Telegram ---
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
+          # --- Supabase ---
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-      # ============================================================
-      # VERIFY SOURCE
-      # ============================================================
+          # --- APIهای اختیاری (هرکدام نبود، فقط همان منبع غیرفعال می‌شود) ---
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-      - name: Verify source
-        run: |
-          set -euo pipefail
+          # --- خروجی‌ها ---
+          ATLAS_ENABLE_IMAGE_TABLE: "true"
+          ATLAS_ENABLE_VOICE: "true"
+          ATLAS_AUTO_SEND_VOICE: "true"
 
-          test -f bot.py
+        run: python bot.py
 
-          python -m py_compile bot.py
-
-          if [ -f smoke_atlas.py ]; then
-            python -m py_compile smoke_atlas.py
-          fi
-
-          if [ -f test_smoke.py ]; then
-            python -m py_compile test_smoke.py
-          fi
-
-
-      # ============================================================
-      # SUPABASE HEALTH CHECK
-      # ============================================================
-
-      - name: Validate Supabase configuration
-        run: |
-          set -euo pipefail
-
-          test -n "$SUPABASE_URL"
-
-          test -n "$SUPABASE_SERVICE_ROLE_KEY"
-
-          echo "✅ Supabase environment configured"
-
-
-      # ============================================================
-      # SMOKE TEST
-      # ============================================================
-
-      - name: Run ATLAS smoke test
-        run: |
-          set -euo pipefail
-
-          if [ -f smoke_atlas.py ]; then
-            python smoke_atlas.py
-          elif [ -f test_smoke.py ]; then
-            python test_smoke.py
-          else
-            echo "⚠️ No smoke test found"
-          fi
-
-
-      # ============================================================
-      # UNIT TESTS
-      # ============================================================
-
-      - name: Run ATLAS tests
-        run: |
-          set -euo pipefail
-
-          if [ -f test_v11_1.py ]; then
-            python test_v11_1.py
-          fi
-
-          if [ -d tests ]; then
-            python -m pytest tests -q
-          fi
-
-
-      # ============================================================
-      # TELEGRAM VALIDATION
-      # ============================================================
-
-      - name: Validate Telegram
-        run: |
-          set -euo pipefail
-
-          test -n "$TELEGRAM_TOKEN"
-
-          test -n "$TELEGRAM_CHAT_ID" || \
-          test -n "$TELEGRAM_GROUP_CHAT_ID"
-
-          echo "✅ Telegram configuration valid"
-
-
-      # ============================================================
-      # RUN ATLAS
-      # ============================================================
-
-      - name: Run ATLAS v11.5
-        run: |
-          set -euo pipefail
-
-          echo "🚀 Starting ATLAS AI..."
-
-          echo "ATLAS_VERSION=$ATLAS_VERSION"
-
-          echo "ATLAS_ENGINE=$ATLAS_ENGINE"
-
-          echo "ATLAS_RUN_MODE=$ATLAS_RUN_MODE"
-
-          echo "ATLAS_SCHEDULED_CADENCE=$ATLAS_SCHEDULED_CADENCE"
-
-          echo "SUPABASE configured: YES"
-
-          python bot.py
-
-
-      # ============================================================
-      # FINALIZE SQLITE
-      # ============================================================
-
-      - name: Finalize SQLite
-        if: always()
-        run: |
-          set -euo pipefail
-
-          if [ -f "$ATLAS_SQLITE_FILE" ]; then
-
-            python - <<'PY'
-          import os
-          import sqlite3
-
-          db = os.environ["ATLAS_SQLITE_FILE"]
-
-          con = sqlite3.connect(
-              db,
-              timeout=30
-          )
-
-          try:
-
-              con.execute(
-                  "PRAGMA wal_checkpoint(TRUNCATE)"
-              )
-
-              con.execute(
-                  "PRAGMA optimize"
-              )
-
-              result = con.execute(
-                  "PRAGMA integrity_check"
-              ).fetchone()
-
-              print(
-                  "SQLite integrity:",
-                  result[0] if result else "UNKNOWN"
-              )
-
-              if not result or result[0] != "ok":
-                  raise SystemExit(1)
-
-          finally:
-              con.close()
-
-          PY
-
-          fi
-
-
-      # ============================================================
-      # UPLOAD LOCAL DEBUG ARTIFACTS
-      # ============================================================
-
-      - name: Upload ATLAS artifacts
-        if: always()
+      - name: Upload run log on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-v11.5-artifacts
+          name: atlas-failure-log-${{ github.run_id }}
           path: |
-            *.csv
-            *.png
-            *.mp3
-            *.wav
-            *.sqlite3
-            changelog.txt
+            *.log
+            atlas_changelog.jsonl
           if-no-files-found: ignore
