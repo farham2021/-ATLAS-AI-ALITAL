@@ -1,57 +1,92 @@
 # ============================================================
-# ATLAS AI — requirements.txt
+# ATLAS AI v11.5 — Runtime requirements
 # ============================================================
-# این فایل مستقیماً از روی import های واقعی موجود در
-# bot_atlas_v11.5_redesign.py استخراج شده — نه یک لیست حدسی.
+# Runtime dependencies for:
+# bot_ATLAS_v11.5_fixed_from_bot6_exchange_resilient.py
 #
-# نصب:
+# Python:
+#   3.11+
+#
+# Install:
 #   pip install -r requirements.txt
 #
-# نکته درباره GitHub Actions:
-# اگر runner شما از قبل matplotlib/gTTS/edge-tts را کش نمی‌کند،
-# مطمئن شوید مرحله‌ی "pip install" در workflow دقیقاً همین فایل را
-# نصب می‌کند تا خروجی PNG (build_image_table) و صوتی (voice report)
-# بی‌صدا غیرفعال نشوند (کد به‌طور عمدی این‌ها را با try/except پوشانده
-# تا نبود کتابخانه کل اجرای ربات را خراب نکند — اما یعنی اگر نصب نشوند
-# فقط یک پیام هشدار در لاگ می‌بینید و آن خروجی ساکت حذف می‌شود).
 # ============================================================
 
-# --- صرافی‌ها / دادهٔ بازار ---
+
+# ------------------------------------------------------------
+# MARKET DATA / EXCHANGES
+# ------------------------------------------------------------
+
+# Cryptocurrency exchange API abstraction
+# Used by the multi-exchange market-data layer.
 ccxt>=4.3.0
 
-# --- گزارش تصویری (PNG جدول سیگنال‌ها) ---
+
+# ------------------------------------------------------------
+# PNG / IMAGE REPORT
+# ------------------------------------------------------------
+
+# Used by build_image_table() and PNG signal reports.
 matplotlib>=3.8.0
 
-# --- گزارش صوتی (اولویت با Edge TTS، سپس gTTS، سپس Google Translate) ---
+
+# ------------------------------------------------------------
+# VOICE REPORT
+# ------------------------------------------------------------
+
+# Primary voice engine
 edge-tts>=6.1.0
+
+# Fallback voice engine
 gTTS>=2.5.0
 
-# ------------------------------------------------------------
-# کتابخانه‌های تست و کیفیت کد (افزوده شده از فایل جدید)
-# ------------------------------------------------------------
-pytest>=7.0.0
-pytest-cov>=4.0.0
-pytest-timeout>=2.0.0
-pytest-mock>=3.10.0
-flake8>=6.0.0
-mypy>=1.0.0
 
-# ------------------------------------------------------------
-# کتابخانه‌های استاندارد پایتون که نیازی به نصب ندارند (فقط برای مستندسازی):
-# os, re, json, math, time, random, sqlite3, urllib, xml.etree,
-# traceback, hashlib, tempfile, datetime, zoneinfo, statistics,
-# csv, io, uuid, asyncio, shutil
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# نکته مهم درباره Isotonic Calibration و Backtest:
-# نسخه‌ی فعلی هر دو را با پایتون خالص (بدون numpy/pandas/scikit-learn)
-# پیاده‌سازی کرده تا هیچ وابستگی جدیدی به requirements اضافه نشود.
-# اگر می‌خواهید از scikit-learn (IsotonicRegression واقعی) و
-# numpy/pandas (برای بک‌تست/Walk-Forward سریع‌تر و دقیق‌تر) استفاده کنید،
-# خطوط زیر را از کامنت خارج کنید — اما توجه داشته باشید نصب این سه
-# روی GitHub Actions چند ثانیه به هر اجرا اضافه می‌کند:
+# ============================================================
+# IMPORTANT
+# ============================================================
+#
+# The following modules are part of Python's standard library
+# and MUST NOT be added to requirements.txt:
+#
+# os
+# re
+# json
+# math
+# time
+# random
+# sqlite3
+# urllib
+# xml
+# traceback
+# hashlib
+# tempfile
+# datetime
+# zoneinfo
+# statistics
+# csv
+# io
+# uuid
+# asyncio
+# shutil
+#
+# ============================================================
+# OPTIONAL — FUTURE ATLAS INTELLIGENCE
+# ============================================================
+#
+# The current bot does NOT require these packages.
+#
+# They should NOT be uncommented yet.
 #
 # numpy>=1.26.0
 # pandas>=2.2.0
 # scikit-learn>=1.4.0
+#
+# They can be introduced later when the following components
+# are migrated to production implementations:
+#
+# - Isotonic probability calibration
+# - Logistic-regression weight learning
+# - Walk-forward backtesting
+# - Advanced statistical analysis
+#
+# ============================================================
