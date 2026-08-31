@@ -1,4 +1,4 @@
-name: ATLAS v11.5 — Unified Intelligence + Supabase + PNG + CSV + Voice
+name: ATLAS v11.5 — Intelligence + Supabase + PNG + CSV + Voice + Workflow Scheduler
 
 on:
   workflow_dispatch:
@@ -24,10 +24,10 @@ on:
           - BOTH
 
   schedule:
-    # Analysis every 4 hours
+    # Main 4H analysis
     - cron: "5 */4 * * *"
 
-    # Snapshot every 3 hours
+    # 3H market snapshot
     - cron: "20 */3 * * *"
 
 permissions:
@@ -38,13 +38,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
   atlas:
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 60
 
     env:
+
       # ============================================================
-      # CORE
+      # ATLAS CORE
       # ============================================================
 
       PYTHONUNBUFFERED: "1"
@@ -56,15 +60,18 @@ jobs:
       ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
 
       # IMPORTANT:
-      # GitHub Actions controls scheduled execution.
-      # bot.py recognizes workflow scheduling and does not depend
-      # on local hour % 3 / hour % 4 for scheduled runs.
+      # GitHub Actions owns the scheduled cadence.
+      # bot.py must not block workflow runs with hour % 3 / hour % 4.
       ATLAS_SCHEDULED_CADENCE: "workflow"
 
 
       # ============================================================
-      # MARKET / TIMEFRAME
+      # RISK / DECISION ENGINE
       # ============================================================
+
+      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+
+      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
       ATLAS_TIMEFRAME: "4H"
 
@@ -72,28 +79,19 @@ jobs:
 
       ATLAS_TRADINGVIEW_INTERVAL: "240"
 
-      ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
-
-
-      # ============================================================
-      # DECISION / RISK
-      # ============================================================
-
       RISK_PER_TRADE_PCT: "1.5"
 
       MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
 
       ATLAS_MIN_CONFIDENCE: "55"
 
-      ATLAS_MIN_WATCH_CONFIDENCE: "45"
-
       ATLAS_MAX_LEVERAGE: "10"
 
       ATLAS_MIN_EXECUTABLE_RR: "1.5"
 
-      ATLAS_MIN_VOLUME_RATIO: "0.60"
+      ATLAS_MIN_WATCH_CONFIDENCE: "45"
 
-      ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+      ATLAS_MIN_VOLUME_RATIO: "0.60"
 
 
       # ============================================================
@@ -112,18 +110,18 @@ jobs:
 
 
       # ============================================================
-      # LOCAL SQLITE
+      # LOCAL STATE
       # ============================================================
 
-      # SQLite = local runtime state/cache.
-      # Supabase = permanent ATLAS memory.
+      # SQLite is LOCAL execution state/cache.
+      # Long-term ATLAS memory must be stored in Supabase.
       ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
 
       ATLAS_CHANGELOG: "changelog.txt"
 
 
       # ============================================================
-      # SUPABASE — PERMANENT STORAGE
+      # SUPABASE — PERMANENT ATLAS MEMORY
       # ============================================================
 
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -143,7 +141,7 @@ jobs:
 
 
       # ============================================================
-      # EXTERNAL DATA SOURCES
+      # MARKET / DATA SOURCES
       # ============================================================
 
       COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
@@ -165,11 +163,20 @@ jobs:
 
       TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
+      ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+
+      ATLAS_TRADINGVIEW_INTERVAL: "240"
+
+
+      # ============================================================
+      # EXCHANGE FALLBACK
+      # ============================================================
+
       ATLAS_H4_FALLBACK_MIN_SCORE: ${{ vars.ATLAS_H4_FALLBACK_MIN_SCORE || '60' }}
 
 
       # ============================================================
-      # VOICE
+      # VOICE OUTPUT
       # ============================================================
 
       ATLAS_ENABLE_VOICE: "1"
@@ -182,7 +189,7 @@ jobs:
 
 
       # ============================================================
-      # PNG
+      # PNG IMAGE REPORT
       # ============================================================
 
       ATLAS_ENABLE_IMAGE_TABLE: "1"
@@ -209,7 +216,7 @@ jobs:
 
 
       # ============================================================
-      # DEPENDENCIES
+      # INSTALL DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
@@ -222,26 +229,24 @@ jobs:
             python -m pip install -r requirements.txt
           else
             python -m pip install \
-              "ccxt>=4.0.0" \
-              "pandas>=2.0.0" \
-              "numpy>=1.24.0" \
-              "requests>=2.31.0" \
-              "python-dotenv>=1.0.0" \
-              "gTTS>=2.3.0" \
-              "edge-tts>=6.0.0" \
-              "matplotlib" \
-              "Pillow" \
-              "scikit-learn" \
-              "pytest>=7.0.0" \
-              "pytest-cov>=4.0.0"
+              ccxt \
+              pandas \
+              numpy \
+              requests \
+              python-dotenv \
+              gTTS \
+              edge-tts \
+              matplotlib \
+              Pillow \
+              scikit-learn
           fi
 
 
       # ============================================================
-      # SOURCE VALIDATION
+      # VERIFY SOURCE
       # ============================================================
 
-      - name: Verify ATLAS source
+      - name: Verify source
         run: |
           set -euo pipefail
 
@@ -249,14 +254,20 @@ jobs:
 
           python -m py_compile bot.py
 
-          echo "✅ bot.py syntax OK"
+          if [ -f smoke_atlas.py ]; then
+            python -m py_compile smoke_atlas.py
+          fi
+
+          if [ -f test_smoke.py ]; then
+            python -m py_compile test_smoke.py
+          fi
 
 
       # ============================================================
-      # SUPABASE CONFIGURATION
+      # SUPABASE HEALTH CHECK
       # ============================================================
 
-      - name: Validate Supabase
+      - name: Validate Supabase configuration
         run: |
           set -euo pipefail
 
@@ -264,30 +275,14 @@ jobs:
 
           test -n "$SUPABASE_SERVICE_ROLE_KEY"
 
-          echo "✅ Supabase configuration detected"
-
-
-      # ============================================================
-      # TELEGRAM CONFIGURATION
-      # ============================================================
-
-      - name: Validate Telegram
-        run: |
-          set -euo pipefail
-
-          test -n "$TELEGRAM_TOKEN"
-
-          test -n "$TELEGRAM_CHAT_ID" || \
-          test -n "$TELEGRAM_GROUP_CHAT_ID"
-
-          echo "✅ Telegram configuration detected"
+          echo "✅ Supabase environment configured"
 
 
       # ============================================================
       # SMOKE TEST
       # ============================================================
 
-      - name: Run smoke test
+      - name: Run ATLAS smoke test
         run: |
           set -euo pipefail
 
@@ -308,13 +303,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -f test_v11_1.py ]; then
+            python test_v11_1.py
+          fi
+
           if [ -d tests ]; then
             python -m pytest tests -q
           fi
 
-          if [ -f test_v11_1.py ]; then
-            python test_v11_1.py
-          fi
+
+      # ============================================================
+      # TELEGRAM VALIDATION
+      # ============================================================
+
+      - name: Validate Telegram
+        run: |
+          set -euo pipefail
+
+          test -n "$TELEGRAM_TOKEN"
+
+          test -n "$TELEGRAM_CHAT_ID" || \
+          test -n "$TELEGRAM_GROUP_CHAT_ID"
+
+          echo "✅ Telegram configuration valid"
 
 
       # ============================================================
@@ -325,9 +336,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=============================================="
-          echo "🚀 Starting ATLAS v11.5"
-          echo "=============================================="
+          echo "🚀 Starting ATLAS AI..."
 
           echo "ATLAS_VERSION=$ATLAS_VERSION"
 
@@ -337,21 +346,13 @@ jobs:
 
           echo "ATLAS_SCHEDULED_CADENCE=$ATLAS_SCHEDULED_CADENCE"
 
-          echo "ATLAS_TIMEFRAME=$ATLAS_TIMEFRAME"
-
-          echo "VOICE=$ATLAS_ENABLE_VOICE"
-
-          echo "PNG=$ATLAS_ENABLE_IMAGE_TABLE"
-
-          echo "SUPABASE=ENABLED"
-
-          echo "=============================================="
+          echo "SUPABASE configured: YES"
 
           python bot.py
 
 
       # ============================================================
-      # SQLITE FINALIZATION
+      # FINALIZE SQLITE
       # ============================================================
 
       - name: Finalize SQLite
@@ -373,6 +374,7 @@ jobs:
           )
 
           try:
+
               con.execute(
                   "PRAGMA wal_checkpoint(TRUNCATE)"
               )
@@ -385,11 +387,12 @@ jobs:
                   "PRAGMA integrity_check"
               ).fetchone()
 
-              status = result[0] if result else "UNKNOWN"
+              print(
+                  "SQLite integrity:",
+                  result[0] if result else "UNKNOWN"
+              )
 
-              print("SQLite integrity:", status)
-
-              if status != "ok":
+              if not result or result[0] != "ok":
                   raise SystemExit(1)
 
           finally:
@@ -397,25 +400,21 @@ jobs:
 
           PY
 
-          else
-            echo "ℹ️ No SQLite database generated"
           fi
 
 
       # ============================================================
-      # ARTIFACTS
+      # UPLOAD LOCAL DEBUG ARTIFACTS
       # ============================================================
 
-      - name: Upload ATLAS reports
+      - name: Upload ATLAS artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-v11.5-reports
+          name: atlas-v11.5-artifacts
           path: |
             *.csv
             *.png
-            *.jpg
-            *.jpeg
             *.mp3
             *.wav
             *.sqlite3
