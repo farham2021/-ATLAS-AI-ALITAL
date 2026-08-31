@@ -20,14 +20,20 @@ name: ATLAS AI Bot
 
 on:
   schedule:
-    # هر ساعت، در دقیقه‌ی ۵ (کمی فاصله از ابتدای ساعت تا صف اجرای GH Actions خالی‌تر باشد)
-    - cron: "5 * * * *"
+    # هر ساعت در دقیقه‌ی ۳۰ UTC (مطابق با ساعت‌های ۰۳:۰۰، ۰۴:۰۰، ... تهران)
+    - cron: "30 * * * *"
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "اجرای دستی: override برای ATLAS_RUN_MODE (خالی = استفاده از AUTO)"
-        required: false
-        default: ""
+        description: "حالت اجرا"
+        required: true
+        default: "AUTO"
+        type: choice
+        options:
+          - AUTO
+          - ANALYSIS
+          - SNAPSHOT
+          - BOTH
 
 concurrency:
   # اگر اجرای قبلی هنوز تمام نشده، اجرای جدید صف بایستد نه هم‌زمان اجرا شود —
@@ -55,7 +61,6 @@ jobs:
 
       - name: Run ATLAS
         env:
-          # override دستی (اگر از workflow_dispatch با run_mode پر شده باشد)
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'AUTO' }}
           ATLAS_ENGINE: BOTH
 
