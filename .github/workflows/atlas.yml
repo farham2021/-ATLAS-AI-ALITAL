@@ -3,21 +3,17 @@
 # ============================================================
 # مسیر صحیح این فایل در ریپوی شما: .github/workflows/atlas.yml
 #
-# منطق زمان‌بندی: با ATLAS_RUN_MODE=BOTH، اسکریپت همیشه تحلیل و
-# اسنپ‌شات را اجرا می‌کند. برای جلوگیری از از دست رفتن پنجره‌های
-# زمانی، workflow هر ۲۰ دقیقه اجرا می‌شود.
-#
-# ⚠️ محدودیت شناخته‌شده‌ی GitHub Actions: cron در GH Actions
-# "بهترین تلاش" است، نه دقیق‌به‌دقیقه. اجرای هر ۲۰ دقیقه این
-# محدودیت را جبران می‌کند.
+# زمان‌بندی: هر ۶ ساعت یک بار در دقیقه ۳۰ UTC اجرا می‌شود.
+# با ATLAS_RUN_MODE=BOTH، اسکریپت همیشه تحلیل و اسنپ‌شات را
+# با هم اجرا می‌کند و گزارش کامل ارسال می‌شود.
 # ============================================================
 
 name: ATLAS AI Bot
 
 on:
   schedule:
-    # هر ۲۰ دقیقه یک بار (دقیقه‌های ۰، ۲۰، ۴۰ هر ساعت)
-    - cron: "*/20 * * * *"
+    # هر ۶ ساعت در دقیقه ۳۰ UTC (ساعت‌های ۰:۳۰، ۶:۳۰، ۱۲:۳۰، ۱۸:۳۰)
+    - cron: "30 */6 * * *"
   workflow_dispatch:
     inputs:
       run_mode:
@@ -31,8 +27,6 @@ on:
           - BOTH
 
 concurrency:
-  # اگر اجرای قبلی هنوز تمام نشده، اجرای جدید صف بایستد نه هم‌زمان اجرا شود —
-  # از رقابت روی همان ردیف‌های SQLite/Supabase جلوگیری می‌کند.
   group: atlas-bot
   cancel-in-progress: false
 
@@ -56,7 +50,6 @@ jobs:
 
       - name: Run ATLAS
         env:
-          # override دستی (اگر از workflow_dispatch با run_mode پر شده باشد)
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
           ATLAS_ENGINE: BOTH
 
@@ -70,7 +63,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # --- APIهای اختیاری (هرکدام نبود، فقط همان منبع غیرفعال می‌شود) ---
+          # --- APIهای اختیاری ---
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
