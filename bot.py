@@ -151,7 +151,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.6 BACKTEST REDESIGN"
+VERSION = "ATLAS v11.5 WORKFLOW + SUPABASE REDESIGN"
 TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
@@ -6123,12 +6123,53 @@ def send_price_snapshot(results):
     return sent, errors
 
 def _automatic_run_plan(now=None):
-    """Unified scheduler: analysis every 4H, snapshot every 3H, both at overlaps."""
+    """Unified scheduler.
+
+    When GitHub Actions owns the schedule (ATLAS_SCHEDULED_CADENCE=workflow),
+    the workflow event itself selects ANALYSIS vs SNAPSHOT.  This avoids the
+    fragile hour-modulo gate that can miss a run when a GitHub runner starts
+    a few minutes late.
+    """
+    cadence = os.environ.get("ATLAS_SCHEDULED_CADENCE", "").strip().lower()
+    mode = os.environ.get("ATLAS_RUN_MODE", "AUTO").strip().upper()
+
+    if cadence == "workflow":
+        # Explicit mode remains useful for workflow_dispatch.
+        if mode == "ANALYSIS":
+            return {"analysis": True, "snapshot": False}
+        if mode == "SNAPSHOT":
+            return {"analysis": False, "snapshot": True}
+        if mode == "BOTH":
+            return {"analysis": True, "snapshot": True}
+
+        # Scheduled GitHub event: recover the exact cron expression.
+        schedule = os.environ.get("ATLAS_SCHEDULE_CRON", "").strip()
+        if not schedule:
+            event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+            if event_path:
+                try:
+                    with open(event_path, "r", encoding="utf-8") as fh:
+                        schedule = str((json.load(fh) or {}).get("schedule") or "").strip()
+                except Exception:
+                    schedule = ""
+
+        if schedule:
+            if "5 */4 * * *" in schedule:
+                return {"analysis": True, "snapshot": False}
+            if "20 */3 * * *" in schedule:
+                return {"analysis": False, "snapshot": True}
+
+        # Safe fallback for an unknown workflow schedule: do not run an
+        # unintended analysis. The workflow can explicitly select BOTH.
+        return {"analysis": False, "snapshot": False}
+
+    # Legacy/manual AUTO scheduling remains available.
     dt = now or now_tehran()
     return {
         "analysis": dt.hour % 4 == 0,
         "snapshot": dt.hour % 3 == 0,
     }
+
 
 
 # ============================================================
@@ -7035,9 +7076,15 @@ def v11_apply_intelligence(r):
     r["setup_type"] = _i_setup(r)
     r["contradictions"] = _i_contradictions(r, bias)
     r["intel_score"] = round(_i_score(r),1)
-    # "confidence" becomes a transparent model-strength score, not probability.
-    r["confidence"] = int(round(max(0,min(100, 42 + abs(r["intel_score"]-50)*1.15))))
-    r["confidence_label"] = "MODEL STRENGTH"
+    # Preserve the confidence that actually produced the decision.  Intelligence
+    # strength is a separate field and must never overwrite decision confidence.
+    decision_conf = r.get("decision_confidence")
+    if decision_conf is not None:
+        try:
+            r["confidence"] = int(round(float(decision_conf)))
+        except (TypeError, ValueError):
+            pass
+    r["confidence_label"] = "DECISION CONFIDENCE"
     # ------------------------------------------------------------------
     # Three-way score separation (architecture review, point 1):
     #   signal_score    = raw technical evidence strength (0-100)
@@ -7443,6 +7490,7 @@ def main():
         telegram_preflight()
         run_mode = get_run_mode()
         print(f"📌 Run Mode: {run_mode}")
+        print(f"📌 Scheduler: {os.environ.get('ATLAS_SCHEDULED_CADENCE', 'internal')}")
         print(f"📌 Engine Mode: {get_engine_mode()}")
         print(f"📌 Voice Enabled: {ENABLE_VOICE_REPORT}")
         print(f"📌 Auto Voice: {AUTO_SEND_VOICE}")
