@@ -8,13 +8,11 @@
 # اسکریپت کاملاً از زمان‌بندی GitHub تبعیت می‌کند و دیگر
 # از منطق داخلی (dt.hour % 4 == 0) استفاده نمی‌کند.
 # ============================================================
-
 name: ATLAS AI Bot
 
 on:
   schedule:
-    # هر ۶ ساعت در دقیقه ۳۰ UTC (ساعت‌های ۰:۳۰، ۶:۳۰، ۱۲:۳۰، ۱۸:۳۰)
-    - cron: "30 */6 * * *"
+    - cron: "30 */6 * * *"   # هر ۶ ساعت در دقیقه ۳۰ UTC
   workflow_dispatch:
     inputs:
       run_mode:
@@ -51,23 +49,18 @@ jobs:
 
       - name: Run ATLAS
         env:
-          # --- حالت اجرا (تعیین‌کننده نوع تحلیل) ---
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
-          # --- منبع زمان‌بندی (غیرفعال‌سازی منطق داخلی bot) ---
-          ATLAS_SCHEDULED_CADENCE: "workflow"
+          ATLAS_SCHEDULED_CADENCE: "workflow"   # <-- اضافه شده
           ATLAS_ENGINE: BOTH
 
-          # --- Telegram ---
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # --- Supabase ---
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # --- APIهای اختیاری ---
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
@@ -75,7 +68,6 @@ jobs:
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # --- خروجی‌ها ---
           ATLAS_ENABLE_IMAGE_TABLE: "true"
           ATLAS_ENABLE_VOICE: "true"
           ATLAS_AUTO_SEND_VOICE: "true"
