@@ -82,7 +82,7 @@ jobs:
           ATLAS_ENABLE_VOICE: "true"
           ATLAS_AUTO_SEND_VOICE: "true"
 
-        run: python bot_atlas_v11.6_redesign.py
+        run: python bot.py
 
       - name: Upload run log on failure
         if: failure()
