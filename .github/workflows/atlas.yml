@@ -1,33 +1,57 @@
 # ============================================================
-# ATLAS AI v11.5 — GitHub Actions
+# ATLAS AI v11.5 — FINAL 4H SCHEDULER + WATCHDOG
 # ============================================================
-# مسیر:
-# .github/workflows/atlas.yml
 #
-# اجرای خودکار:
-# هر 4 ساعت یک‌بار
+# FILE:
+#   .github/workflows/atlas.yml
 #
-# Cron بر اساس UTC است.
-# 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
+# MAIN ATLAS:
+#   Every 4 hours
 #
-# با توجه به UTC+3:30 ایران:
-# 04:00 / 08:00 / 12:00 / 16:00 / 20:00 / 00:00 تهران
+# WATCHDOG:
+#   Every 30 minutes
 #
-# نکته:
-# GitHub ممکن است اجرای scheduled workflow را چند دقیقه
-# جابه‌جا کند؛ cron زمان دقیق تضمین‌شده نیست.
+# MANUAL:
+#   workflow_dispatch
+#
+# STORAGE:
+#   Supabase
+#   SQLite is local runtime cache/history
+#
+# OUTPUTS:
+#   Telegram
+#   PNG
+#   CSV
+#   Voice
+#
 # ============================================================
 
 name: ATLAS AI Bot
 
 on:
+
+  # ==========================================================
+  # MAIN ATLAS — EVERY 4 HOURS
+  # ==========================================================
+
   schedule:
-    - cron: "30 */4 * * *"
+    - cron: "17 */4 * * *"
+
+  # ==========================================================
+  # WATCHDOG — EVERY 30 MINUTES
+  # ==========================================================
+
+    - cron: "47 * * * *"
+
+  # ==========================================================
+  # MANUAL EXECUTION
+  # ==========================================================
 
   workflow_dispatch:
     inputs:
+
       run_mode:
-        description: "ATLAS execution mode"
+        description: "حالت اجرای ATLAS"
         required: true
         default: "BOTH"
         type: choice
@@ -36,233 +60,881 @@ on:
           - SNAPSHOT
           - BOTH
 
-permissions:
-  contents: read
+      force_run:
+        description: "اجرای اجباری ATLAS"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+  # ==========================================================
+  # WATCHDOG RECOVERY
+  # ==========================================================
+
+  repository_dispatch:
+    types:
+      - atlas-watchdog-recovery
+
+
+# ============================================================
+# GLOBAL CONCURRENCY
+# ============================================================
 
 concurrency:
   group: atlas-bot
   cancel-in-progress: false
 
+
+# ============================================================
+# PERMISSIONS
+# ============================================================
+
+permissions:
+  contents: read
+  actions: write
+
+
+# ============================================================
+# JOB 1 — DETECT TRIGGER
+# ============================================================
+
 jobs:
+
+  detect:
+
+    name: Detect ATLAS Trigger
+
+    runs-on: ubuntu-latest
+
+    outputs:
+
+      run_atlas: ${{ steps.detect.outputs.run_atlas }}
+
+      run_watchdog: ${{ steps.detect.outputs.run_watchdog }}
+
+
+    steps:
+
+      - name: Detect trigger
+
+        id: detect
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "🔎 ATLAS TRIGGER DETECTOR"
+          echo "=================================================="
+
+          echo "Event: ${GITHUB_EVENT_NAME}"
+
+          RUN_ATLAS="false"
+          RUN_WATCHDOG="false"
+
+
+          # --------------------------------------------------
+          # MANUAL
+          # --------------------------------------------------
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+
+            RUN_ATLAS="true"
+
+          fi
+
+
+          # --------------------------------------------------
+          # REPOSITORY DISPATCH / RECOVERY
+          # --------------------------------------------------
+
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+
+            ACTION="${{ github.event.action }}"
+
+            echo "Repository dispatch action: ${ACTION}"
+
+            if [ "${ACTION}" = "atlas-watchdog-recovery" ]; then
+
+              RUN_ATLAS="true"
+
+            fi
+
+          fi
+
+
+          # --------------------------------------------------
+          # SCHEDULE
+          # --------------------------------------------------
+
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+
+            SCHEDULE="${{ github.event.schedule }}"
+
+            echo "Schedule: ${SCHEDULE}"
+
+
+            # MAIN 4H ATLAS
+
+            if [ "${SCHEDULE}" = "17 */4 * * *" ]; then
+
+              RUN_ATLAS="true"
+
+            fi
+
+
+            # WATCHDOG
+
+            if [ "${SCHEDULE}" = "47 * * * *" ]; then
+
+              RUN_WATCHDOG="true"
+
+            fi
+
+          fi
+
+
+          echo ""
+          echo "ATLAS     = ${RUN_ATLAS}"
+          echo "WATCHDOG  = ${RUN_WATCHDOG}"
+
+
+          echo "run_atlas=${RUN_ATLAS}" >> "${GITHUB_OUTPUT}"
+
+          echo "run_watchdog=${RUN_WATCHDOG}" >> "${GITHUB_OUTPUT}"
+
+
+  # ==========================================================
+  # JOB 2 — MAIN ATLAS
+  # ==========================================================
 
   run-atlas:
 
     name: Run ATLAS AI
 
+    needs: detect
+
+    if: needs.detect.outputs.run_atlas == 'true'
+
     runs-on: ubuntu-latest
 
-    timeout-minutes: 20
+    timeout-minutes: 25
+
+    concurrency:
+
+      group: atlas-main
+
+      cancel-in-progress: false
+
 
     steps:
 
-      # --------------------------------------------------------
-      # 1. Checkout
-      # --------------------------------------------------------
+      # ------------------------------------------------------
+      # CHECKOUT
+      # ------------------------------------------------------
+
       - name: Checkout repository
+
         uses: actions/checkout@v4
 
 
-      # --------------------------------------------------------
-      # 2. Python
-      # --------------------------------------------------------
+      # ------------------------------------------------------
+      # PYTHON
+      # ------------------------------------------------------
+
       - name: Set up Python
+
         uses: actions/setup-python@v5
+
         with:
+
           python-version: "3.11"
+
           cache: "pip"
 
 
-      # --------------------------------------------------------
-      # 3. Dependencies
-      # --------------------------------------------------------
+      # ------------------------------------------------------
+      # DEPENDENCIES
+      # ------------------------------------------------------
+
       - name: Install dependencies
+
+        shell: bash
+
         run: |
+
+          set -euo pipefail
+
           python -m pip install --upgrade pip
+
+          if [ ! -f requirements.txt ]; then
+
+            echo "❌ requirements.txt not found"
+
+            exit 1
+
+          fi
+
           pip install -r requirements.txt
 
 
-      # --------------------------------------------------------
-      # 4. Environment / diagnostics
-      # --------------------------------------------------------
-      - name: Show ATLAS configuration
-        env:
-          ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
-          ATLAS_SCHEDULED_CADENCE: "workflow"
-          ATLAS_ENGINE: "BOTH"
+      # ------------------------------------------------------
+      # ENVIRONMENT DIAGNOSTICS
+      # ------------------------------------------------------
+
+      - name: ATLAS environment
+
+        shell: bash
+
         run: |
+
           echo "=================================================="
-          echo "🚀 ATLAS AI"
-          echo "=================================================="
-          echo "ATLAS_RUN_MODE=${ATLAS_RUN_MODE}"
-          echo "ATLAS_SCHEDULED_CADENCE=${ATLAS_SCHEDULED_CADENCE}"
-          echo "ATLAS_ENGINE=${ATLAS_ENGINE}"
-          echo "GitHub event: ${{ github.event_name }}"
-          echo "GitHub ref: ${{ github.ref }}"
+          echo "🚀 ATLAS AI v11.5"
           echo "=================================================="
 
+          echo "Python:"
+          python --version
 
-      # --------------------------------------------------------
-      # 5. Run ATLAS
-      # --------------------------------------------------------
+          echo ""
+
+          echo "Event:"
+          echo "${GITHUB_EVENT_NAME}"
+
+          echo ""
+
+          echo "Run ID:"
+          echo "${GITHUB_RUN_ID}"
+
+          echo ""
+
+          echo "Branch:"
+          echo "${GITHUB_REF_NAME}"
+
+          echo ""
+
+          echo "Run Mode:"
+          echo "${{ github.event.inputs.run_mode || 'BOTH' }}"
+
+          echo ""
+
+          echo "Time:"
+          date -u
+
+
+      # ------------------------------------------------------
+      # OPTIONAL — VERIFY CORE FILES
+      # ------------------------------------------------------
+
+      - name: Verify ATLAS files
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+          echo "Checking required files..."
+
+          test -f bot.py
+
+          test -f requirements.txt
+
+          echo "✅ bot.py found"
+
+          echo "✅ requirements.txt found"
+
+
+      # ------------------------------------------------------
+      # RUN ATLAS
+      # ------------------------------------------------------
+
       - name: Run ATLAS
+
+        shell: bash
+
         env:
 
-          # ----------------------------------------------------
-          # Core configuration
-          # ----------------------------------------------------
-          PYTHONUNBUFFERED: "1"
+          # ==================================================
+          # CORE
+          # ==================================================
 
           ATLAS_VERSION: "11.5"
+
           ATLAS_ENGINE: "BOTH"
 
-          # مهم:
-          # زمان‌بندی را GitHub کنترل می‌کند،
-          # نه منطق ساعت داخلی bot.py
-          ATLAS_SCHEDULED_CADENCE: "workflow"
-
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
+
+          ATLAS_SCHEDULED_CADENCE: "workflow"
 
           ATLAS_TIMEFRAME: "4H"
 
-          # ----------------------------------------------------
-          # TradingView / market configuration
-          # ----------------------------------------------------
+
+          # ==================================================
+          # TELEGRAM
+          # ==================================================
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+
+          # ==================================================
+          # SUPABASE
+          # ==================================================
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+
+          # ==================================================
+          # MARKET DATA
+          # ==================================================
+
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+
+          # ==================================================
+          # NEWS
+          # ==================================================
+
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+
+          # ==================================================
+          # TRADINGVIEW
+          # ==================================================
+
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+
           ATLAS_TRADINGVIEW_INTERVAL: "240"
 
-          # ----------------------------------------------------
-          # Snapshot
-          # ----------------------------------------------------
-          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
-          # ----------------------------------------------------
-          # Risk management
-          # ----------------------------------------------------
+          # ==================================================
+          # RISK MANAGEMENT
+          # ==================================================
+
           RISK_PER_TRADE_PCT: "1.5"
+
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+
+          ATLAS_MIN_CONFIDENCE: "55"
+
+          ATLAS_MIN_WATCH_CONFIDENCE: "45"
+
           ATLAS_MAX_LEVERAGE: "10"
 
-          # ----------------------------------------------------
-          # Signal thresholds
-          # ----------------------------------------------------
-          ATLAS_MIN_CONFIDENCE: "55"
-          ATLAS_MIN_WATCH_CONFIDENCE: "45"
           ATLAS_MIN_EXECUTABLE_RR: "1.5"
+
           ATLAS_MIN_VOLUME_RATIO: "0.60"
 
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
 
-          # ----------------------------------------------------
-          # Backtest
-          # ----------------------------------------------------
+
+          # ==================================================
+          # BACKTEST
+          # ==================================================
+
           ATLAS_BACKTEST_DAYS: "180"
+
           ATLAS_SIGNAL_HORIZON_BARS: "36"
+
           ATLAS_BACKTEST_IMPROVEMENT: "10"
+
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-          # ----------------------------------------------------
-          # Event deduplication
-          # ----------------------------------------------------
           ATLAS_CANDLE_EVENT_DEDUP: "1"
 
-          # ----------------------------------------------------
-          # Local storage
-          # ----------------------------------------------------
+
+          # ==================================================
+          # SNAPSHOT
+          # ==================================================
+
+          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+
+          # ==================================================
+          # SQLITE
+          # ==================================================
+
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
-          ATLAS_CHANGELOG: "changelog.txt"
 
-          # ----------------------------------------------------
-          # Telegram
-          # ----------------------------------------------------
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # ----------------------------------------------------
-          # SUPABASE
-          # ----------------------------------------------------
-          # حفظ شده برای ذخیره persistent داده‌های ATLAS
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # ==================================================
+          # OUTPUTS
+          # ==================================================
 
-          # ----------------------------------------------------
-          # Market / data APIs
-          # ----------------------------------------------------
-          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
-          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
-
-          # ----------------------------------------------------
-          # News
-          # ----------------------------------------------------
-          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
-          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-
-          # ----------------------------------------------------
-          # Other APIs
-          # ----------------------------------------------------
-          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
-
-          # ----------------------------------------------------
-          # TradingView confirmation
-          # ----------------------------------------------------
-          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
-
-          # ----------------------------------------------------
-          # H4 fallback
-          # ----------------------------------------------------
-          ATLAS_H4_FALLBACK_MIN_SCORE: "60"
-
-          # ----------------------------------------------------
-          # Voice report
-          # ----------------------------------------------------
           ATLAS_ENABLE_VOICE: "1"
+
           ATLAS_VOICE_TYPE: "female"
+
           ATLAS_VOICE_LANGUAGE: "fa"
+
           ATLAS_AUTO_SEND_VOICE: "1"
 
-          # ----------------------------------------------------
-          # PNG report
-          # ----------------------------------------------------
           ATLAS_ENABLE_IMAGE_TABLE: "1"
 
+
+          # ==================================================
+          # H4 FALLBACK
+          # ==================================================
+
+          ATLAS_H4_FALLBACK_MIN_SCORE: "60"
+
+
+          # ==================================================
+          # CHANGELOG
+          # ==================================================
+
+          ATLAS_CHANGELOG: "changelog.txt"
+
+
         run: |
+
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "🤖 STARTING ATLAS"
+          echo "=================================================="
+
           python bot.py
 
 
-      # --------------------------------------------------------
-      # 6. Upload logs if ATLAS fails
-      # --------------------------------------------------------
-      - name: Upload ATLAS logs on failure
-        if: failure()
+      # ------------------------------------------------------
+      # UPLOAD OUTPUTS
+      # ------------------------------------------------------
+
+      - name: Upload ATLAS outputs
+
+        if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
-          name: atlas-failure-log-${{ github.run_id }}
+
+          name: atlas-output-${{ github.run_id }}
 
           path: |
-            *.log
+
+            *.csv
+
+            *.png
+
+            *.mp3
+
+            *.wav
+
+            *.ogg
+
+            *.json
+
+            *.jsonl
+
             *.txt
+
+            *.log
+
             atlas_changelog.jsonl
-            atlas_v11.sqlite3
 
           if-no-files-found: ignore
 
 
-      # --------------------------------------------------------
-      # 7. Success marker
-      # --------------------------------------------------------
-      - name: ATLAS completed
-        if: success()
+      # ------------------------------------------------------
+      # FAILURE ARTIFACTS
+      # ------------------------------------------------------
+
+      - name: Upload ATLAS failure artifacts
+
+        if: failure()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: atlas-failure-${{ github.run_id }}
+
+          path: |
+
+            *.log
+
+            *.txt
+
+            *.json
+
+            *.jsonl
+
+            *.csv
+
+            *.png
+
+            *.mp3
+
+            *.wav
+
+            *.ogg
+
+            atlas_changelog.jsonl
+
+          if-no-files-found: ignore
+
+
+  # ==========================================================
+  # JOB 3 — WATCHDOG
+  # ==========================================================
+
+  watchdog:
+
+    name: ATLAS Watchdog
+
+    needs: detect
+
+    if: needs.detect.outputs.run_watchdog == 'true'
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 5
+
+
+    steps:
+
+      - name: Checkout repository
+
+        uses: actions/checkout@v4
+
+
+      # ------------------------------------------------------
+      # CHECK RECENT RUNS
+      # ------------------------------------------------------
+
+      - name: Check latest ATLAS run
+
+        id: check
+
+        shell: bash
+
+        env:
+
+          GH_TOKEN: ${{ github.token }}
+
+
         run: |
+
+          set -euo pipefail
+
           echo "=================================================="
-          echo "✅ ATLAS completed successfully"
-          echo "📅 Event: ${{ github.event_name }}"
-          echo "📌 Mode: ${{ github.event.inputs.run_mode || 'BOTH' }}"
-          echo "📌 Cadence: workflow"
-          echo "📌 Timeframe: 4H"
-          echo "📌 Supabase: configured"
-          echo "📌 Telegram: configured"
-          echo "📌 Voice: enabled"
-          echo "📌 PNG: enabled"
+          echo "🐕 ATLAS WATCHDOG"
+          echo "=================================================="
+
+
+          echo "Current UTC:"
+          date -u
+
+
+          echo ""
+
+          echo "Checking recent workflow runs..."
+
+
+          RUNS=$(gh run list \
+            --workflow atlas.yml \
+            --limit 20 \
+            --json databaseId,status,conclusion,createdAt,event,headBranch \
+            --jq '.')
+
+
+          echo "${RUNS}"
+
+
+          # --------------------------------------------------
+          # FIND LAST SUCCESSFUL MAIN EXECUTION
+          # --------------------------------------------------
+
+          LATEST=$(gh run list \
+            --workflow atlas.yml \
+            --limit 30 \
+            --json databaseId,status,conclusion,createdAt,event,headBranch \
+            --jq '
+              [
+                .[] |
+                select(
+                  .event == "schedule"
+                  and
+                  .conclusion == "success"
+                )
+              ]
+              |
+              sort_by(.createdAt)
+              |
+              last
+            ')
+
+
+          echo ""
+
+          echo "Latest successful scheduled ATLAS:"
+
+          echo "${LATEST}"
+
+
+          CREATED_AT=$(echo "${LATEST}" | jq -r '.createdAt // empty')
+
+
+          # --------------------------------------------------
+          # NO SUCCESSFUL RUN
+          # --------------------------------------------------
+
+          if [ -z "${CREATED_AT}" ]; then
+
+            echo "⚠️ No successful scheduled ATLAS run found."
+
+            echo "RECOVERY=true" >> "${GITHUB_OUTPUT}"
+
+            exit 0
+
+          fi
+
+
+          # --------------------------------------------------
+          # CALCULATE AGE
+          # --------------------------------------------------
+
+          LAST_TS=$(date -d "${CREATED_AT}" +%s)
+
+          NOW_TS=$(date -u +%s)
+
+          AGE=$((NOW_TS - LAST_TS))
+
+
+          echo ""
+
+          echo "Last successful run:"
+          echo "${CREATED_AT}"
+
+          echo ""
+
+          echo "Age:"
+          echo "${AGE} seconds"
+
+          echo "$((AGE / 60)) minutes"
+
+
+          # --------------------------------------------------
+          # EXPECTED:
+          #
+          # 4 HOURS = 14400 seconds
+          #
+          # GRACE:
+          # 90 MINUTES
+          #
+          # RECOVERY:
+          # 5.5 HOURS
+          # --------------------------------------------------
+
+          MAX_AGE=19800
+
+
+          if [ "${AGE}" -gt "${MAX_AGE}" ]; then
+
+            echo ""
+
+            echo "🚨 ATLAS WATCHDOG FAILURE"
+
+            echo "No successful ATLAS scheduled run within expected window."
+
+            echo "RECOVERY=true" >> "${GITHUB_OUTPUT}"
+
+          else
+
+            echo ""
+
+            echo "✅ ATLAS schedule is healthy."
+
+            echo "RECOVERY=false" >> "${GITHUB_OUTPUT}"
+
+          fi
+
+
+      # ======================================================
+      # TELEGRAM ALERT
+      # ======================================================
+
+      - name: Telegram watchdog alert
+
+        if: steps.check.outputs.RECOVERY == 'true'
+
+        env:
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          MESSAGE="🚨 ATLAS WATCHDOG
+
+⚠️ اجرای خودکار ATLAS از زمان مورد انتظار عبور کرده است.
+
+🕐 زمان بررسی:
+$(date -u '+%Y-%m-%d %H:%M UTC')
+
+🔧 وضعیت:
+آخرین اجرای موفق خودکار ATLAS در بازه مورد انتظار پیدا نشد.
+
+🚑 سیستم Recovery را فعال می‌کند."
+
+
+          send_telegram() {
+
+            CHAT_ID="$1"
+
+
+            if [ -z "${CHAT_ID:-}" ]; then
+
+              return 0
+
+            fi
+
+
+            curl -fsS \
+              -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${MESSAGE}" \
+              >/dev/null
+
+
+            echo "✅ Watchdog alert sent."
+
+          }
+
+
+          send_telegram "${TELEGRAM_CHAT_ID:-}"
+
+
+          if [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
+
+            send_telegram "${TELEGRAM_GROUP_CHAT_ID}"
+
+          fi
+
+
+      # ======================================================
+      # RECOVERY
+      # ======================================================
+
+      - name: Trigger ATLAS recovery
+
+        if: steps.check.outputs.RECOVERY == 'true'
+
+        env:
+
+          GH_TOKEN: ${{ github.token }}
+
+
+        shell: bash
+
+        run: |
+
+          set -euo pipefail
+
+
+          echo "=================================================="
+          echo "🚑 ATLAS RECOVERY"
+          echo "=================================================="
+
+
+          gh api \
+            --method POST \
+            "/repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type="atlas-watchdog-recovery"
+
+
+          echo "✅ ATLAS recovery trigger submitted."
+
+
+  # ==========================================================
+  # JOB 4 — FINAL STATUS
+  # ==========================================================
+
+  status:
+
+    name: ATLAS Workflow Status
+
+    needs:
+
+      - detect
+      - run-atlas
+      - watchdog
+
+    if: always()
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+      - name: Status summary
+
+        shell: bash
+
+        run: |
+
+          echo "=================================================="
+          echo "📊 ATLAS WORKFLOW STATUS"
+          echo "=================================================="
+
+
+          echo ""
+
+          echo "Trigger detection:"
+
+          echo "  ATLAS    = ${{ needs.detect.outputs.run_atlas }}"
+
+          echo "  Watchdog = ${{ needs.detect.outputs.run_watchdog }}"
+
+
+          echo ""
+
+          echo "ATLAS job:"
+
+          echo "${{ needs.run-atlas.result }}"
+
+
+          echo ""
+
+          echo "Watchdog job:"
+
+          echo "${{ needs.watchdog.result }}"
+
+
+          echo ""
+
+          echo "=================================================="
+          echo "🏁 ATLAS WORKFLOW FINISHED"
           echo "=================================================="
