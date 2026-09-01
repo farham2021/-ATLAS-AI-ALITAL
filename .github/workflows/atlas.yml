@@ -5,7 +5,7 @@
 # .github/workflows/atlas.yml
 #
 # اجرای خودکار:
-# هر 4 ساعت یکبار
+# هر 4 ساعت یک‌بار
 #
 # Cron بر اساس UTC است.
 # 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
@@ -15,20 +15,20 @@
 #
 # نکته:
 # GitHub ممکن است اجرای scheduled workflow را چند دقیقه
-# جابهجا کند؛ cron زمان دقیق تضمینشده نیست.
+# جابه‌جا کند؛ cron زمان دقیق تضمین‌شده نیست.
 #
-# ⚠ تغییر مهم نسبت به نسخه قبلی:
+# ⚠️ تغییر مهم نسبت به نسخه قبلی:
 # timeout-minutes از 20 به 35 افزایش یافت. با در نظر گرفتن:
-#   - بکتست 180 روزه روی چندین نماد (ATLAS_BACKTEST_DAYS=180)
-#   - فراخوانیهای ccxt به Bybit با retry
-#   - تأخیرهای عمدی ریتلیمیت تلگرام بین پیامها/مقصدها
+#   - بک‌تست 180 روزه روی چندین نماد (ATLAS_BACKTEST_DAYS=180)
+#   - فراخوانی‌های ccxt به Bybit با retry
+#   - تأخیرهای عمدی ریت‌لیمیت تلگرام بین پیام‌ها/مقصدها
 #     (TELEGRAM_PRIVATE_DELAY=1.5s, TELEGRAM_GROUP_DELAY=3.0s؛
-#     با چندین بخش پیام و 2 مقصد جمع میشود)
+#     با چندین بخش پیام و 2 مقصد جمع می‌شود)
 #   - تولید PNG (matplotlib) و صوت (edge-tts/gTTS)
-# اجرای کامل بهسادگی میتوانست از 20 دقیقه عبور کند و GitHub
-# پروسه را وسط ارسال گزارشهای تلگرام Kill میکرد — یعنی برخی
-# پیامها اصلاً ارسال نمیشدند، بدون اینکه خطای واضحی در لاگ باشد
-# (Job صرفاً بهخاطر timeout قطع میشود).
+# اجرای کامل به‌سادگی می‌توانست از 20 دقیقه عبور کند و GitHub
+# پروسه را وسط ارسال گزارش‌های تلگرام Kill می‌کرد — یعنی برخی
+# پیام‌ها اصلاً ارسال نمی‌شدند، بدون این‌که خطای واضحی در لاگ باشد
+# (Job صرفاً به‌خاطر timeout قطع می‌شود).
 # ============================================================
 
 name: ATLAS AI Bot
@@ -151,7 +151,7 @@ jobs:
           ATLAS_ENGINE: "BOTH"
 
           # مهم:
-          # زمانبندی را GitHub کنترل میکند،
+          # زمان‌بندی را GitHub کنترل می‌کند،
           # نه منطق ساعت داخلی bot.py
           ATLAS_SCHEDULED_CADENCE: "workflow"
 
@@ -216,7 +216,7 @@ jobs:
           # ----------------------------------------------------
           # SUPABASE
           # ----------------------------------------------------
-          # حفظ شده برای ذخیره persistent دادههای ATLAS
+          # حفظ شده برای ذخیره persistent داده‌های ATLAS
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
@@ -238,6 +238,18 @@ jobs:
           # Other APIs
           # ----------------------------------------------------
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          # ----------------------------------------------------
+          # Market intelligence briefing (macro / whales / influential
+          # figures) — همه اختیاری‌اند؛ اگر ست نشوند همان بخش گزارش خالی
+          # می‌ماند و بقیه ربات بدون مشکل کار می‌کند.
+          # FRED_API_KEY: رایگان از https://fred.stlouisfed.org/docs/api/api_key.html
+          # WHALE_ALERT_API_KEY: از https://whale-alert.io (پلن رایگان/پولی)
+          # ----------------------------------------------------
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          WHALE_ALERT_API_KEY: ${{ secrets.WHALE_ALERT_API_KEY }}
+          ATLAS_WHALE_MIN_USD: "3000000"
+          ATLAS_ENABLE_INTEL_BRIEFING: "1"
 
           # ----------------------------------------------------
           # TradingView confirmation
