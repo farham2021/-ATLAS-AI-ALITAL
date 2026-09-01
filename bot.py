@@ -6228,18 +6228,32 @@ def send_price_snapshot(results):
     return sent, errors
 
 def _automatic_run_plan(now=None):
-    """Unified scheduler.
+    """Unified ATLAS scheduler.
 
-    When GitHub Actions owns the schedule (ATLAS_SCHEDULED_CADENCE=workflow),
-    the workflow event itself selects ANALYSIS vs SNAPSHOT.  This avoids the
-    fragile hour-modulo gate that can miss a run when a GitHub runner starts
-    a few minutes late.
+    Production scheduling is owned by GitHub Actions.  A real GitHub
+    ``schedule`` event always executes the complete ATLAS cycle
+    (ANALYSIS + SNAPSHOT), regardless of runner start delay.
+
+    ``workflow_dispatch`` continues to honor the selected ATLAS_RUN_MODE.
+    Legacy local AUTO scheduling remains available when GitHub does not
+    own the cadence.
     """
     cadence = os.environ.get("ATLAS_SCHEDULED_CADENCE", "").strip().lower()
     mode = os.environ.get("ATLAS_RUN_MODE", "AUTO").strip().upper()
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip().lower()
 
     if cadence == "workflow":
-        # Explicit mode remains useful for workflow_dispatch.
+        # ---------------------------------------------------------
+        # GitHub scheduled event: ALWAYS run the complete cycle.
+        # Do not inspect the local clock and do not depend on the
+        # exact cron minute. GitHub has already triggered the job.
+        # ---------------------------------------------------------
+        if event_name == "schedule":
+            return {"analysis": True, "snapshot": True}
+
+        # ---------------------------------------------------------
+        # Manual workflow_dispatch: honor the user's selection.
+        # ---------------------------------------------------------
         if mode == "ANALYSIS":
             return {"analysis": True, "snapshot": False}
         if mode == "SNAPSHOT":
@@ -6247,26 +6261,10 @@ def _automatic_run_plan(now=None):
         if mode == "BOTH":
             return {"analysis": True, "snapshot": True}
 
-        # Scheduled GitHub event: recover the exact cron expression.
-        schedule = os.environ.get("ATLAS_SCHEDULE_CRON", "").strip()
-        if not schedule:
-            event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
-            if event_path:
-                try:
-                    with open(event_path, "r", encoding="utf-8") as fh:
-                        schedule = str((json.load(fh) or {}).get("schedule") or "").strip()
-                except Exception:
-                    schedule = ""
-
-        if schedule:
-            if "5 */4 * * *" in schedule:
-                return {"analysis": True, "snapshot": False}
-            if "20 */3 * * *" in schedule:
-                return {"analysis": False, "snapshot": True}
-
-        # Safe fallback for an unknown workflow schedule: do not run an
-        # unintended analysis. The workflow can explicitly select BOTH.
-        return {"analysis": False, "snapshot": False}
+        # If the workflow is configured for workflow cadence but the
+        # event metadata is unavailable, BOTH is the safest production
+        # fallback because the workflow itself is the scheduler.
+        return {"analysis": True, "snapshot": True}
 
     # Legacy/manual AUTO scheduling remains available.
     dt = now or now_tehran()
@@ -6277,16 +6275,7 @@ def _automatic_run_plan(now=None):
 
 
 
-# ============================================================
-# ATLAS v11.1 — OPTIONAL INTELLIGENCE / COMPLETION LAYER
-# ============================================================
-# Additive layer: preserves the existing v11.1 decision engine.
-# It adds explainability, data quality, contradiction/no-trade gates,
-# volatility/derivatives regime labels, signal IDs and portfolio diagnostics.
-# Probabilities are explicitly heuristic until outcome calibration exists.
-# ============================================================
-
-ATLAS_V11_MIN_DATA_QUALITY = float(os.environ.get("ATLAS_V11_MIN_DATA_QUALITY", "70"))
+TA_QUALITY = float(os.environ.get("ATLAS_V11_MIN_DATA_QUALITY", "70"))
 ATLAS_V11_MIN_RR = float(os.environ.get("ATLAS_V11_MIN_RR", "2.0"))
 ATLAS_V11_MAX_CORR = float(os.environ.get("ATLAS_V11_MAX_CORR", "0.85"))
 ATLAS_V11_MAX_CONCENTRATION = float(os.environ.get("ATLAS_V11_MAX_CONCENTRATION", "0.65"))
@@ -7602,7 +7591,20 @@ def main():
         print(f"📌 Image Table: {ENABLE_IMAGE_TABLE}")
         print()
         
-        if run_mode == "AUTO":
+        # GitHub Actions is the production scheduler.  A real scheduled
+        # event is authoritative: once GitHub has started this job, ATLAS
+        # must execute the full ANALYSIS + SNAPSHOT cycle and must not apply
+        # local hour-modulo scheduling rules.
+        scheduled_workflow = (
+            os.environ.get("ATLAS_SCHEDULED_CADENCE", "").strip().lower() == "workflow"
+            and os.environ.get("GITHUB_EVENT_NAME", "").strip().lower() == "schedule"
+        )
+
+        if scheduled_workflow:
+            plan = _automatic_run_plan()
+            do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
+            print("⏰ GitHub scheduled event detected → forcing ANALYSIS + SNAPSHOT")
+        elif run_mode == "AUTO":
             plan = _automatic_run_plan()
             do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
         elif run_mode == "SNAPSHOT":
