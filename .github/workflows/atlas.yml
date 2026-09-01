@@ -5,15 +5,37 @@
 # .github/workflows/atlas.yml
 #
 # اجرای خودکار:
-# هر 4 ساعت یک‌بار، در ابتدای ساعت (UTC)
-# 00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00 UTC
+# هر 4 ساعت یکبار
+#
+# Cron بر اساس UTC است.
+# 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
+#
+# با توجه به UTC+3:30 ایران:
+# 04:00 / 08:00 / 12:00 / 16:00 / 20:00 / 00:00 تهران
+#
+# نکته:
+# GitHub ممکن است اجرای scheduled workflow را چند دقیقه
+# جابهجا کند؛ cron زمان دقیق تضمینشده نیست.
+#
+# ⚠ تغییر مهم نسبت به نسخه قبلی:
+# timeout-minutes از 20 به 35 افزایش یافت. با در نظر گرفتن:
+#   - بکتست 180 روزه روی چندین نماد (ATLAS_BACKTEST_DAYS=180)
+#   - فراخوانیهای ccxt به Bybit با retry
+#   - تأخیرهای عمدی ریتلیمیت تلگرام بین پیامها/مقصدها
+#     (TELEGRAM_PRIVATE_DELAY=1.5s, TELEGRAM_GROUP_DELAY=3.0s؛
+#     با چندین بخش پیام و 2 مقصد جمع میشود)
+#   - تولید PNG (matplotlib) و صوت (edge-tts/gTTS)
+# اجرای کامل بهسادگی میتوانست از 20 دقیقه عبور کند و GitHub
+# پروسه را وسط ارسال گزارشهای تلگرام Kill میکرد — یعنی برخی
+# پیامها اصلاً ارسال نمیشدند، بدون اینکه خطای واضحی در لاگ باشد
+# (Job صرفاً بهخاطر timeout قطع میشود).
 # ============================================================
 
 name: ATLAS AI Bot
 
 on:
   schedule:
-    - cron: "0 */4 * * *"
+    - cron: "30 */4 * * *"
 
   workflow_dispatch:
     inputs:
@@ -42,24 +64,39 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
 
+      # --------------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      # --------------------------------------------------------
+      # 2. Python
+      # --------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
+
+      # --------------------------------------------------------
+      # 3. Dependencies
+      # --------------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+
+      # --------------------------------------------------------
+      # 4. Environment / diagnostics
+      # --------------------------------------------------------
       - name: Show ATLAS configuration
         env:
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
@@ -76,67 +113,180 @@ jobs:
           echo "GitHub ref: ${{ github.ref }}"
           echo "=================================================="
 
+      # --------------------------------------------------------
+      # 4b. Sanity-check required Telegram secrets BEFORE running
+      #      the bot, so a missing secret fails fast with a clear
+      #      message instead of failing silently 20+ minutes later.
+      # --------------------------------------------------------
+      - name: Verify required secrets are present
+        run: |
+          missing=0
+          if [ -z "${{ secrets.TELEGRAM_TOKEN }}" ]; then
+            echo "❌ Secret TELEGRAM_TOKEN is missing"
+            missing=1
+          fi
+          if [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -z "${{ secrets.TELEGRAM_GROUP_CHAT_ID }}" ]; then
+            echo "❌ Neither TELEGRAM_CHAT_ID nor TELEGRAM_GROUP_CHAT_ID is set"
+            missing=1
+          fi
+          if [ "$missing" = "1" ]; then
+            echo "⛔ Required Telegram secrets are missing — see repo Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "✅ Telegram secrets present"
+
+
+      # --------------------------------------------------------
+      # 5. Run ATLAS
+      # --------------------------------------------------------
       - name: Run ATLAS
         env:
+
+          # ----------------------------------------------------
+          # Core configuration
+          # ----------------------------------------------------
           PYTHONUNBUFFERED: "1"
+
           ATLAS_VERSION: "11.5"
           ATLAS_ENGINE: "BOTH"
+
+          # مهم:
+          # زمانبندی را GitHub کنترل میکند،
+          # نه منطق ساعت داخلی bot.py
           ATLAS_SCHEDULED_CADENCE: "workflow"
+
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
+
           ATLAS_TIMEFRAME: "4H"
+
+          # ----------------------------------------------------
+          # TradingView / market configuration
+          # ----------------------------------------------------
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
           ATLAS_TRADINGVIEW_INTERVAL: "240"
+
+          # ----------------------------------------------------
+          # Snapshot
+          # ----------------------------------------------------
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+          # ----------------------------------------------------
+          # Risk management
+          # ----------------------------------------------------
           RISK_PER_TRADE_PCT: "1.5"
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
           ATLAS_MAX_LEVERAGE: "10"
+
+          # ----------------------------------------------------
+          # Signal thresholds
+          # ----------------------------------------------------
           ATLAS_MIN_CONFIDENCE: "55"
           ATLAS_MIN_WATCH_CONFIDENCE: "45"
           ATLAS_MIN_EXECUTABLE_RR: "1.5"
           ATLAS_MIN_VOLUME_RATIO: "0.60"
+
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+
+          # ----------------------------------------------------
+          # Backtest
+          # ----------------------------------------------------
           ATLAS_BACKTEST_DAYS: "180"
           ATLAS_SIGNAL_HORIZON_BARS: "36"
           ATLAS_BACKTEST_IMPROVEMENT: "10"
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
+          # ----------------------------------------------------
+          # Event deduplication
+          # ----------------------------------------------------
           ATLAS_CANDLE_EVENT_DEDUP: "1"
+
+          # ----------------------------------------------------
+          # Local storage
+          # ----------------------------------------------------
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
+
+          # ----------------------------------------------------
+          # Telegram
+          # ----------------------------------------------------
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          # ----------------------------------------------------
+          # SUPABASE
+          # ----------------------------------------------------
+          # حفظ شده برای ذخیره persistent دادههای ATLAS
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+          # ----------------------------------------------------
+          # Market / data APIs
+          # ----------------------------------------------------
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+          # ----------------------------------------------------
+          # News
+          # ----------------------------------------------------
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+          # ----------------------------------------------------
+          # Other APIs
+          # ----------------------------------------------------
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          # ----------------------------------------------------
+          # TradingView confirmation
+          # ----------------------------------------------------
           TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
+          # ----------------------------------------------------
+          # H4 fallback
+          # ----------------------------------------------------
           ATLAS_H4_FALLBACK_MIN_SCORE: "60"
+
+          # ----------------------------------------------------
+          # Voice report
+          # ----------------------------------------------------
           ATLAS_ENABLE_VOICE: "1"
           ATLAS_VOICE_TYPE: "female"
           ATLAS_VOICE_LANGUAGE: "fa"
           ATLAS_AUTO_SEND_VOICE: "1"
+
+          # ----------------------------------------------------
+          # PNG report
+          # ----------------------------------------------------
           ATLAS_ENABLE_IMAGE_TABLE: "1"
 
         run: |
           python bot.py
 
+
+      # --------------------------------------------------------
+      # 6. Upload logs if ATLAS fails
+      # --------------------------------------------------------
       - name: Upload ATLAS logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: atlas-failure-log-${{ github.run_id }}
+
           path: |
             *.log
             *.txt
             atlas_changelog.jsonl
             atlas_v11.sqlite3
+
           if-no-files-found: ignore
 
+
+      # --------------------------------------------------------
+      # 7. Success marker
+      # --------------------------------------------------------
       - name: ATLAS completed
         if: success()
         run: |
@@ -146,4 +296,8 @@ jobs:
           echo "📌 Mode: ${{ github.event.inputs.run_mode || 'BOTH' }}"
           echo "📌 Cadence: workflow"
           echo "📌 Timeframe: 4H"
+          echo "📌 Supabase: configured"
+          echo "📌 Telegram: configured"
+          echo "📌 Voice: enabled"
+          echo "📌 PNG: enabled"
           echo "=================================================="
