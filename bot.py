@@ -8109,13 +8109,26 @@ def main():
             breadth = market_breadth(results)
             
             print(f"📊 Building reports...")
-            # فقط گزارش‌های متنی خلاصه (بدون جداول) ارسال می‌شوند
+            
+            # تولید گزارش یکپارچه با تفسیر انسانی
+            unified_report = generate_unified_report(
+                results, top10, dynamic30, macro, news, btc_regime, breadth, market_info
+            )
+            
+            print(f"📄 Unified report: {len(unified_report)} chars → {len(split_telegram(unified_report))} parts")
+            
+            # ارسال گزارش یکپارچه
+            parts, sent, errors = send_report(unified_report)
+            total_sent += sent
+            all_errors.extend(errors)
+            if sent > 0:
+                print(f"✅ Sent {sent} parts (unified report)")
+            
+            # همچنین گزارش‌های قبلی برای سازگاری ارسال می‌شوند
             outputs = build_two_engine_reports(
                 results, top10, dynamic30, macro, news, market_info,
                 unavailable, btc_regime, breadth
             )
-            # گزارش‌های جدولی به‌صورت CSV ارسال می‌شوند، نه متن
-            # build_dashboard_table و full_table_report و signal_ranking از اینجا حذف شدند
             
             print(f"📄 Total text outputs: {len(outputs)}")
             for idx, payload in enumerate(outputs, 1):
@@ -8250,6 +8263,422 @@ def main():
         except Exception:
             pass
         return 1
+# ============================================================
+# v11.5 - HUMAN-READABLE REPORT ENGINE
+# ============================================================
 
+def generate_human_readable_report(results, top10, dynamic30, macro, news, btc_regime):
+    original_report = build_report(results, top10, dynamic30, macro, news, None, 0, btc_regime, None)
+    human_sections = []
+    human_sections.append("")
+    human_sections.append("━━━━━━━━━━━━━━━━━━")
+    human_sections.append("📝 تفسیر تحلیلی هوشمند (برای هر دارایی)")
+    human_sections.append("━━━━━━━━━━━━━━━━━━")
+    
+    top_opportunities = top5_opportunities(results) or results[:5]
+    for r in top_opportunities[:5]:
+        coin = r.get("coin", "UNKNOWN")
+        direction = r.get("direction", "NEUTRAL")
+        setup_type = r.get("setup_type", "NO SETUP")
+        entry = r.get("entry")
+        sl = r.get("sl")
+        tp1 = r.get("tp1")
+        tp2 = r.get("tp2")
+        rr = r.get("rr")
+        confidence = r.get("confidence", 0)
+        signal_score = r.get("signal_score", 0)
+        win_prob = r.get("win_probability")
+        regime = r.get("regime_trend", "نامشخص")
+        volatility = r.get("regime_volatility", "نامشخص")
+        reasons = r.get("no_trade_reasons", [])
+        contradictions = r.get("contradictions", [])
+        session, session_label, session_multiplier = get_current_session()
+        
+        setup_map = {
+            "BREAKOUT": "شکست مقاومت (Breakout) با تأیید حجم",
+            "BREAKOUT WATCH": "شکست مقاومت در انتظار تأیید",
+            "BREAKDOWN": "شکست حمایت (Breakdown) با تأیید حجم",
+            "BREAKDOWN WATCH": "شکست حمایت در انتظار تأیید",
+            "PULLBACK": "بازگشت به حمایت (Pullback) و ادامه روند",
+            "REVERSAL": "برگشت قیمت از سطح کلیدی (Reversal)",
+            "RANGE": "بازار در محدوده (Range) - منتظر شکست",
+            "TREND CONTINUATION": "ادامه روند",
+            "NO SETUP": "ستاپ مشخص نیست"
+        }
+        setup_desc = setup_map.get(setup_type, setup_type.replace("_", " ").lower())
+        
+        section = []
+        section.append("")
+        section.append(f"🔹 تحلیل {coin}")
+        section.append("───────────────────")
+        
+        if direction == "LONG":
+            section.append(f"📈 جهت‌گیری: **صعودی (LONG)** — {setup_desc}")
+        elif direction == "SHORT":
+            section.append(f"📉 جهت‌گیری: **نزولی (SHORT)** — {setup_desc}")
+        else:
+            section.append(f"⚪ جهت‌گیری: خنثی — {setup_desc}")
+        
+        if entry and sl and tp1:
+            section.append("")
+            section.append("🎯 سناریوی معاملاتی:")
+            if direction == "LONG":
+                section.append(f"   • ورود: تایید شکست بالای {fmt(entry)} با افزایش حجم")
+            else:
+                section.append(f"   • ورود: تایید شکست زیر {fmt(entry)} با افزایش حجم")
+            section.append(f"   • حد ضرر: زیر {fmt(sl)} برای محافظت در برابر شکست کاذب")
+            section.append(f"   • هدف اول: {fmt(tp1)}")
+            if tp2:
+                section.append(f"   • هدف دوم: {fmt(tp2)} در صورت تداوم مومنتوم")
+            if rr:
+                section.append(f"   • نسبت ریسک به ریوارد: حدود ۱ به {rr:.1f}")
+        else:
+            section.append("")
+            section.append("⏳ سناریوی معاملاتی: هنوز ورود معتبر تأیید نشده است.")
+            if reasons:
+                section.append("   دلایل: " + "، ".join([translate_reason_fa(r) for r in reasons[:3]]))
+        
+        section.append("")
+        section.append("📊 تحلیل عمیق بازار:")
+        section.append(f"   • رژیم کلی بازار: {regime}")
+        section.append(f"   • سطح نوسان: {volatility}")
+        section.append(f"   • امتیاز سیگنال: {signal_score:.0f}/۱۰۰")
+        section.append(f"   • اطمینان مدل: {confidence:.0f}%")
+        if win_prob is not None:
+            section.append(f"   • احتمال برد (کالیبره): {win_prob:.0f}%")
+        else:
+            section.append("   • احتمال برد: هنوز کالیبره نشده (نیاز به معامله بسته بیشتر)")
+        
+        if contradictions:
+            section.append("")
+            section.append("⚠️ تضادهای شناسایی‌شده:")
+            for c in contradictions[:3]:
+                section.append(f"   • {translate_reason_fa(c)}")
+        
+        if sl:
+            section.append("")
+            if direction == "LONG":
+                section.append(f"🔴 سطح ابطال: زیر {fmt(sl)}، که تز صعودی را باطل می‌کند.")
+            else:
+                section.append(f"🔴 سطح ابطال: بالای {fmt(sl)}، که تز نزولی را باطل می‌کند.")
+        
+        section.append("")
+        section.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
+        human_sections.append("\n".join(section))
+    
+    return original_report + "\n\n" + "\n".join(human_sections)
+
+
+def generate_unified_report(results, top10, dynamic30, macro, news, btc_regime, breadth, market_info=None):
+    original_report = build_report(results, top10, dynamic30, macro, news, market_info, 0, btc_regime, breadth)
+    
+    personal_report_text = ""
+    if get_engine_mode() in ("PERSONAL", "BOTH"):
+        personal_report_text = build_personal_report(results, macro, news, market_info, btc_regime, breadth)
+    
+    human_sections = []
+    human_sections.append("")
+    human_sections.append("━━━━━━━━━━━━━━━━━━")
+    human_sections.append("📝 تفسیر تحلیلی جامع (همه ارزها)")
+    human_sections.append("━━━━━━━━━━━━━━━━━━")
+    
+    ranked_results = sorted(
+        [r for r in results if r.get("price") is not None],
+        key=lambda x: (x.get("opportunity_score", 0), x.get("confidence", 0)),
+        reverse=True
+    )
+    top_assets = ranked_results[:10]
+    
+    for idx, r in enumerate(top_assets, 1):
+        coin = r.get("coin", "UNKNOWN")
+        direction = r.get("direction", "NEUTRAL")
+        setup_type = r.get("setup_type", "NO SETUP")
+        decision_state = r.get("decision_state", "NO TRADE")
+        price = r.get("price")
+        change = r.get("change")
+        support = r.get("support")
+        resistance = r.get("resistance")
+        entry = r.get("entry")
+        sl = r.get("sl")
+        tp1 = r.get("tp1")
+        tp2 = r.get("tp2")
+        tp3 = r.get("tp3")
+        tp4 = r.get("tp4")
+        rr = r.get("rr")
+        confidence = r.get("confidence", 0)
+        signal_score = r.get("signal_score", 0)
+        model_strength = r.get("model_strength", 0)
+        win_prob = r.get("win_probability")
+        win_prob_tier = r.get("win_probability_tier", "NOT_CALIBRATED")
+        regime_trend = r.get("regime_trend", "نامشخص")
+        regime_volatility = r.get("regime_volatility", "نامشخص")
+        regime_derivatives = r.get("regime_derivatives", "نامشخص")
+        regime_score = r.get("regime_score", 0)
+        data_quality = r.get("data_quality", 0)
+        liquidity = r.get("liquidity", "UNKNOWN")
+        volume_ratio = r.get("volume_ratio")
+        rsi = r.get("rsi")
+        macd = r.get("macd", "N/A")
+        h4_trend = r.get("h4_trend", "UNKNOWN")
+        d1_trend = r.get("d1_trend", "UNKNOWN")
+        w1_trend = r.get("w1_trend", "UNKNOWN")
+        reasons = r.get("no_trade_reasons", [])
+        contradictions = r.get("contradictions", [])
+        gate = r.get("gate", "BLOCK")
+        gate_reason = r.get("gate_reason", "")
+        session, session_label, session_multiplier = get_current_session()
+        
+        section = []
+        section.append("")
+        section.append(f"🔹 {idx}. تحلیل {coin}")
+        section.append("───────────────────")
+        
+        if decision_state in ("BUY CONFIRMATION", "SELL CONFIRMATION") and gate == "PASS":
+            status_emoji = "🟢" if "BUY" in decision_state else "🔴"
+            status_text = "قابل اجرا (EXECUTABLE)" if "BUY" in decision_state else "قابل اجرا (EXECUTABLE)"
+        elif "WATCH" in decision_state:
+            status_emoji = "🟡"
+            status_text = "در انتظار تأیید (WATCH)"
+        else:
+            status_emoji = "⚪"
+            status_text = "بدون سیگنال (NO TRADE)"
+        
+        direction_text = {
+            "LONG": "صعودی 📈",
+            "SHORT": "نزولی 📉",
+            "NEUTRAL": "خنثی ➡️",
+            "NONE": "نامشخص ❓"
+        }.get(direction, "نامشخص ❓")
+        
+        setup_map = {
+            "BREAKOUT": "شکست مقاومت (Breakout)",
+            "BREAKOUT WATCH": "شکست مقاومت در انتظار تأیید",
+            "BREAKDOWN": "شکست حمایت (Breakdown)",
+            "BREAKDOWN WATCH": "شکست حمایت در انتظار تأیید",
+            "PULLBACK": "بازگشت به حمایت (Pullback)",
+            "REVERSAL": "برگشت از سطح کلیدی (Reversal)",
+            "RANGE": "بازار در محدوده (Range)",
+            "TREND CONTINUATION": "ادامه روند",
+            "NO SETUP": "ستاپ مشخص نیست"
+        }
+        setup_desc = setup_map.get(setup_type, setup_type.replace("_", " ").lower())
+        
+        section.append(f"📊 وضعیت: {status_emoji} {status_text}")
+        section.append(f"🎯 جهت‌گیری: {direction_text}")
+        section.append(f"📐 نوع ستاپ: {setup_desc}")
+        section.append(f"💰 قیمت فعلی: {fmt(price)}")
+        if change is not None:
+            change_emoji = "🟢" if change > 0 else "🔴" if change < 0 else "➡️"
+            section.append(f"📈 تغییر ۲۴ساعته: {change_emoji} {change:+.2f}%")
+        
+        section.append("")
+        section.append("🎯 سناریوی معاملاتی:")
+        if entry and sl and tp1 and gate == "PASS" and decision_state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+            if direction == "LONG":
+                section.append(f"   • ورود: تایید شکست و تثبیت بالای {fmt(entry)} با افزایش حجم")
+                section.append(f"   • حد ضرر: زیر {fmt(sl)} (محافظت در برابر شکست کاذب)")
+            else:
+                section.append(f"   • ورود: تایید شکست و تثبیت زیر {fmt(entry)} با افزایش حجم")
+                section.append(f"   • حد ضرر: بالای {fmt(sl)} (محافظت در برابر شکست کاذب)")
+            section.append(f"   • هدف اول (TP1): {fmt(tp1)}")
+            if tp2:
+                section.append(f"   • هدف دوم (TP2): {fmt(tp2)} (در صورت تداوم مومنتوم)")
+            if tp3:
+                section.append(f"   • هدف سوم (TP3): {fmt(tp3)}")
+            if tp4:
+                section.append(f"   • هدف چهارم (TP4): {fmt(tp4)}")
+            if rr:
+                rr_text = "عالی" if rr >= 3 else "خوب" if rr >= 2 else "متوسط" if rr >= 1.5 else "پایین"
+                section.append(f"   • نسبت ریسک به ریوارد: ۱ به {rr:.2f} ({rr_text})")
+        else:
+            section.append("   ⏳ ورود معتبر تأیید نشده است.")
+            if reasons:
+                section.append(f"   🔸 دلایل: " + "؛ ".join([translate_reason_fa(r) for r in reasons[:3]]))
+            elif gate == "BLOCK" and gate_reason:
+                section.append(f"   🔸 گیت مسدود: {translate_reason_fa(gate_reason)}")
+            else:
+                section.append("   🔸 منتظر تأیید ساختار و افزایش حجم باشید.")
+        
+        section.append("")
+        section.append("📊 تحلیل عمیق بازار:")
+        
+        regime_map = {
+            "RISK_ON": "🟢 ریسک‌پذیر (Risk-On) - تمایل صعودی",
+            "RISK_OFF": "🔴 ریسک‌گریز (Risk-Off) - تمایل نزولی",
+            "NEUTRAL": "🟡 خنثی",
+            "TRENDING_BULL": "🟢 روند صعودی قوی",
+            "TRENDING_BEAR": "🔴 روند نزولی قوی",
+            "ACCUMULATION": "🟡 انباشت (خریداران قوی‌تر)",
+            "DISTRIBUTION": "🟠 توزیع (فروشندگان قوی‌تر)",
+            "RANGE": "🟡 محدوده (خنثی)"
+        }
+        regime_text = regime_map.get(regime_trend, regime_trend)
+        section.append(f"   • رژیم بازار: {regime_text} (امتیاز: {regime_score}/۱۰۰)")
+        
+        vol_map = {
+            "LOW": "🟢 پایین - مناسب برای ورود",
+            "NORMAL": "🟡 عادی - قابل قبول",
+            "HIGH": "🟠 بالا - احتیاط بیشتر",
+            "EXTREME": "🔴 فوق‌العاده بالا - ریسک زیاد"
+        }
+        vol_text = vol_map.get(regime_volatility, regime_volatility)
+        section.append(f"   • سطح نوسان: {vol_text}")
+        
+        deriv_map = {
+            "NEUTRAL": "🟢 خنثی - بدون فشار اضافی",
+            "LONG_CROWDED": "🟠 ازدحام خریداران - خطر ریزش",
+            "SHORT_CROWDED": "🟠 ازدحام فروشندگان - خطر رشد",
+            "UNAVAILABLE": "⚪ در دسترس نیست"
+        }
+        deriv_text = deriv_map.get(regime_derivatives, regime_derivatives)
+        section.append(f"   • وضعیت مشتقات: {deriv_text}")
+        
+        dq_label = "عالی" if data_quality >= 80 else "خوب" if data_quality >= 60 else "متوسط" if data_quality >= 40 else "ضعیف"
+        section.append(f"   • کیفیت داده: {data_quality:.0f}% ({dq_label})")
+        liq_map = {"HIGH": "🟢 بالا", "MEDIUM": "🟡 متوسط", "LOW": "🔴 پایین"}
+        section.append(f"   • نقدینگی: {liq_map.get(liquidity, liquidity)}")
+        
+        if volume_ratio is not None:
+            vol_desc = "بسیار بالا (تأیید قوی)" if volume_ratio >= 1.5 else "بالاتر از میانگین" if volume_ratio >= 1.2 else "نزدیک به میانگین" if volume_ratio >= 0.8 else "پایین‌تر از میانگین (نیاز به احتیاط)"
+            section.append(f"   • نسبت حجم: {volume_ratio:.2f}x ({vol_desc})")
+        
+        if rsi is not None:
+            rsi_state = "اشباع خرید" if rsi > 70 else "اشباع فروش" if rsi < 30 else "منطقه تعادل" if 45 <= rsi <= 55 else "متمایل به صعود" if rsi > 55 else "متمایل به نزول"
+            section.append(f"   • RSI: {rsi:.1f} ({rsi_state})")
+        section.append(f"   • MACD: {macd}")
+        section.append(f"   • روندها: H4={h4_trend} | D1={d1_trend} | W1={w1_trend}")
+        if support or resistance:
+            section.append(f"   • سطوح کلیدی: حمایت {fmt(support)} ↔ مقاومت {fmt(resistance)}")
+        
+        section.append("")
+        section.append("📈 امتیازات و احتمال:")
+        section.append(f"   • امتیاز سیگنال (Signal Score): {signal_score:.0f}/۱۰۰")
+        section.append(f"   • قدرت مدل (Model Strength): {model_strength:.0f}%")
+        if win_prob is not None:
+            prob_text = "بالا" if win_prob >= 65 else "متوسط" if win_prob >= 50 else "پایین"
+            section.append(f"   • احتمال برد (کالیبره): {win_prob:.0f}% ({prob_text}) — سطح: {win_prob_tier}")
+        else:
+            section.append(f"   • احتمال برد: هنوز کالیبره نشده (نیاز به معامله بسته بیشتر)")
+        
+        if contradictions:
+            section.append("")
+            section.append("⚠️ تضادهای شناسایی‌شده:")
+            for c in contradictions[:4]:
+                section.append(f"   • {translate_reason_fa(c)}")
+        
+        if r.get("warning"):
+            section.append("")
+            section.append(f"⚠️ هشدار: {r.get('warning')}")
+        
+        if sl and direction != "NEUTRAL":
+            section.append("")
+            if direction == "LONG":
+                section.append(f"🔴 سطح ابطال (Invalidation): زیر {fmt(sl)}")
+                section.append(f"   در صورت بسته‌شدن کندل زیر {fmt(sl)}، تز صعودی باطل شده و احتمال ریزش تا حمایت بعدی وجود دارد.")
+            else:
+                section.append(f"🔴 سطح ابطال (Invalidation): بالای {fmt(sl)}")
+                section.append(f"   در صورت بسته‌شدن کندل بالای {fmt(sl)}، تز نزولی باطل شده و احتمال رشد تا مقاومت بعدی وجود دارد.")
+        
+        section.append("")
+        section.append("🔄 سناریوی جایگزین:")
+        if direction == "LONG" and support:
+            section.append(f"   • در صورت شکست حمایت {fmt(support)}، سناریوی نزولی فعال می‌شود.")
+            section.append(f"   • هدف نزولی احتمالی: {fmt(support * 0.97)}")
+        elif direction == "SHORT" and resistance:
+            section.append(f"   • در صورت شکست مقاومت {fmt(resistance)}، سناریوی صعودی فعال می‌شود.")
+            section.append(f"   • هدف صعودی احتمالی: {fmt(resistance * 1.03)}")
+        else:
+            section.append("   • در صورت تغییر ساختار، سناریو بازبینی خواهد شد.")
+            if support and resistance:
+                section.append(f"   • محدوده فعلی: {fmt(support)} تا {fmt(resistance)}")
+        
+        section.append("")
+        section.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
+        if session == "OVERLAP":
+            section.append("   ✅ همپوشانی سشن‌ها - نقدینگی بالا، اسپرد کمتر")
+        elif session == "CLOSED":
+            section.append("   ⚠️ خارج از سشن - نقدینگی پایین، اسپرد بیشتر")
+        
+        human_sections.append("\n".join(section))
+    
+    summary_section = []
+    summary_section.append("")
+    summary_section.append("━━━━━━━━━━━━━━━━━━")
+    summary_section.append("🧠 خلاصه‌ی هوشمند و توصیه‌ی نهایی")
+    summary_section.append("━━━━━━━━━━━━━━━━━━")
+    
+    total = len(results)
+    executable = sum(1 for r in results if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and r.get("gate") == "PASS")
+    bullish = sum(1 for r in results if r.get("direction") == "LONG")
+    bearish = sum(1 for r in results if r.get("direction") == "SHORT")
+    watch = sum(1 for r in results if "WATCH" in str(r.get("decision_state", "")))
+    
+    summary_section.append(f"📊 آمار کلی: {total} ارز بررسی شد | {executable} سیگنال اجرایی | {watch} در انتظار تأیید")
+    summary_section.append(f"📈 جهت‌گیری بازار: {bullish} صعودی | {bearish} نزولی")
+    
+    if btc_regime:
+        btc_state = btc_regime.get("regime", "UNKNOWN")
+        if btc_state == "RISK_ON":
+            summary_section.append("🟢 رژیم کلی بیت‌کوین: ریسک‌پذیر (Risk-On) — تمایل کلی بازار به سمت صعود است.")
+        elif btc_state == "RISK_OFF":
+            summary_section.append("🔴 رژیم کلی بیت‌کوین: ریسک‌گریز (Risk-Off) — تمایل کلی بازار به سمت نزول است.")
+        else:
+            summary_section.append("🟡 رژیم کلی بیت‌کوین: خنثی — بازار جهت مشخصی ندارد.")
+    
+    best = None
+    best_score = -1
+    for r in results:
+        if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and r.get("gate") == "PASS":
+            score = (r.get("opportunity_score", 0) * 0.5) + (r.get("confidence", 0) * 0.3) + (min(r.get("rr", 0) or 0, 5) * 4)
+            if score > best_score:
+                best_score = score
+                best = r
+    
+    if best:
+        direction_emoji = "🟢" if best.get("direction") == "LONG" else "🔴"
+        summary_section.append("")
+        summary_section.append(f"🏆 بهترین فرصت: {direction_emoji} {best.get('coin')}")
+        summary_section.append(f"   • جهت‌گیری: {'خرید' if best.get('direction') == 'LONG' else 'فروش'}")
+        summary_section.append(f"   • نقطه ورود: {fmt(best.get('entry'))}")
+        summary_section.append(f"   • حد ضرر: {fmt(best.get('sl'))}")
+        summary_section.append(f"   • هدف اول: {fmt(best.get('tp1'))}")
+        if best.get('tp2'):
+            summary_section.append(f"   • هدف دوم: {fmt(best.get('tp2'))}")
+        summary_section.append(f"   • نسبت R/R: {best.get('rr', 0):.2f}")
+        summary_section.append(f"   • اطمینان: {best.get('confidence', 0)}%")
+        
+        if best.get('win_probability') and best.get('win_probability') >= 60:
+            summary_section.append("")
+            summary_section.append("✅ توصیه: با توجه به امتیاز بالا و احتمال برد مناسب، این فرصت قابل بررسی است.")
+            summary_section.append("   🔹 حجم معامله را بر اساس ریسک‌پذیری خود تنظیم کنید.")
+            summary_section.append("   🔹 حد ضرر را حتماً رعایت کنید.")
+        else:
+            summary_section.append("")
+            summary_section.append("⚠️ توصیه: با احتیاط رفتار کنید. احتمال برد هنوز در سطح اطمینان‌بخشی نیست.")
+            summary_section.append("   🔹 منتظر تأیید بیشتر یا بهبود شرایط بازار باشید.")
+    else:
+        summary_section.append("")
+        summary_section.append("⚪ هیچ فرصت اجرایی با کیفیت کافی پیدا نشد.")
+        summary_section.append("   🔹 توصیه: در جایگاه ناظر (HOLD) باشید و منتظر شکل‌گیری ستاپ جدید بمانید.")
+    
+    if news and news.get("impact") == "HIGH":
+        summary_section.append("")
+        summary_section.append(f"📰 اخبار مهم: {news.get('bias', '')} | شدت تأثیر: بالا")
+        summary_section.append("   ⚠️ در معاملات خود احتیاط بیشتری به خرج دهید.")
+    
+    summary_section.append("")
+    summary_section.append("━━━━━━━━━━━━━━━━━━")
+    summary_section.append("🔔 این گزارش یک توصیه‌ی سرمایه‌گذاری قطعی نیست.")
+    summary_section.append("   همیشه قبل از هر معامله، تحلیل خود را انجام دهید.")
+    summary_section.append(f"🕐 آخرین بروزرسانی: {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} تهران")
+    
+    final_report = original_report
+    if personal_report_text:
+        final_report += "\n\n" + personal_report_text
+    final_report += "\n\n" + "\n".join(human_sections)
+    final_report += "\n\n" + "\n".join(summary_section)
+    
+    return final_report
+    
 if __name__ == "__main__":
     raise SystemExit(main())
