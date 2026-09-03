@@ -5049,6 +5049,11 @@ CSV_COLUMNS = (
     "Direction", "RepeatSignal", "Reason", "ModelVersion",
     "DataQuality", "SignalID", "RegimeTrend", "RegimeVolatility",
     "RegimeDerivatives", "RegimeScore",
+    "سناریوی_معاملاتی",
+    "تحلیل_عمیق_بازار",
+    "سطوح_کلیدی",
+    "نقاط_ورود_و_خروج",
+    "توصیه_نهایی"
 )
 
 def _csv_group(symbol, top10, dynamic30, personal_symbols):
@@ -5090,6 +5095,156 @@ def _csv_safe_plan(r):
         return None
     return entry, sl, tp1, tp2
 
+def _resolve_csv_universe(results, top10, dynamic30):
+    """Returns ordered symbols for CSV export."""
+    ordered = []
+    for sym in list(top10 or ATLAS_PRIORITY_TOP10) + list(dynamic30 or []) + list(ATLAS_PERSONAL_ASSETS) + list(ATLAS_METALS):
+        s = str(sym).upper()
+        if s and s not in ordered:
+            ordered.append(s)
+    return ordered
+
+def _csv_text_for_symbols(symbols, results, top10, dynamic30):
+    import csv, io
+    personal_symbols = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    result_map = {str(r.get("coin") or "").upper(): dict(r) for r in (results or []) if r.get("coin")}
+    rows = []
+    for sym in symbols:
+        r = result_map.get(sym)
+        if r is None and sym in ATLAS_METALS:
+            r = _metal_analysis(sym)
+            if r:
+                r = v11_apply_intelligence(r)
+        if not r:
+            continue
+        
+        # ===== تولید تحلیل انسانی برای ستون‌های جدید =====
+        direction_text = "صعودی" if r.get("direction") == "LONG" else "نزولی" if r.get("direction") == "SHORT" else "خنثی"
+        setup_type = r.get("setup_type", "NO SETUP")
+        setup_map = {
+            "BREAKOUT": "شکست مقاومت با تأیید حجم",
+            "BREAKDOWN": "شکست حمایت با تأیید حجم",
+            "PULLBACK": "بازگشت به حمایت و ادامه روند",
+            "REVERSAL": "برگشت از سطح کلیدی",
+            "RANGE": "بازار در محدوده - منتظر شکست",
+            "TREND CONTINUATION": "ادامه روند",
+            "NO SETUP": "ستاپ مشخص نیست"
+        }
+        setup_desc = setup_map.get(setup_type, setup_type.replace("_", " ").lower())
+        
+        plan = _csv_safe_plan(r)
+        entry = sl = tp1 = tp2 = ""
+        if plan:
+            entry, sl, tp1, tp2 = plan
+        
+        scenario = f"{direction_text} - {setup_desc}"
+        if entry and sl and tp1:
+            scenario += f" | ورود: {fmt(entry)} | حدضرر: {fmt(sl)} | هدف: {fmt(tp1)}"
+        
+        deep_analysis = f"رژیم: {r.get('regime_trend', 'نامشخص')} | نوسان: {r.get('regime_volatility', 'نامشخص')}"
+        if r.get("rsi") is not None:
+            deep_analysis += f" | RSI: {r.get('rsi'):.1f}"
+        if r.get("volume_ratio") is not None:
+            deep_analysis += f" | حجم: {r.get('volume_ratio'):.2f}x"
+        
+        key_levels = f"حمایت: {fmt(r.get('support'))} | مقاومت: {fmt(r.get('resistance'))}"
+        
+        entry_exit = f"ورود: {fmt(entry)} | حدضرر: {fmt(sl)} | TP1: {fmt(tp1)} | TP2: {fmt(tp2)}" if entry and sl else "نامشخص"
+        
+        if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and r.get("gate") == "PASS":
+            recommendation = "قابل اجرا - با احتیاط وارد شوید"
+        elif "WATCH" in str(r.get("decision_state", "")):
+            recommendation = "در انتظار تأیید - صبر کنید"
+        else:
+            recommendation = "بدون سیگنال - در جایگاه ناظر باشید"
+        
+        rows.append([
+            sym,
+            _csv_status(r),
+            r.get("decision_state") or r.get("action") or "WAIT",
+            _csv_number(r.get("price")),
+            _csv_number(r.get("change"), 4),
+            _csv_number(r.get("support")),
+            _csv_number(r.get("resistance")),
+            _csv_number(entry),
+            _csv_number(sl),
+            _csv_number(tp1),
+            _csv_number(tp2),
+            _csv_number(r.get("confidence"), 2),
+            r.get("h4_trend", "UNKNOWN"),
+            r.get("d1_trend", "UNKNOWN"),
+            r.get("w1_trend", "UNKNOWN"),
+            _csv_number(r.get("rsi"), 2),
+            r.get("macd", ""),
+            r.get("volume", ""),
+            _csv_number(r.get("volume_ratio"), 3),
+            _csv_number(r.get("atr_pct"), 3),
+            r.get("liquidity", ""),
+            r.get("gate", ""),
+            r.get("gate_reason", ""),
+            r.get("direction", ""),
+            bool(r.get("repeat_signal")),
+            r.get("intel_reason") or r.get("reason", ""),
+            VERSION,
+            _csv_number(r.get("data_quality"), 2),
+            r.get("signal_id", ""),
+            r.get("regime_trend", ""),
+            r.get("regime_volatility", ""),
+            r.get("regime_derivatives", ""),
+            _csv_number(r.get("regime_score"), 2),
+            r.get("intel_bias", "NEUTRAL"),
+            r.get("setup_type", "NO SETUP"),
+            _csv_number(r.get("opportunity_score"), 2),
+            _csv_number(r.get("structure_score"), 2),
+            _csv_number(r.get("momentum_score"), 2),
+            _csv_number(r.get("volume_score"), 2),
+            _csv_number(r.get("sr_score"), 2),
+            len(r.get("contradictions") or []),
+            " | ".join(r.get("contradictions") or []),
+            bool(r.get("executable")),
+            r.get("intel_decision", "WAIT"),
+            r.get("intel_signal_id", ""),
+            _csv_number(r.get("decision_confidence"), 2),
+            r.get("decision_regime_trend", ""),
+            r.get("decision_regime_volatility", ""),
+            bool(_LAST_BACKTEST_OK),
+            _csv_number(r.get("signal_score"), 2),
+            _csv_number(r.get("model_strength"), 2),
+            _csv_number(r.get("win_probability"), 1) if r.get("win_probability") is not None else "NOT_CALIBRATED",
+            r.get("win_probability_tier", ""),
+            r.get("win_probability_samples", 0),
+            # ===== ستون‌های جدید =====
+            scenario,
+            deep_analysis,
+            key_levels,
+            entry_exit,
+            recommendation
+        ])
+    
+    out = io.StringIO(newline="")
+    w = csv.writer(out, lineterminator="\n")
+    w.writerow(CSV_COLUMNS)
+    w.writerows(rows)
+    return out.getvalue()
+
+def generate_split_csv_reports(results, top10, dynamic30):
+    """Three separate CSV exports instead of one combined file."""
+    metals_set = {str(x).upper() for x in ATLAS_METALS}
+    personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS} - metals_set
+    top_dynamic_set = ({str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}
+                        | {str(x).upper() for x in (dynamic30 or [])}) - metals_set - personal_set
+
+    ordered = _resolve_csv_universe(results, top10, dynamic30)
+    personal_syms = [s for s in ordered if s in personal_set]
+    metals_syms = [s for s in ordered if s in metals_set]
+    dynamic_syms = [s for s in ordered if s in top_dynamic_set]
+
+    return {
+        "personal": _csv_text_for_symbols(personal_syms, results, top10, dynamic30),
+        "metals": _csv_text_for_symbols(metals_syms, results, top10, dynamic30),
+        "dynamic_top30": _csv_text_for_symbols(dynamic_syms, results, top10, dynamic30),
+    }
+
 # NOTE: an earlier generate_csv_report (built around the older CSV_COLUMNS schema)
 # used to live here. It was silently shadowed by the later, more complete
 # generate_csv_report defined further below (which includes the intel-engine
@@ -5125,9 +5280,7 @@ def _telegram_send_document(chat_id, content, filename, caption=None):
     return data
 
 def send_csv_report(results, top10, dynamic30):
-    """Send three separate CSVs (personal / metals / dynamic_top30) instead of
-    one combined file, as requested. Each destination gets all three documents;
-    a failure sending one file doesn't stop the others from being attempted."""
+    """Send three separate CSVs (personal / metals / dynamic_top30)."""
     dt = now_tehran()
     date_tag = shamsi(dt).replace('/', '')
     time_tag = dt.strftime('%H%M%S')
@@ -5160,7 +5313,6 @@ def send_csv_report(results, top10, dynamic30):
                 errors.append(f"CSV[{key}] {chat_id}: {e}")
                 append_changelog("CSV_EXPORT", None, None, str(e), {"file": key, "traceback": traceback.format_exc()})
     return sent, errors
-
 # ============================================================
 # REPORT FORMAT — DECISION-FIRST / COMPACT / PERSIAN
 # ============================================================
