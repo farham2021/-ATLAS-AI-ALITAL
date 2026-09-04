@@ -8678,6 +8678,571 @@ def send_signal_change_notifications(results, top10):
     return sent,errors
 
 
+
+# ============================================================
+# ATLAS v11.5 — PHASE 1 INTELLIGENCE UPGRADE
+# MTF + Signal Lifecycle + Why-Not-Trade v2 + Portfolio Risk
+# Additive by design; existing signal engine remains canonical.
+# ============================================================
+
+ATLAS_MTF_MIN_ALIGNMENT = int(os.environ.get("ATLAS_MTF_MIN_ALIGNMENT", "3"))
+ATLAS_PORTFOLIO_MAX_OPEN_RISK_PCT = float(
+    os.environ.get("ATLAS_PORTFOLIO_MAX_OPEN_RISK_PCT", os.environ.get("MAX_PORTFOLIO_OPEN_RISK_PCT", "6.0"))
+)
+ATLAS_PORTFOLIO_MAX_DIRECTIONAL_EXPOSURE_PCT = float(
+    os.environ.get("ATLAS_PORTFOLIO_MAX_DIRECTIONAL_EXPOSURE_PCT", "75")
+)
+ATLAS_LIFECYCLE_NOTIFY_ON_TP = os.environ.get("ATLAS_LIFECYCLE_NOTIFY_ON_TP", "1").strip().lower() not in ("0","false","no","off")
+
+def _p1_norm_trend(v):
+    s = str(v or "").strip().upper()
+    bullish = {"UP","UPTREND","BULLISH","LONG","TREND_UP","RISING","STRONG_UP"}
+    bearish = {"DOWN","DOWNTREND","BEARISH","SHORT","TREND_DOWN","FALLING","STRONG_DOWN"}
+    neutral = {"RANGE","SIDEWAYS","NEUTRAL","FLAT","MIXED","UNKNOWN","NONE",""}
+    if s in bullish or "BULL" in s or "UPTREND" in s:
+        return "BULLISH"
+    if s in bearish or "BEAR" in s or "DOWNTREND" in s:
+        return "BEARISH"
+    if s in neutral:
+        return "NEUTRAL"
+    return "NEUTRAL"
+
+def _p1_extract_mtf(r):
+    """Returns normalized H1/H4/D1/W1 trend states without changing arrow/snapshot logic."""
+    h1 = (
+        r.get("h1_trend") or r.get("trend_1h") or r.get("trend_h1")
+        or r.get("h1_structure") or r.get("one_hour_trend")
+    )
+    h4 = r.get("h4_trend") or r.get("trend_4h") or r.get("trend_h4") or r.get("regime_trend")
+    d1 = r.get("d1_trend") or r.get("trend_1d") or r.get("trend_d1")
+    w1 = r.get("w1_trend") or r.get("trend_1w") or r.get("trend_w1")
+    return {
+        "H1": _p1_norm_trend(h1),
+        "H4": _p1_norm_trend(h4),
+        "D1": _p1_norm_trend(d1),
+        "W1": _p1_norm_trend(w1),
+    }
+
+def apply_mtf_confirmation(results):
+    """
+    Weighted MTF agreement for the current canonical direction.
+    H1=20%, H4=35%, D1=30%, W1=15%.
+    This layer scores confirmation and does not veto a trade by itself.
+    """
+    weights = {"H1": 0.20, "H4": 0.35, "D1": 0.30, "W1": 0.15}
+    for r in results or []:
+        mtf = _p1_extract_mtf(r)
+        direction = str(r.get("direction") or r.get("intel_bias") or "").upper()
+        target = "BULLISH" if direction == "LONG" else "BEARISH" if direction == "SHORT" else None
+
+        aligned = 0
+        weighted = 0.0
+        available = 0
+        available_weight = 0.0
+        conflicts = 0
+        detail = {}
+
+        for tf, state in mtf.items():
+            if state == "NEUTRAL":
+                detail[tf] = "NEUTRAL"
+                continue
+            available += 1
+            available_weight += weights[tf]
+            if target and state == target:
+                aligned += 1
+                weighted += weights[tf]
+                detail[tf] = "ALIGNED"
+            elif target:
+                conflicts += 1
+                detail[tf] = "CONFLICT"
+            else:
+                detail[tf] = state
+
+        agreement_pct = round((weighted / available_weight * 100.0) if available_weight > 0 else 0.0, 1)
+        r["mtf_states"] = mtf
+        r["mtf_detail"] = detail
+        r["mtf_aligned_count"] = aligned
+        r["mtf_available_count"] = available
+        r["mtf_conflicts"] = conflicts
+        r["mtf_agreement_pct"] = agreement_pct
+        r["mtf_agreement"] = f"{aligned}/{available}" if available else "0/0"
+        r["mtf_confirmation"] = (
+            "STRONG" if agreement_pct >= 75 and aligned >= min(ATLAS_MTF_MIN_ALIGNMENT, max(1, available))
+            else "MODERATE" if agreement_pct >= 50
+            else "WEAK"
+        )
+    return results
+
+def _p1_risk_per_trade_pct(r):
+    """Estimate risk % using existing fields first; otherwise derive from entry/SL distance."""
+    for key in ("risk_pct", "position_risk_pct", "risk_per_trade_pct", "open_risk_pct"):
+        if r.get(key) is not None:
+            try:
+                return max(0.0, float(r.get(key)))
+            except Exception:
+                pass
+    try:
+        entry = float(r.get("entry"))
+        sl = float(r.get("sl"))
+        if entry > 0:
+            return abs(entry - sl) / entry * 100.0
+    except Exception:
+        pass
+    return 0.0
+
+def build_portfolio_risk_intelligence(results, top10=None):
+    """
+    Aggregate only live/active-looking trade ideas.
+    Does not alter portfolio accounting or execution; provides decision context.
+    """
+    active_states = {
+        "BUY","SELL","ACTIVE","CONFIRMED","BUY CONFIRMATION","SELL CONFIRMATION",
+        "WATCH LONG","WATCH SHORT"
+    }
+    rows = []
+    long_risk = 0.0
+    short_risk = 0.0
+    total_risk = 0.0
+
+    for r in (results or []):
+        decision = str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "").upper()
+        if decision not in active_states and not bool(r.get("executable")):
+            continue
+        rpct = _p1_risk_per_trade_pct(r)
+        if rpct <= 0:
+            continue
+        direction = str(r.get("direction") or "").upper()
+        if direction == "LONG":
+            long_risk += rpct
+        elif direction == "SHORT":
+            short_risk += rpct
+        total_risk += rpct
+        rows.append({
+            "symbol": _aio_symbol(r),
+            "direction": direction or "NEUTRAL",
+            "risk_pct": round(rpct, 3),
+            "decision": decision or "WATCH",
+            "rr": r.get("rr"),
+        })
+
+    directional_den = max(total_risk, 1e-9)
+    long_share = round(long_risk / directional_den * 100.0, 1)
+    short_share = round(short_risk / directional_den * 100.0, 1)
+    risk_status = (
+        "BLOCK_NEW_RISK" if total_risk >= ATLAS_PORTFOLIO_MAX_OPEN_RISK_PCT
+        else "CAUTION" if total_risk >= 0.75 * ATLAS_PORTFOLIO_MAX_OPEN_RISK_PCT
+        else "NORMAL"
+    )
+
+    concentration = "BALANCED"
+    if long_share >= ATLAS_PORTFOLIO_MAX_DIRECTIONAL_EXPOSURE_PCT:
+        concentration = "LONG_CONCENTRATED"
+    elif short_share >= ATLAS_PORTFOLIO_MAX_DIRECTIONAL_EXPOSURE_PCT:
+        concentration = "SHORT_CONCENTRATED"
+
+    return {
+        "open_risk_pct": round(total_risk, 3),
+        "long_risk_pct": round(long_risk, 3),
+        "short_risk_pct": round(short_risk, 3),
+        "long_share_pct": long_share,
+        "short_share_pct": short_share,
+        "max_open_risk_pct": ATLAS_PORTFOLIO_MAX_OPEN_RISK_PCT,
+        "risk_status": risk_status,
+        "directional_concentration": concentration,
+        "positions_count": len(rows),
+        "positions": rows,
+    }
+
+def apply_portfolio_risk_context(results, risk_summary):
+    """
+    Adds portfolio-risk context to each candidate.
+    Existing canonical decisions are preserved; this creates a risk recommendation.
+    """
+    risk_summary = risk_summary or {}
+    status = risk_summary.get("risk_status", "NORMAL")
+    concentration = risk_summary.get("directional_concentration", "BALANCED")
+
+    for r in results or []:
+        d = str(r.get("direction") or "").upper()
+        allowed = True
+        reason = "Portfolio risk within configured limits."
+
+        if status == "BLOCK_NEW_RISK":
+            allowed = False
+            reason = (
+                f"Open portfolio risk {risk_summary.get('open_risk_pct',0):.2f}% "
+                f">= limit {risk_summary.get('max_open_risk_pct',0):.2f}%."
+            )
+        elif concentration == "LONG_CONCENTRATED" and d == "LONG":
+            allowed = False
+            reason = (
+                f"Long-side concentration {risk_summary.get('long_share_pct',0):.1f}% "
+                "is above configured directional threshold."
+            )
+        elif concentration == "SHORT_CONCENTRATED" and d == "SHORT":
+            allowed = False
+            reason = (
+                f"Short-side concentration {risk_summary.get('short_share_pct',0):.1f}% "
+                "is above configured directional threshold."
+            )
+
+        r["portfolio_risk_allowed"] = allowed
+        r["portfolio_risk_reason"] = reason
+        r["portfolio_open_risk_pct"] = risk_summary.get("open_risk_pct", 0.0)
+        r["portfolio_directional_concentration"] = concentration
+    return results
+
+def _p1_structured_blockers(r):
+    blockers = []
+    # RR
+    rr = _aio_num(r.get("rr"), 0)
+    if rr and rr < 1.5:
+        blockers.append({
+            "code": "RR_LOW",
+            "severity": "HIGH",
+            "message": f"RR={rr:.2f} is below the preferred 1.50 threshold."
+        })
+
+    # MTF
+    if r.get("mtf_conflicts", 0) > 0 and _aio_num(r.get("mtf_agreement_pct"), 0) < 60:
+        blockers.append({
+            "code": "MTF_CONFLICT",
+            "severity": "HIGH",
+            "message": (
+                f"MTF agreement is only {r.get('mtf_agreement','0/0')} "
+                f"({_aio_num(r.get('mtf_agreement_pct')):.0f}%)."
+            )
+        })
+    elif str(r.get("mtf_confirmation") or "").upper() == "WEAK":
+        blockers.append({
+            "code": "MTF_WEAK",
+            "severity": "MEDIUM",
+            "message": "Multi-timeframe confirmation is weak."
+        })
+
+    # Data quality
+    dq = _aio_num(r.get("data_quality"), 0)
+    if dq and dq < 60:
+        blockers.append({
+            "code": "DATA_QUALITY",
+            "severity": "HIGH",
+            "message": f"Data quality is {dq:.0f}/100."
+        })
+
+    # Portfolio risk
+    if not bool(r.get("portfolio_risk_allowed", True)):
+        blockers.append({
+            "code": "PORTFOLIO_RISK",
+            "severity": "HIGH",
+            "message": r.get("portfolio_risk_reason") or "Portfolio risk blocks a new position."
+        })
+
+    # Existing gate / why-not-trade
+    try:
+        raw = why_not_trade(r)
+        if isinstance(raw, str):
+            raw = [raw] if raw else []
+        for x in list(raw or [])[:5]:
+            msg = translate_reason_fa(str(x))
+            if msg and not any(b["message"] == msg for b in blockers):
+                blockers.append({"code": "EXISTING_GATE", "severity": "MEDIUM", "message": msg})
+    except Exception:
+        pass
+
+    return blockers
+
+def _p1_activation_conditions(r):
+    conditions = []
+    t = r.get("intel_trigger") or {}
+    direction = str(r.get("direction") or "").upper()
+
+    if direction == "LONG" and t.get("long") is not None:
+        conditions.append(f"4H close/hold above {fmt(t.get('long'))} with volume confirmation.")
+    elif direction == "SHORT" and t.get("short") is not None:
+        conditions.append(f"4H close/hold below {fmt(t.get('short'))} with volume confirmation.")
+
+    if _aio_num(r.get("mtf_agreement_pct"), 0) < 60:
+        conditions.append("MTF agreement improves to at least 60% without major 1D conflict.")
+
+    rr = _aio_num(r.get("rr"), 0)
+    if rr and rr < 1.5:
+        conditions.append("Entry/SL geometry improves so RR reaches at least 1.50.")
+
+    if not bool(r.get("portfolio_risk_allowed", True)):
+        conditions.append("Portfolio open-risk/directional concentration returns below configured limit.")
+
+    if not conditions:
+        conditions.append("Canonical ATLAS trigger remains valid and Evidence/MTF/RR stay aligned.")
+    return conditions
+
+def build_why_not_trade_v2_txt(results, top10):
+    lines = [
+        "ATLAS AI — WHY NOT TRADE? v2",
+        "=" * 64,
+        "Scope: Top10 + Personal Portfolio only",
+        "Structured blockers + measurable decision-change conditions",
+        "",
+    ]
+
+    for r in _aio_selected_results(results, top10):
+        blockers = _p1_structured_blockers(r)
+        lines += [
+            f"[{_aio_symbol(r)}]",
+            f"Decision: {r.get('intel_decision') or r.get('decision_state') or r.get('action') or 'WAIT'}",
+            f"Direction: {r.get('direction','NEUTRAL')}",
+            f"MTF: {r.get('mtf_agreement','0/0')} | {r.get('mtf_agreement_pct',0)}% | {r.get('mtf_confirmation','N/A')}",
+            f"Evidence: {r.get('evidence_agreement','N/A')} | Conviction: {r.get('conviction_score','N/A')}",
+            f"Portfolio Risk Allowed: {'YES' if r.get('portfolio_risk_allowed', True) else 'NO'}",
+            "Blocking Factors:",
+        ]
+        if blockers:
+            for i, b in enumerate(blockers, 1):
+                lines.append(f"{i}. [{b['severity']}] {b['message']}")
+        else:
+            lines.append("1. No hard blocker detected.")
+
+        lines += ["Decision Changes If:"]
+        for i, c in enumerate(_p1_activation_conditions(r), 1):
+            lines.append(f"{i}. {c}")
+        lines += [""]
+
+    return "\n".join(lines)
+
+def build_portfolio_risk_txt(risk_summary):
+    r = risk_summary or {}
+    lines = [
+        "ATLAS AI — PORTFOLIO RISK INTELLIGENCE",
+        "=" * 64,
+        f"Open Risk: {r.get('open_risk_pct',0):.2f}%",
+        f"Configured Max Open Risk: {r.get('max_open_risk_pct',0):.2f}%",
+        f"Long Risk: {r.get('long_risk_pct',0):.2f}% | Share: {r.get('long_share_pct',0):.1f}%",
+        f"Short Risk: {r.get('short_risk_pct',0):.2f}% | Share: {r.get('short_share_pct',0):.1f}%",
+        f"Risk Status: {r.get('risk_status','NORMAL')}",
+        f"Directional Concentration: {r.get('directional_concentration','BALANCED')}",
+        f"Tracked Trade Ideas: {r.get('positions_count',0)}",
+        "",
+        "Positions:",
+    ]
+    if r.get("positions"):
+        for x in r["positions"]:
+            lines.append(
+                f"- {x.get('symbol')} | {x.get('direction')} | "
+                f"Risk={x.get('risk_pct')}% | RR={x.get('rr')} | {x.get('decision')}"
+            )
+    else:
+        lines.append("- No active trade-risk rows found.")
+    return "\n".join(lines)
+
+def _p1_lifecycle_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("""
+        create table if not exists signal_lifecycle(
+            symbol text primary key,
+            signal_id text,
+            lifecycle_state text not null,
+            direction text,
+            entry real,
+            sl real,
+            tp1 real,
+            tp2 real,
+            tp3 real,
+            tp4 real,
+            last_price real,
+            first_seen_at text not null,
+            updated_at text not null,
+            last_event text
+        )
+    """)
+    conn.execute("""
+        create table if not exists signal_lifecycle_events(
+            id integer primary key autoincrement,
+            symbol text not null,
+            signal_id text,
+            from_state text,
+            to_state text,
+            event text,
+            price real,
+            created_at text not null
+        )
+    """)
+    conn.commit()
+    return conn
+
+def _p1_initial_lifecycle_state(r):
+    decision = str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
+    if decision in ("BUY","SELL","BUY CONFIRMATION","SELL CONFIRMATION") or bool(r.get("executable")):
+        return "CONFIRMED"
+    if decision in ("WATCH LONG","WATCH SHORT","WATCH"):
+        return "WATCH"
+    if str(r.get("direction") or "").upper() in ("LONG","SHORT"):
+        return "CANDIDATE"
+    return "CANDIDATE"
+
+def _p1_price_hit(price, level, direction, kind):
+    try:
+        p, lv = float(price), float(level)
+    except Exception:
+        return False
+    if direction == "LONG":
+        return p >= lv if kind == "TP" else p <= lv
+    if direction == "SHORT":
+        return p <= lv if kind == "TP" else p >= lv
+    return False
+
+def update_signal_lifecycle(results, top10=None):
+    """
+    Stateful lifecycle tracker:
+    CANDIDATE -> WATCH -> CONFIRMED -> ACTIVE -> TP1/TP2/TP3/TP4/SL/INVALIDATED.
+    It tracks; it does not place orders.
+    """
+    now = now_tehran().isoformat()
+    conn = _p1_lifecycle_db()
+    events = []
+    selected = _aio_selected_results(results, top10) if top10 is not None else (results or [])
+
+    try:
+        for r in selected:
+            sym = _aio_symbol(r)
+            if not sym:
+                continue
+
+            direction = str(r.get("direction") or "").upper()
+            signal_id = str(r.get("intel_signal_id") or r.get("signal_id") or "")
+            price = r.get("price")
+            desired = _p1_initial_lifecycle_state(r)
+
+            row = conn.execute(
+                """select lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,first_seen_at
+                   from signal_lifecycle where symbol=?""",
+                (sym,)
+            ).fetchone()
+
+            entry, sl = r.get("entry"), r.get("sl")
+            tp1, tp2, tp3, tp4 = r.get("tp1"), r.get("tp2"), r.get("tp3"), r.get("tp4")
+
+            if not row:
+                conn.execute(
+                    """insert into signal_lifecycle(
+                       symbol,signal_id,lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,
+                       last_price,first_seen_at,updated_at,last_event
+                       ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (sym,signal_id,desired,direction,entry,sl,tp1,tp2,tp3,tp4,price,now,now,"INIT")
+                )
+                events.append({"symbol":sym,"from":None,"to":desired,"event":"INIT","price":price})
+                continue
+
+            prev_state, prev_dir, pentry, psl, ptp1, ptp2, ptp3, ptp4, first_seen = row
+            new_state = prev_state
+            event = None
+
+            # Direction flip invalidates previous setup first.
+            if prev_dir and direction and prev_dir != direction and prev_state not in ("TP4","SL","INVALIDATED","EXITED"):
+                new_state = "INVALIDATED"
+                event = "DIRECTION_FLIP"
+            else:
+                # Price milestone tracking for confirmed/active setups.
+                levels = [
+                    ("TP4", tp4 if tp4 is not None else ptp4),
+                    ("TP3", tp3 if tp3 is not None else ptp3),
+                    ("TP2", tp2 if tp2 is not None else ptp2),
+                    ("TP1", tp1 if tp1 is not None else ptp1),
+                ]
+                effective_sl = sl if sl is not None else psl
+                if _p1_price_hit(price, effective_sl, direction or prev_dir, "SL"):
+                    new_state, event = "SL", "SL_HIT"
+                else:
+                    for state_name, lv in levels:
+                        if _p1_price_hit(price, lv, direction or prev_dir, "TP"):
+                            new_state, event = state_name, f"{state_name}_HIT"
+                            break
+
+                if event is None:
+                    if desired == "CONFIRMED" and prev_state in ("CANDIDATE","WATCH"):
+                        new_state, event = "CONFIRMED", "SETUP_CONFIRMED"
+                    elif desired == "WATCH" and prev_state == "CANDIDATE":
+                        new_state, event = "WATCH", "WATCH_STARTED"
+                    elif prev_state == "CONFIRMED":
+                        # First subsequent observation of a still-valid confirmed setup becomes ACTIVE.
+                        new_state, event = "ACTIVE", "ACTIVE_TRACKING"
+
+            if new_state != prev_state or event:
+                conn.execute(
+                    """insert into signal_lifecycle_events(
+                       symbol,signal_id,from_state,to_state,event,price,created_at
+                       ) values(?,?,?,?,?,?,?)""",
+                    (sym,signal_id,prev_state,new_state,event or "STATE_UPDATE",price,now)
+                )
+                events.append({"symbol":sym,"from":prev_state,"to":new_state,"event":event,"price":price})
+
+            conn.execute(
+                """update signal_lifecycle set
+                   signal_id=?,lifecycle_state=?,direction=?,entry=?,sl=?,tp1=?,tp2=?,tp3=?,tp4=?,
+                   last_price=?,updated_at=?,last_event=?
+                   where symbol=?""",
+                (signal_id,new_state,direction,entry,sl,tp1,tp2,tp3,tp4,price,now,event,sym)
+            )
+            r["lifecycle_state"] = new_state
+            r["lifecycle_event"] = event
+
+        conn.commit()
+    finally:
+        conn.close()
+    return events
+
+def generate_lifecycle_csv():
+    import csv, io
+    conn = _p1_lifecycle_db()
+    try:
+        rows = conn.execute(
+            """select symbol,signal_id,lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,
+                      last_price,first_seen_at,updated_at,last_event
+               from signal_lifecycle
+               order by updated_at desc"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out = io.StringIO(newline="")
+    cols = ["Symbol","SignalID","Lifecycle","Direction","Entry","SL","TP1","TP2","TP3","TP4",
+            "LastPrice","FirstSeen","UpdatedAt","LastEvent"]
+    w = csv.writer(out, lineterminator="\n")
+    w.writerow(cols)
+    for row in rows:
+        w.writerow(row)
+    return out.getvalue()
+
+def send_phase1_documents(results, top10, risk_summary):
+    dt = now_tehran()
+    tag = shamsi(dt).replace("/","") + "_" + dt.strftime("%H%M%S")
+    docs = [
+        (f"06_ATLAS_WHY_NOT_TRADE_V2_{tag}.txt",
+         build_why_not_trade_v2_txt(results, top10),
+         "🧩 ATLAS | Why Not Trade v2 — Structured Blockers"),
+        (f"07_ATLAS_PORTFOLIO_RISK_{tag}.txt",
+         build_portfolio_risk_txt(risk_summary),
+         "🛡️ ATLAS | Portfolio Risk Intelligence"),
+        (f"08_ATLAS_SIGNAL_LIFECYCLE_{tag}.csv",
+         generate_lifecycle_csv(),
+         "🔄 ATLAS | Signal Lifecycle"),
+    ]
+    destinations = []
+    for c in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if c and c not in destinations:
+            destinations.append(c)
+
+    sent, errors = 0, []
+    for fn, content, cap in docs:
+        if not content or not str(content).strip():
+            continue
+        for c in destinations:
+            try:
+                _telegram_send_document(c, content, fn, cap)
+                sent += 1
+            except Exception as e:
+                errors.append(f"PHASE1_DOC[{fn}] {c}: {e}")
+    return sent, errors
+
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -8758,6 +9323,10 @@ def main():
             breadth = market_breadth(results)
             
             results = apply_evidence_fusion(results, news)
+            results = apply_mtf_confirmation(results)
+            portfolio_risk = build_portfolio_risk_intelligence(results, top10)
+            results = apply_portfolio_risk_context(results, portfolio_risk)
+            lifecycle_events = update_signal_lifecycle(results, top10)
             print(f"📊 Building reports...")
             
             # ========================================================
@@ -8793,6 +9362,16 @@ def main():
             total_sent += notify_sent
             all_errors.extend(notify_errors)
             print(f"🚨 Signal-change notifications sent: {notify_sent}, errors={len(notify_errors)}")
+
+            phase1_sent, phase1_errors = send_phase1_documents(
+                results, top10, portfolio_risk
+            )
+            total_sent += phase1_sent
+            all_errors.extend(phase1_errors)
+            print(
+                f"🧩 Phase-1 documents sent: {phase1_sent}, "
+                f"lifecycle_events={len(lifecycle_events)}, errors={len(phase1_errors)}"
+            )
 
             # Keep a small compatibility marker for existing run metadata.
             outputs = []
@@ -9339,4 +9918,3 @@ def generate_unified_report(results, top10, dynamic30, macro, news, btc_regime, 
     
 if __name__ == "__main__":
     raise SystemExit(main())
-
