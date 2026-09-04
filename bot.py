@@ -8342,48 +8342,48 @@ def _write_analysis_csv(rows):
     return out.getvalue()
 
 
-def generate_three_analysis_documents(results, top10, dynamic30):
-    """Deep CSV analysis is intentionally restricted to Top10 + Personal."""
+def generate_analysis_documents(results, top10, dynamic30):
+    """
+    Deep CSV analysis is intentionally restricted to:
+      1) Top10 market
+      2) Personal portfolio
+
+    The former third aggregate CSV was removed because it only duplicated
+    the union of these two datasets and added no unique reporting value.
+    """
     personal_order = [str(x).upper() for x in ATLAS_PERSONAL_ASSETS]
     top_order = [str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)]
     by_symbol = {
         str(r.get("coin") or r.get("symbol") or "").upper(): r
         for r in (results or []) if (r.get("coin") or r.get("symbol"))
     }
+
     top_symbols = [x for x in top_order if x in by_symbol]
     personal_symbols = [x for x in personal_order if x in by_symbol]
-    intel_symbols = []
-    for x in top_symbols + personal_symbols:
-        if x not in intel_symbols:
-            intel_symbols.append(x)
-    intel_symbols.sort(
-        key=lambda x: (
-            _i_num(by_symbol[x].get("decision_support_score"), 0),
-            _i_num(by_symbol[x].get("opportunity_score"), 0),
-            _i_num(by_symbol[x].get("signal_score"), 0),
-        ), reverse=True
-    )
+
     def rows(symbols, title):
         return [_analysis_detail_row(by_symbol[x], title) for x in symbols if x in by_symbol]
+
     return {
-        "market_4h": _write_analysis_csv(rows(top_symbols, "ATLAS AI TOP 10 MARKET 4H")),
-        "personal_4h": _write_analysis_csv(rows(personal_symbols, "ATLAS AI PERSONAL PORTFOLIO 4H")),
-        "market_intelligence_4h": _write_analysis_csv(
-            rows(intel_symbols, "ATLAS AI TOP10 + PERSONAL INTELLIGENCE 4H")
+        "market_4h": _write_analysis_csv(
+            rows(top_symbols, "ATLAS AI TOP 10 MARKET 4H")
+        ),
+        "personal_4h": _write_analysis_csv(
+            rows(personal_symbols, "ATLAS AI PERSONAL PORTFOLIO 4H")
         ),
     }
 
-def send_three_analysis_documents(results, top10, dynamic30):
-    """Send exactly three comprehensive CSV documents to Telegram."""
+
+def send_analysis_documents(results, top10, dynamic30):
+    """Send exactly two comprehensive CSV analysis documents to Telegram."""
     dt = now_tehran()
     date_tag = shamsi(dt).replace("/", "")
     time_tag = dt.strftime("%H%M%S")
 
-    docs = generate_three_analysis_documents(results, top10, dynamic30)
+    docs = generate_analysis_documents(results, top10, dynamic30)
     labels = {
         "market_4h": "MARKET 4H",
         "personal_4h": "PERSONAL PORTFOLIO 4H",
-        "market_intelligence_4h": "MARKET INTELLIGENCE 4H",
     }
 
     destinations = []
@@ -8397,12 +8397,14 @@ def send_three_analysis_documents(results, top10, dynamic30):
     for key, content in docs.items():
         if not content.strip():
             continue
+
         filename = f"atlas_{key}_{date_tag}_{time_tag}.csv"
         caption = (
             f"📊 ATLAS AI | {labels[key]}\n"
             f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران\n"
             f"📎 گزارش جامع — CSV"
         )
+
         for chat_id in destinations:
             try:
                 _telegram_send_document(chat_id, content, filename, caption)
@@ -8410,19 +8412,9 @@ def send_three_analysis_documents(results, top10, dynamic30):
                 print(f"✅ Sent {filename} to Telegram")
             except Exception as e:
                 errors.append(f"ANALYSIS_DOC[{key}] {chat_id}: {e}")
-                append_changelog(
-                    "ANALYSIS_DOCUMENT", None, None, str(e),
-                    {"file": key, "traceback": traceback.format_exc()}
-                )
+
     return sent, errors
 
-
-
-# ============================================================
-# ATLAS v11.5 — ALL-IN-ONE TRADING INTELLIGENCE
-# ============================================================
-ATLAS_SIGNAL_MENTIONS = os.environ.get("ATLAS_SIGNAL_MENTIONS", "").strip()
-ATLAS_NOTIFICATION_MIN_SCORE = float(os.environ.get("ATLAS_NOTIFICATION_MIN_SCORE", "68"))
 
 def _aio_num(v, default=0.0):
     try: return float(v)
@@ -8536,6 +8528,11 @@ def apply_evidence_fusion(results, news=None):
     return [_aio_fuse(r, news) for r in (results or [])]
 
 def build_deep_analysis_txt(results, top10):
+    """
+    Retained intentionally after duplication review: unlike the two CSV
+    tables, this report adds qualitative Interpretation and Decision-change
+    conditions per symbol, so it still provides unique explanatory value.
+    """
     lines=["ATLAS AI — TOP10 + PERSONAL DEEP ANALYSIS 4H","="*64,
            "Scope: Top10 + Personal Portfolio only",""]
     for r in _aio_selected_results(results, top10):
@@ -8552,24 +8549,6 @@ def build_deep_analysis_txt(results, top10):
             f"Interpretation: {r.get('intel_reason') or r.get('analytical_reason') or r.get('reason') or 'N/A'}",
             f"Decision-change condition: {_aio_trigger(r)}",""
         ]
-    return "\n".join(lines)
-
-def build_why_not_trade_txt(results, top10):
-    lines=["ATLAS AI — WHY NOT TRADE?","="*60,"Scope: Top10 + Personal Portfolio only",""]
-    for r in _aio_selected_results(results, top10):
-        raw = why_not_trade(r)
-        reasons = [raw] if isinstance(raw,str) and raw else list(raw or [])
-        lines += [f"[{_aio_symbol(r)}]",
-                  f"Decision: {r.get('intel_decision') or r.get('decision_state') or 'WAIT'}",
-                  f"Evidence Agreement: {r.get('evidence_agreement','N/A')}",
-                  "Why Not Trade:"]
-        if reasons:
-            lines += [f"- {translate_reason_fa(str(x))}" for x in reasons[:8]]
-        elif r.get("executable"):
-            lines.append("- Current setup is executable; no blocking reason.")
-        else:
-            lines.append("- Combined evidence is below the execution threshold.")
-        lines += ["What Changes The Decision:",f"- {_aio_trigger(r)}",""]
     return "\n".join(lines)
 
 def _aio_csv(rows, cols):
@@ -8619,7 +8598,6 @@ def send_all_in_one_documents(results, top10, macro, news, btc_regime):
     docs=[
       (f"01_ATLAS_MARKET_CONTEXT_{tag}.txt",build_market_context_txt(macro,news,results,btc_regime),"🌍 ATLAS | Market Context"),
       (f"02_ATLAS_TOP10_PERSONAL_DEEP_ANALYSIS_{tag}.txt",build_deep_analysis_txt(results,top10),"🧠 ATLAS | Top10 + Personal Deep Analysis"),
-      (f"03_ATLAS_WHY_NOT_TRADE_{tag}.txt",build_why_not_trade_txt(results,top10),"⛔ ATLAS | Why Not Trade"),
       (f"04_ATLAS_BEST_WATCH_{tag}.csv",generate_best_watch_csv(results,top10),"👀 ATLAS | Best Watch"),
       (f"05_ATLAS_OPPORTUNITY_RANKING_{tag}.csv",generate_opportunity_ranking_csv(results),"🏆 ATLAS | Opportunity Ranking")]
     destinations=[]
@@ -8975,9 +8953,9 @@ def _p1_activation_conditions(r):
         conditions.append("Canonical ATLAS trigger remains valid and Evidence/MTF/RR stay aligned.")
     return conditions
 
-def build_why_not_trade_v2_txt(results, top10):
+def build_why_not_trade_txt(results, top10):
     lines = [
-        "ATLAS AI — WHY NOT TRADE? v2",
+        "ATLAS AI — WHY NOT TRADE?",
         "=" * 64,
         "Scope: Top10 + Personal Portfolio only",
         "Structured blockers + measurable decision-change conditions",
@@ -9215,13 +9193,13 @@ def send_phase1_documents(results, top10, risk_summary):
     dt = now_tehran()
     tag = shamsi(dt).replace("/","") + "_" + dt.strftime("%H%M%S")
     docs = [
-        (f"06_ATLAS_WHY_NOT_TRADE_V2_{tag}.txt",
-         build_why_not_trade_v2_txt(results, top10),
-         "🧩 ATLAS | Why Not Trade v2 — Structured Blockers"),
-        (f"07_ATLAS_PORTFOLIO_RISK_{tag}.txt",
+        (f"03_ATLAS_WHY_NOT_TRADE_{tag}.txt",
+         build_why_not_trade_txt(results, top10),
+         "🧩 ATLAS | Why Not Trade — Structured Blockers"),
+        (f"06_ATLAS_PORTFOLIO_RISK_{tag}.txt",
          build_portfolio_risk_txt(risk_summary),
          "🛡️ ATLAS | Portfolio Risk Intelligence"),
-        (f"08_ATLAS_SIGNAL_LIFECYCLE_{tag}.csv",
+        (f"07_ATLAS_SIGNAL_LIFECYCLE_{tag}.csv",
          generate_lifecycle_csv(),
          "🔄 ATLAS | Signal Lifecycle"),
     ]
@@ -9330,16 +9308,16 @@ def main():
             print(f"📊 Building reports...")
             
             # ========================================================
-            # FINAL TELEGRAM DELIVERY — THREE ANALYSIS DOCUMENTS
+            # FINAL TELEGRAM DELIVERY — TWO ANALYSIS DOCUMENTS
             # ========================================================
             # Do not send the old long text reports. The analysis engines
             # above remain unchanged; only the Telegram presentation layer
-            # is changed to three comprehensive CSV documents.
+            # is changed to two comprehensive CSV documents.
             # ========================================================
 
-            print("📊 Generating 3 separate analysis documents...")
+            print("📊 Generating 2 separate analysis documents...")
 
-            analysis_doc_sent, analysis_doc_errors = send_three_analysis_documents(
+            analysis_doc_sent, analysis_doc_errors = send_analysis_documents(
                 results, top10, dynamic30
             )
 
