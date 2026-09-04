@@ -1415,8 +1415,14 @@ _ATLAS_BT_CACHE_STATS = {
     "miss": 0,
     "fingerprint_mismatch": 0,
     "supabase_rows_seen": 0,
+    "supabase_read_fail": 0,
     "supabase_save_ok": 0,
     "supabase_save_fail": 0,
+    "supabase_update_ok": 0,
+    "supabase_update_fail": 0,
+    "supabase_insert_ok": 0,
+    "supabase_insert_fail": 0,
+    "last_error": "",
 }
 _ATLAS_EXCHANGE_SEMAPHORES = {}
 
@@ -1433,8 +1439,14 @@ def _atlas_cache_reset():
         "miss": 0,
         "fingerprint_mismatch": 0,
         "supabase_rows_seen": 0,
+        "supabase_read_fail": 0,
         "supabase_save_ok": 0,
         "supabase_save_fail": 0,
+        "supabase_update_ok": 0,
+        "supabase_update_fail": 0,
+        "supabase_insert_ok": 0,
+        "supabase_insert_fail": 0,
+        "last_error": "",
     })
     _ATLAS_EXCHANGE_SEMAPHORES.clear()
 
@@ -4834,6 +4846,46 @@ def walk_forward_backtest(coin, train_days=None, validate_days=None, test_days=N
 
 
 
+
+def _bt_supabase_rest(method="GET", params=None, payload=None, prefer=None):
+    """Dedicated REST access for the single-row backtest gate cache.
+
+    Kept isolated from analytical code. Returns (ok, decoded_body, error_text).
+    """
+    if not (ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False)):
+        return False, None, "Supabase cache disabled or Supabase not configured"
+    try:
+        q = urllib.parse.urlencode(params or {})
+        url = f"{SUPABASE_URL}/rest/v1/atlas_backtest_gate_cache"
+        if q:
+            url += "?" + q
+        headers = dict(STORE.headers)
+        if prefer:
+            headers["Prefer"] = prefer
+        data = safe_json(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read().decode("utf-8", "replace")
+            if not raw.strip():
+                return True, None, ""
+            try:
+                return True, json.loads(raw), ""
+            except Exception:
+                return True, raw, ""
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        err = f"HTTP {getattr(e, 'code', '?')}: {body or str(e)}"
+        _ATLAS_BT_CACHE_STATS["last_error"] = err[:1000]
+        return False, None, err
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        _ATLAS_BT_CACHE_STATS["last_error"] = err[:1000]
+        return False, None, err
+
+
 def _backtest_gate_fingerprint(universe):
     """Fingerprint only the model/backtest configuration and tested universe.
 
@@ -4879,11 +4931,7 @@ def _cached_backtest_gate(fingerprint=None):
             fp_ok = fingerprint is None or details.get("fingerprint") == fingerprint
             if ts >= cutoff and fp_ok:
                 _ATLAS_BT_CACHE_STATS["sqlite_hit"] += 1
-                return bool(row[1]), {
-                    "cached": True,
-                    "cache_source": "sqlite",
-                    **details,
-                }
+                return bool(row[1]), {"cached": True, "cache_source": "sqlite", **details}
             if ts >= cutoff and not fp_ok:
                 _ATLAS_BT_CACHE_STATS["fingerprint_mismatch"] += 1
     except Exception as e:
@@ -4893,18 +4941,18 @@ def _cached_backtest_gate(fingerprint=None):
         )
 
     # 2) Dedicated persistent Supabase cache.
-    # Table already exists: public.atlas_backtest_gate_cache
+    # No id filter is required: database CHECK/PK guarantees the dedicated row is id=1.
     if ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False):
-        try:
-            rows = STORE.select(
-                "atlas_backtest_gate_cache",
-                {
-                    "select": "id,timestamp,passed,details",
-                    "id": "eq.1",
-                    "limit": "1",
-                },
-            )
-            _ATLAS_BT_CACHE_STATS["supabase_rows_seen"] += len(rows or [])
+        ok, rows, err = _bt_supabase_rest(
+            "GET",
+            {"select": "id,timestamp,passed,details", "limit": "1"},
+        )
+        if not ok:
+            _ATLAS_BT_CACHE_STATS["supabase_read_fail"] += 1
+        else:
+            if not isinstance(rows, list):
+                rows = []
+            _ATLAS_BT_CACHE_STATS["supabase_rows_seen"] += len(rows)
             if rows:
                 row = rows[0]
                 try:
@@ -4913,7 +4961,6 @@ def _cached_backtest_gate(fingerprint=None):
                     )
                 except Exception:
                     ts = None
-
                 details = row.get("details") or {}
                 if isinstance(details, str):
                     try:
@@ -4923,51 +4970,38 @@ def _cached_backtest_gate(fingerprint=None):
 
                 fp_ok = fingerprint is None or details.get("fingerprint") == fingerprint
                 if ts is not None and ts >= cutoff and fp_ok:
-                    # Warm SQLite as local fallback for the rest of the run.
                     try:
                         with sqlite_conn() as c:
                             c.execute(
                                 "insert or replace into backtest_gate_cache"
                                 "(id,timestamp,passed,details) values(1,?,?,?)",
-                                (
-                                    ts.isoformat(),
-                                    int(bool(row.get("passed"))),
-                                    safe_json(details),
-                                ),
+                                (ts.isoformat(), int(bool(row.get("passed"))), safe_json(details)),
                             )
                     except Exception:
                         pass
-
                     _ATLAS_BT_CACHE_STATS["supabase_hit"] += 1
                     return bool(row.get("passed")), {
                         "cached": True,
-                        "cache_source": "supabase_dedicated",
+                        "cache_source": "supabase_dedicated_rest",
                         **details,
                     }
-
                 if ts is not None and ts >= cutoff and not fp_ok:
                     _ATLAS_BT_CACHE_STATS["fingerprint_mismatch"] += 1
-
-        except Exception as e:
-            append_changelog(
-                "BACKTEST_CACHE_SUPABASE", None, None, str(e),
-                {"traceback": traceback.format_exc()},
-            )
 
     _ATLAS_BT_CACHE_STATS["miss"] += 1
     return None
 
 
 def _save_backtest_gate(passed, details, fingerprint=None, fingerprint_payload=None):
+    saved_at = now_utc().isoformat()
     enriched = {
         **(details or {}),
         "fingerprint": fingerprint,
         "fingerprint_payload": fingerprint_payload or {},
         "cache_policy": "MODEL_CONFIG_UNIVERSE_WITH_TTL",
         "refresh_hours": BACKTEST_REFRESH_HOURS,
-        "saved_at": now_utc().isoformat(),
+        "saved_at": saved_at,
     }
-    saved_at = now_utc().isoformat()
 
     # SQLite fallback/audit.
     try:
@@ -4984,25 +5018,54 @@ def _save_backtest_gate(passed, details, fingerprint=None, fingerprint_payload=N
             {"traceback": traceback.format_exc()},
         )
 
-    # Dedicated persistent Supabase cache.
-    # Existing schema:
-    # id integer PK/check id=1, timestamp timestamptz, passed bool, details jsonb
-    if ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False):
-        row = {
-            "id": 1,
-            "timestamp": saved_at,
-            "passed": bool(passed),
-            "details": enriched,
-        }
-        ok = STORE.upsert(
-            "atlas_backtest_gate_cache",
-            row,
-            "id",
-        )
-        if ok:
-            _ATLAS_BT_CACHE_STATS["supabase_save_ok"] += 1
-        else:
-            _ATLAS_BT_CACHE_STATS["supabase_save_fail"] += 1
+    if not (ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False)):
+        return
+
+    payload = {
+        "timestamp": saved_at,
+        "passed": bool(passed),
+        "details": enriched,
+    }
+
+    # The table already contains id=1. PATCH is simpler and more robust than
+    # PostgREST upsert/on_conflict for this single-row cache.
+    ok, body, err = _bt_supabase_rest(
+        "PATCH",
+        {"id": "eq.1"},
+        payload,
+        "return=representation",
+    )
+    updated = ok and isinstance(body, list) and len(body) > 0
+    if updated:
+        _ATLAS_BT_CACHE_STATS["supabase_update_ok"] += 1
+        _ATLAS_BT_CACHE_STATS["supabase_save_ok"] += 1
+        return
+
+    _ATLAS_BT_CACHE_STATS["supabase_update_fail"] += 1
+
+    # Defensive fallback if id=1 was ever deleted: insert it explicitly.
+    insert_payload = {"id": 1, **payload}
+    ok2, body2, err2 = _bt_supabase_rest(
+        "POST",
+        None,
+        insert_payload,
+        "return=representation",
+    )
+    inserted = ok2 and (
+        body2 is None or
+        (isinstance(body2, list) and len(body2) > 0) or
+        isinstance(body2, dict)
+    )
+    if inserted:
+        _ATLAS_BT_CACHE_STATS["supabase_insert_ok"] += 1
+        _ATLAS_BT_CACHE_STATS["supabase_save_ok"] += 1
+    else:
+        _ATLAS_BT_CACHE_STATS["supabase_insert_fail"] += 1
+        _ATLAS_BT_CACHE_STATS["supabase_save_fail"] += 1
+        if err2:
+            _ATLAS_BT_CACHE_STATS["last_error"] = err2[:1000]
+        elif err:
+            _ATLAS_BT_CACHE_STATS["last_error"] = err[:1000]
 
 
 
@@ -10530,6 +10593,10 @@ def build_performance_telemetry_report():
         f"- Supabase dedicated rows examined: {_ATLAS_BT_CACHE_STATS.get('supabase_rows_seen', 0)}",
         f"- Supabase cache saves OK: {_ATLAS_BT_CACHE_STATS.get('supabase_save_ok', 0)}",
         f"- Supabase cache save failures: {_ATLAS_BT_CACHE_STATS.get('supabase_save_fail', 0)}",
+        f"- Supabase read failures: {_ATLAS_BT_CACHE_STATS.get('supabase_read_fail', 0)}",
+        f"- Supabase PATCH update OK/fail: {_ATLAS_BT_CACHE_STATS.get('supabase_update_ok', 0)}/{_ATLAS_BT_CACHE_STATS.get('supabase_update_fail', 0)}",
+        f"- Supabase fallback INSERT OK/fail: {_ATLAS_BT_CACHE_STATS.get('supabase_insert_ok', 0)}/{_ATLAS_BT_CACHE_STATS.get('supabase_insert_fail', 0)}",
+        f"- Supabase last cache error: {_ATLAS_BT_CACHE_STATS.get('last_error') or 'NONE'}",
         "",
         "Safety / Quality Guards:",
         f"- analysis workers: {ATLAS_ANALYSIS_WORKERS}",
