@@ -4835,27 +4835,26 @@ def walk_forward_backtest(coin, train_days=None, validate_days=None, test_days=N
 
 
 def _backtest_gate_fingerprint(universe):
-    """Build a network-free fingerprint for mandatory backtest reuse.
+    """Fingerprint only the model/backtest configuration and tested universe.
 
-    The fingerprint keys the cache to the current CLOSED UTC-aligned 4H candle,
-    model/config and the backtested universe. It does not fetch market data and
-    does not alter backtest calculations or trading decisions.
+    Cache freshness is controlled by BACKTEST_REFRESH_HOURS (default 24h).
+    This deliberately does NOT include the current 4H candle, price, trend,
+    indicators, regime, news, or any live analytical input. Therefore cache
+    reuse cannot alter live Signal/Entry/SL/TP calculations.
     """
-    now_ms = int(time.time() * 1000)
-    h4_ms = 4 * 60 * 60 * 1000
-    current_h4_open = (now_ms // h4_ms) * h4_ms
-    latest_closed_h4_open = current_h4_open - h4_ms
-
     payload = {
         "version": VERSION,
-        "timeframe": SIGNAL_TIMEFRAME,
-        "days": BACKTEST_DAYS,
-        "fee": BACKTEST_FEE_PCT,
-        "slippage": BACKTEST_SLIPPAGE_PCT,
-        "min_improvement": MIN_BACKTEST_IMPROVEMENT,
+        "signal_timeframe": SIGNAL_TIMEFRAME,
+        "backtest_days": BACKTEST_DAYS,
+        "fee_pct": BACKTEST_FEE_PCT,
+        "slippage_pct": BACKTEST_SLIPPAGE_PCT,
+        "min_backtest_improvement": MIN_BACKTEST_IMPROVEMENT,
+        "wf_train_days": WALK_FORWARD_TRAIN_DAYS,
+        "wf_validate_days": WALK_FORWARD_VALIDATE_DAYS,
+        "wf_test_days": WALK_FORWARD_TEST_DAYS,
         "universe20": [str(x).upper() for x in (universe or [])[:20]],
-        "latest_closed_4h": latest_closed_h4_open,
-        "fingerprint_clock": "UTC_4H_CLOSED_BOUNDARY",
+        "cache_policy": "MODEL_CONFIG_UNIVERSE_WITH_TTL",
+        "refresh_hours": BACKTEST_REFRESH_HOURS,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest(), payload
@@ -4864,7 +4863,7 @@ def _backtest_gate_fingerprint(universe):
 def _cached_backtest_gate(fingerprint=None):
     cutoff = now_utc() - timedelta(hours=BACKTEST_REFRESH_HOURS)
 
-    # 1) Fast local SQLite cache.
+    # 1) Fast local SQLite fallback/audit.
     try:
         with sqlite_conn() as c:
             row = c.execute(
@@ -4880,7 +4879,11 @@ def _cached_backtest_gate(fingerprint=None):
             fp_ok = fingerprint is None or details.get("fingerprint") == fingerprint
             if ts >= cutoff and fp_ok:
                 _ATLAS_BT_CACHE_STATS["sqlite_hit"] += 1
-                return bool(row[1]), {"cached": True, "cache_source": "sqlite", **details}
+                return bool(row[1]), {
+                    "cached": True,
+                    "cache_source": "sqlite",
+                    **details,
+                }
             if ts >= cutoff and not fp_ok:
                 _ATLAS_BT_CACHE_STATS["fingerprint_mismatch"] += 1
     except Exception as e:
@@ -4889,70 +4892,62 @@ def _cached_backtest_gate(fingerprint=None):
             {"traceback": traceback.format_exc()},
         )
 
-    # 2) Persistent Supabase cache using the already-existing atlas_changelog.
+    # 2) Dedicated persistent Supabase cache.
+    # Table already exists: public.atlas_backtest_gate_cache
     if ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False):
         try:
             rows = STORE.select(
-                "atlas_changelog",
+                "atlas_backtest_gate_cache",
                 {
-                    "select": "timestamp,model_version,evidence",
-                    "component": "eq.BACKTEST_GATE_CACHE",
-                    "order": "timestamp.desc",
-                    # Avoid an over-restrictive model_version PostgREST filter;
-                    # match it safely in Python together with fingerprint.
-                    "limit": "24",
+                    "select": "id,timestamp,passed,details",
+                    "id": "eq.1",
+                    "limit": "1",
                 },
             )
             _ATLAS_BT_CACHE_STATS["supabase_rows_seen"] += len(rows or [])
-            for row in rows or []:
+            if rows:
+                row = rows[0]
                 try:
                     ts = datetime.fromisoformat(
                         str(row.get("timestamp") or "").replace("Z", "+00:00")
                     )
                 except Exception:
-                    continue
-                if ts < cutoff:
-                    continue
-                if str(row.get("model_version") or "") != str(VERSION):
-                    continue
-                evidence = row.get("evidence") or {}
-                if isinstance(evidence, str):
+                    ts = None
+
+                details = row.get("details") or {}
+                if isinstance(details, str):
                     try:
-                        evidence = json.loads(evidence)
+                        details = json.loads(details)
                     except Exception:
-                        evidence = {}
-                fp_ok = fingerprint is None or evidence.get("fingerprint") == fingerprint
-                if not fp_ok:
+                        details = {}
+
+                fp_ok = fingerprint is None or details.get("fingerprint") == fingerprint
+                if ts is not None and ts >= cutoff and fp_ok:
+                    # Warm SQLite as local fallback for the rest of the run.
+                    try:
+                        with sqlite_conn() as c:
+                            c.execute(
+                                "insert or replace into backtest_gate_cache"
+                                "(id,timestamp,passed,details) values(1,?,?,?)",
+                                (
+                                    ts.isoformat(),
+                                    int(bool(row.get("passed"))),
+                                    safe_json(details),
+                                ),
+                            )
+                    except Exception:
+                        pass
+
+                    _ATLAS_BT_CACHE_STATS["supabase_hit"] += 1
+                    return bool(row.get("passed")), {
+                        "cached": True,
+                        "cache_source": "supabase_dedicated",
+                        **details,
+                    }
+
+                if ts is not None and ts >= cutoff and not fp_ok:
                     _ATLAS_BT_CACHE_STATS["fingerprint_mismatch"] += 1
-                    continue
-                if "passed" not in evidence:
-                    continue
-                result = evidence.get("result") or {}
-                try:
-                    with sqlite_conn() as c:
-                        local_details = {
-                            **result,
-                            "fingerprint": evidence.get("fingerprint"),
-                            "fingerprint_payload": evidence.get("fingerprint_payload"),
-                        }
-                        c.execute(
-                            "insert or replace into backtest_gate_cache"
-                            "(id,timestamp,passed,details) values(1,?,?,?)",
-                            (
-                                ts.isoformat(),
-                                int(bool(evidence.get("passed"))),
-                                safe_json(local_details),
-                            ),
-                        )
-                except Exception:
-                    pass
-                _ATLAS_BT_CACHE_STATS["supabase_hit"] += 1
-                return bool(evidence.get("passed")), {
-                    "cached": True,
-                    "cache_source": "supabase",
-                    "fingerprint": evidence.get("fingerprint"),
-                    **result,
-                }
+
         except Exception as e:
             append_changelog(
                 "BACKTEST_CACHE_SUPABASE", None, None, str(e),
@@ -4962,19 +4957,25 @@ def _cached_backtest_gate(fingerprint=None):
     _ATLAS_BT_CACHE_STATS["miss"] += 1
     return None
 
+
 def _save_backtest_gate(passed, details, fingerprint=None, fingerprint_payload=None):
     enriched = {
         **(details or {}),
         "fingerprint": fingerprint,
         "fingerprint_payload": fingerprint_payload or {},
+        "cache_policy": "MODEL_CONFIG_UNIVERSE_WITH_TTL",
+        "refresh_hours": BACKTEST_REFRESH_HOURS,
+        "saved_at": now_utc().isoformat(),
     }
+    saved_at = now_utc().isoformat()
 
     # SQLite fallback/audit.
     try:
         with sqlite_conn() as c:
             c.execute(
-                "insert or replace into backtest_gate_cache(id,timestamp,passed,details) values(1,?,?,?)",
-                (now_utc().isoformat(), int(bool(passed)), safe_json(enriched)),
+                "insert or replace into backtest_gate_cache"
+                "(id,timestamp,passed,details) values(1,?,?,?)",
+                (saved_at, int(bool(passed)), safe_json(enriched)),
             )
     except Exception as e:
         append_changelog(
@@ -4983,32 +4984,26 @@ def _save_backtest_gate(passed, details, fingerprint=None, fingerprint_payload=N
             {"traceback": traceback.format_exc()},
         )
 
-    # Persistent cache in existing Supabase atlas_changelog.
-    # Store a compact record explicitly so cache persistence is observable.
+    # Dedicated persistent Supabase cache.
+    # Existing schema:
+    # id integer PK/check id=1, timestamp timestamptz, passed bool, details jsonb
     if ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False):
-        compact_result = dict(details or {})
-        # Avoid accidentally persisting very large transient diagnostics.
-        for transient_key in ("samples", "trades_detail", "equity_curve", "raw"):
-            compact_result.pop(transient_key, None)
         row = {
-            "timestamp": now_utc().isoformat(),
-            "model_version": VERSION,
-            "component": "BACKTEST_GATE_CACHE",
-            "old_value": None,
-            "new_value": int(bool(passed)),
-            "reason": "Persistent mandatory backtest gate cache",
-            "evidence": {
-                "fingerprint": fingerprint,
-                "fingerprint_payload": fingerprint_payload or {},
-                "passed": bool(passed),
-                "result": compact_result,
-            },
+            "id": 1,
+            "timestamp": saved_at,
+            "passed": bool(passed),
+            "details": enriched,
         }
-        ok = STORE.insert("atlas_changelog", row)
+        ok = STORE.upsert(
+            "atlas_backtest_gate_cache",
+            row,
+            "id",
+        )
         if ok:
             _ATLAS_BT_CACHE_STATS["supabase_save_ok"] += 1
         else:
             _ATLAS_BT_CACHE_STATS["supabase_save_fail"] += 1
+
 
 
 def h4_fallback_levels(rows, current_price=None):
@@ -10527,12 +10522,12 @@ def build_performance_telemetry_report():
         f"- OHLCV provider affinities learned: {len(_ATLAS_OHLCV_PROVIDER_AFFINITY)}",
         f"- OHLCV failed provider/timeframe routes skipped: {len(_ATLAS_OHLCV_PROVIDER_FAILURES)}",
         "",
-        "Persistent Backtest Cache:",
+        "Persistent Backtest Cache (dedicated atlas_backtest_gate_cache):",
         f"- SQLite hits: {_ATLAS_BT_CACHE_STATS.get('sqlite_hit', 0)}",
         f"- Supabase hits: {_ATLAS_BT_CACHE_STATS.get('supabase_hit', 0)}",
         f"- misses: {_ATLAS_BT_CACHE_STATS.get('miss', 0)}",
         f"- fingerprint mismatches: {_ATLAS_BT_CACHE_STATS.get('fingerprint_mismatch', 0)}",
-        f"- Supabase cache rows examined: {_ATLAS_BT_CACHE_STATS.get('supabase_rows_seen', 0)}",
+        f"- Supabase dedicated rows examined: {_ATLAS_BT_CACHE_STATS.get('supabase_rows_seen', 0)}",
         f"- Supabase cache saves OK: {_ATLAS_BT_CACHE_STATS.get('supabase_save_ok', 0)}",
         f"- Supabase cache save failures: {_ATLAS_BT_CACHE_STATS.get('supabase_save_fail', 0)}",
         "",
@@ -10542,6 +10537,8 @@ def build_performance_telemetry_report():
         f"- SQLite OHLCV hot-path enabled: {ATLAS_SQLITE_OHLCV_CACHE_ENABLED}",
         "- signal/entry/SL/TP formulas unchanged",
         "- decision engine and evidence weights unchanged",
+        "- technical/MTF/regime/news/whale inputs unchanged",
+        "- backtest mathematics unchanged; only its 24h reuse policy changed",
         "- output ordering preserved after concurrent analysis",
     ]
 
