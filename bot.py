@@ -8331,6 +8331,7 @@ _ANALYSIS_EXPORT_COLUMNS = [
 
 
 def _write_analysis_csv(rows):
+    import csv, io
     out = io.StringIO(newline="")
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(_ANALYSIS_EXPORT_COLUMNS)
@@ -8341,7 +8342,7 @@ def _write_analysis_csv(rows):
 def generate_three_analysis_documents(results, top10, dynamic30):
     """Generate the three requested comprehensive analysis CSVs."""
     personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    ordered, _ = _resolve_csv_universe(results, top10, dynamic30)
+    ordered = _resolve_csv_universe(results, top10, dynamic30)
 
     by_symbol = {}
     for r in results or []:
