@@ -8158,7 +8158,7 @@ def generate_csv_report(results, top10, dynamic30):
     """Combined single-file export (kept for backward compatibility).
     For the split personal/metals/dynamic_top30 files, use
     generate_split_csv_reports() instead."""
-    ordered, _ = _resolve_csv_universe(results, top10, dynamic30)
+    ordered = _resolve_csv_universe(results, top10, dynamic30)
     return _csv_text_for_symbols(ordered, results, top10, dynamic30)
 
 
