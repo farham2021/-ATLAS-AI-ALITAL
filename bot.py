@@ -152,10 +152,10 @@ import ccxt
 # ============================================================
 
 VERSION = "ATLAS v11.5 WORKFLOW + SUPABASE REDESIGN"
-TIMEFRAMES = ("1h", "4h", "1d", "1w", "1M")
+TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
-EVENT_TIMEFRAMES = ("30m", "1h", "4h", "1d", "1w", "1M")
-EVENT_LOOKBACK_LIMITS = {"30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
+EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
+EVENT_LOOKBACK_LIMITS = {"15m": 120, "30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
 EVENT_DEDUP_ENABLED = os.environ.get("ATLAS_CANDLE_EVENT_DEDUP", "1").strip() != "0"
 TEHRAN = ZoneInfo("Asia/Tehran")
 
@@ -171,7 +171,7 @@ TELEGRAM_BASE_RETRY_DELAY = float(os.environ.get("TELEGRAM_BASE_RETRY_DELAY", "3
 TELEGRAM_MAX_WAIT = float(os.environ.get("TELEGRAM_MAX_WAIT", "60"))
 
 SUPABASE_URL = os.environ.get(
-    "SUPABASE_URL", "https://tmnfhsuwtqfpglckfxwg.supabase.co"
+    "SUPABASE_URL", "https://onnyytvtfcvlzkagijzz.supabase.co"
 ).strip().rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 if not SUPABASE_KEY:
@@ -1078,6 +1078,29 @@ class SupabaseStore:
                         fh.write(f"{now_utc().isoformat()} | SUPABASE | update failed: {table}: {e}\n")
                 except Exception:
                     pass
+            return False
+
+    def upsert_many(self, table, rows, on_conflict):
+        """Batch upsert for persistent cross-run state. One REST request; no analytical logic."""
+        rows = list(rows or [])
+        if not rows or not self.enabled:
+            return False
+        try:
+            q = urllib.parse.urlencode({"on_conflict": on_conflict})
+            url = f"{SUPABASE_URL}/rest/v1/{table}?{q}"
+            headers = dict(self.headers)
+            headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+            req = urllib.request.Request(
+                url, data=safe_json(rows).encode(), headers=headers, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=20):
+                return True
+        except Exception as e:
+            try:
+                with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
+                    fh.write(f"{now_utc().isoformat()} | SUPABASE | batch upsert failed: {table}: {e}\n")
+            except Exception:
+                pass
             return False
 
     def select(self, table, params=None):
@@ -2320,7 +2343,7 @@ def tf_snapshot(coin):
     out = {}
     for tf in TIMEFRAMES:
         try:
-            limit = 250 if tf in ("1h", "4h", "1d") else 120 if tf == "1w" else 60
+            limit = 250 if tf in ("15m", "1h", "4h", "1d") else 120 if tf == "1w" else 60
             rows, engine = best_ohlcv(coin, tf, limit)
             c = closes(rows)
             if len(c) < 20:
@@ -3501,6 +3524,7 @@ def analyze_coin(coin, market_news, weights):
     if is_stable(coin):
         return None
     snapshots = tf_snapshot(coin)
+    tf15 = snapshots.get("15m", {})
     tf4 = snapshots.get("4h", {})
     if "rows" not in tf4:
         raise RuntimeError("4H unavailable")
@@ -3509,6 +3533,7 @@ def analyze_coin(coin, market_news, weights):
     tfw = snapshots.get("1w", {})
     tfm = snapshots.get("1M", {})
     price, sources, quality, spread_pct, errors = price_consensus(coin)
+    m15 = tf15.get("trend", "UNKNOWN")
     h1 = tf1.get("trend", "UNKNOWN")
     h4 = tf4.get("trend", "UNKNOWN")
     d1 = tfd.get("trend", "UNKNOWN")
@@ -3864,6 +3889,7 @@ def analyze_coin(coin, market_news, weights):
         "change_7d": change_7d,
         "change_source": "ticker" if any(f(x.get("change")) is not None for x in sources) else "H1_24H_FALLBACK",
         "trend": h4,
+        "m15_trend": m15,
         "h1_trend": h1,
         "h4_trend": h4,
         "d1_trend": d1,
@@ -4017,6 +4043,7 @@ def analyze_coin(coin, market_news, weights):
         "change_7d": change_7d,
         "change_source": "ticker" if any(f(x.get("change")) is not None for x in sources) else "H1_24H_FALLBACK",
         "trend": h4,
+        "m15_trend": m15,
         "h1_trend": h1,
         "h4_trend": h4,
         "d1_trend": d1,
@@ -4755,6 +4782,7 @@ def _run_backtest_window(rows, risk_pct=None, fee_pct=None, slippage_pct=None):
         pnl_pct = r_multiple * risk_pct - fee_drag_pct
 
         trades.append({
+            "signal_ts": window[-1][0] if window else None,
             "direction": direction, "entry": entry, "sl": sl, "tp": tp,
             "exit_price": exit_fill, "exit_reason": outcome,
             "r_multiple": r_multiple, "pnl_pct": pnl_pct,
@@ -5179,7 +5207,10 @@ def mandatory_backtest_gate(universe):
                     "sortino": r.get("sortino"),
                     "passed": True,
                     "details": {"baseline": True, "fee_pct": BACKTEST_FEE_PCT,
-                                "slippage_pct": BACKTEST_SLIPPAGE_PCT},
+                                "slippage_pct": BACKTEST_SLIPPAGE_PCT,
+                                "analytics_v2": {"avg_r": r.get("avg_r"), "median_r": r.get("median_r"),
+                                "avg_mae_r": r.get("avg_mae_r"), "avg_mfe_r": r.get("avg_mfe_r"),
+                                "avg_holding_bars": r.get("avg_holding_bars"), "exit_reasons": r.get("exit_reasons")}},
                 },
             )
         append_changelog(
@@ -5241,7 +5272,10 @@ def mandatory_backtest_gate(universe):
                 "improvement_pct": max(improvement_pf, improvement_wr),
                 "passed": passed,
                 "details": {"self_healing_gate": True, "fee_pct": BACKTEST_FEE_PCT,
-                            "slippage_pct": BACKTEST_SLIPPAGE_PCT, "walk_forward": wf_summary},
+                            "slippage_pct": BACKTEST_SLIPPAGE_PCT, "walk_forward": wf_summary,
+                            "analytics_v2": {"avg_r": r.get("avg_r"), "median_r": r.get("median_r"),
+                            "avg_mae_r": r.get("avg_mae_r"), "avg_mfe_r": r.get("avg_mfe_r"),
+                            "avg_holding_bars": r.get("avg_holding_bars"), "exit_reasons": r.get("exit_reasons")}},
             },
         )
     append_changelog(
@@ -5314,6 +5348,7 @@ def store_signal(result):
         "raw_action": result["action"],
         "notes": result["reason"],
         "candle_pattern": result["pattern"],
+        "m15_trend": result.get("m15_trend"),
         "h1_trend": result["h1_trend"],
         "h4_trend": result["h4_trend"],
         "d1_trend": result["d1_trend"],
@@ -9387,6 +9422,7 @@ ATLAS_PORTFOLIO_MAX_DIRECTIONAL_EXPOSURE_PCT = float(
     os.environ.get("ATLAS_PORTFOLIO_MAX_DIRECTIONAL_EXPOSURE_PCT", "75")
 )
 ATLAS_LIFECYCLE_NOTIFY_ON_TP = os.environ.get("ATLAS_LIFECYCLE_NOTIFY_ON_TP", "1").strip().lower() not in ("0","false","no","off")
+ATLAS_LIFECYCLE_EXPIRE_HOURS = int(os.environ.get("ATLAS_LIFECYCLE_EXPIRE_HOURS", "72"))
 
 def _p1_norm_trend(v):
     s = str(v or "").strip().upper()
@@ -9402,7 +9438,8 @@ def _p1_norm_trend(v):
     return "NEUTRAL"
 
 def _p1_extract_mtf(r):
-    """Returns normalized H1/H4/D1/W1 trend states without changing arrow/snapshot logic."""
+    """Real MTF states sourced from independent OHLCV fetches in tf_snapshot()."""
+    m15 = r.get("m15_trend") or r.get("trend_15m") or r.get("trend_m15")
     h1 = (
         r.get("h1_trend") or r.get("trend_1h") or r.get("trend_h1")
         or r.get("h1_structure") or r.get("one_hour_trend")
@@ -9411,17 +9448,22 @@ def _p1_extract_mtf(r):
     d1 = r.get("d1_trend") or r.get("trend_1d") or r.get("trend_d1")
     w1 = r.get("w1_trend") or r.get("trend_1w") or r.get("trend_w1")
     return {
+        "M15": _p1_norm_trend(m15),
         "H1": _p1_norm_trend(h1),
         "H4": _p1_norm_trend(h4),
         "D1": _p1_norm_trend(d1),
         "W1": _p1_norm_trend(w1),
     }
 
+
 def apply_mtf_confirmation(results):
     """
-    Weighted MTF agreement for the current canonical direction.
-    H1=20%, H4=35%, D1=30%, W1=15%.
-    This layer scores confirmation and does not veto a trade by itself.
+    Real multi-timeframe confirmation.
+
+    M15/H1/H4/D1/W1 are independently fetched OHLCV series. To preserve the
+    existing analytical contract, the canonical agreement weights remain
+    EXACTLY H1=20%, H4=35%, D1=30%, W1=15%. M15 is recorded separately as a
+    trigger/timing state and does not alter the existing agreement score.
     """
     weights = {"H1": 0.20, "H4": 0.35, "D1": 0.30, "W1": 0.15}
     for r in results or []:
@@ -9436,7 +9478,15 @@ def apply_mtf_confirmation(results):
         conflicts = 0
         detail = {}
 
-        for tf, state in mtf.items():
+        # M15 is real trigger timing but deliberately excluded from old weighted score.
+        m15_state = mtf.get("M15", "NEUTRAL")
+        if target and m15_state != "NEUTRAL":
+            detail["M15"] = "ALIGNED" if m15_state == target else "CONFLICT"
+        else:
+            detail["M15"] = m15_state
+
+        for tf in ("H1", "H4", "D1", "W1"):
+            state = mtf.get(tf, "NEUTRAL")
             if state == "NEUTRAL":
                 detail[tf] = "NEUTRAL"
                 continue
@@ -9465,7 +9515,37 @@ def apply_mtf_confirmation(results):
             else "MODERATE" if agreement_pct >= 50
             else "WEAK"
         )
+        r["mtf_trigger_timeframe"] = "15m"
+        r["mtf_trigger_state"] = m15_state
+        r["mtf_trigger_aligned"] = bool(target and m15_state == target)
+        r["mtf_real"] = True
     return results
+
+
+def persist_mtf_snapshots(results):
+    """Persist one compact real-MTF snapshot per asset/run to Supabase in one batch."""
+    if not STORE.enabled:
+        return False
+    ts = now_utc().isoformat()
+    rows = []
+    for r in results or []:
+        sym = _aio_symbol(r)
+        if not sym:
+            continue
+        mtf = r.get("mtf_states") or _p1_extract_mtf(r)
+        rows.append({
+            "timestamp": ts,
+            "symbol": sym,
+            "direction": str(r.get("direction") or ""),
+            "m15": mtf.get("M15"), "h1": mtf.get("H1"), "h4": mtf.get("H4"),
+            "d1": mtf.get("D1"), "w1": mtf.get("W1"),
+            "agreement_pct": _aio_num(r.get("mtf_agreement_pct"), 0),
+            "confirmation": r.get("mtf_confirmation"),
+            "trigger_aligned": bool(r.get("mtf_trigger_aligned")),
+            "model_version": VERSION,
+        })
+    return STORE.insert_many("atlas_mtf_snapshots", rows) if rows else False
+
 
 def _p1_risk_per_trade_pct(r):
     """Estimate risk % using existing fields first; otherwise derive from entry/SL distance."""
@@ -9783,127 +9863,236 @@ def _p1_price_hit(price, level, direction, kind):
         return p <= lv if kind == "TP" else p >= lv
     return False
 
+def _p2_lifecycle_phase(state):
+    s = str(state or "").upper()
+    return {
+        "CANDIDATE": "NEW", "WATCH": "WATCHING", "CONFIRMED": "ACTIVATED", "ACTIVE": "ACTIVATED",
+        "TP1": "TP1", "TP2": "TP2", "TP3": "TP3", "TP4": "TP4", "SL": "SL",
+        "INVALIDATED": "INVALIDATED", "EXPIRED": "EXPIRED", "EXITED": "EXITED",
+    }.get(s, s or "NEW")
+
+
+def _p2_remote_lifecycle_rows():
+    if not STORE.enabled:
+        return []
+    return STORE.select("atlas_signal_lifecycle", {"select": "*", "limit": "1000"}) or []
+
+
+def _p2_terminal_r(direction, entry, sl, price):
+    try:
+        entry, sl, price = float(entry), float(sl), float(price)
+        risk = abs(entry - sl)
+        if risk <= 0:
+            return None
+        return ((price-entry)/risk) if str(direction).upper()=="LONG" else ((entry-price)/risk)
+    except Exception:
+        return None
+
+
 def update_signal_lifecycle(results, top10=None):
     """
-    Stateful lifecycle tracker:
-    CANDIDATE -> WATCH -> CONFIRMED -> ACTIVE -> TP1/TP2/TP3/TP4/SL/INVALIDATED.
-    It tracks; it does not place orders.
+    Supabase-primary lifecycle with SQLite audit/fallback.
+
+    Existing lifecycle semantics are preserved for compatibility:
+    CANDIDATE -> WATCH -> CONFIRMED -> ACTIVE -> TP1/TP2/TP3/TP4/SL/INVALIDATED/EXPIRED.
+    A normalized lifecycle_phase (NEW/WATCHING/ACTIVATED/...) is persisted alongside it.
     """
-    now = now_tehran().isoformat()
+    now_dt = now_tehran()
+    now = now_dt.isoformat()
     conn = _p1_lifecycle_db()
     events = []
     selected = _aio_selected_results(results, top10) if top10 is not None else (results or [])
+
+    remote_rows = _p2_remote_lifecycle_rows()
+    remote = {str(x.get("symbol") or "").upper(): x for x in remote_rows if x.get("symbol")}
+    supabase_state_rows = []
+    supabase_event_rows = []
+    seen = set()
 
     try:
         for r in selected:
             sym = _aio_symbol(r)
             if not sym:
                 continue
-
+            sym = str(sym).upper()
+            seen.add(sym)
             direction = str(r.get("direction") or "").upper()
             signal_id = str(r.get("intel_signal_id") or r.get("signal_id") or "")
             price = r.get("price")
             desired = _p1_initial_lifecycle_state(r)
 
-            row = conn.execute(
+            local = conn.execute(
                 """select lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,first_seen_at
-                   from signal_lifecycle where symbol=?""",
-                (sym,)
+                   from signal_lifecycle where symbol=?""", (sym,)
             ).fetchone()
+            rr = remote.get(sym)
+
+            if rr:
+                prev_state = rr.get("lifecycle_state") or "CANDIDATE"
+                prev_dir = rr.get("direction")
+                pentry, psl = rr.get("entry"), rr.get("sl")
+                ptp1, ptp2, ptp3, ptp4 = rr.get("tp1"), rr.get("tp2"), rr.get("tp3"), rr.get("tp4")
+                first_seen = rr.get("first_seen_at") or now
+            elif local:
+                prev_state, prev_dir, pentry, psl, ptp1, ptp2, ptp3, ptp4, first_seen = local
+            else:
+                prev_state = None
+                prev_dir = None
+                pentry=psl=ptp1=ptp2=ptp3=ptp4=None
+                first_seen = now
 
             entry, sl = r.get("entry"), r.get("sl")
             tp1, tp2, tp3, tp4 = r.get("tp1"), r.get("tp2"), r.get("tp3"), r.get("tp4")
 
-            if not row:
+            if prev_state is None:
+                new_state, event = desired, "INIT"
+            else:
+                new_state, event = prev_state, None
+                if prev_dir and direction and prev_dir != direction and prev_state not in ("TP4","SL","INVALIDATED","EXITED","EXPIRED"):
+                    new_state, event = "INVALIDATED", "DIRECTION_FLIP"
+                else:
+                    levels = [
+                        ("TP4", tp4 if tp4 is not None else ptp4),
+                        ("TP3", tp3 if tp3 is not None else ptp3),
+                        ("TP2", tp2 if tp2 is not None else ptp2),
+                        ("TP1", tp1 if tp1 is not None else ptp1),
+                    ]
+                    effective_sl = sl if sl is not None else psl
+                    if _p1_price_hit(price, effective_sl, direction or prev_dir, "SL"):
+                        new_state, event = "SL", "SL_HIT"
+                    else:
+                        for state_name, lv in levels:
+                            if _p1_price_hit(price, lv, direction or prev_dir, "TP"):
+                                new_state, event = state_name, f"{state_name}_HIT"
+                                break
+                    if event is None:
+                        if desired == "CONFIRMED" and prev_state in ("CANDIDATE","WATCH"):
+                            new_state, event = "CONFIRMED", "SETUP_CONFIRMED"
+                        elif desired == "WATCH" and prev_state == "CANDIDATE":
+                            new_state, event = "WATCH", "WATCH_STARTED"
+                        elif prev_state == "CONFIRMED":
+                            new_state, event = "ACTIVE", "ACTIVE_TRACKING"
+
+            if prev_state is None:
                 conn.execute(
-                    """insert into signal_lifecycle(
+                    """insert or replace into signal_lifecycle(
                        symbol,signal_id,lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,
                        last_price,first_seen_at,updated_at,last_event
                        ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (sym,signal_id,desired,direction,entry,sl,tp1,tp2,tp3,tp4,price,now,now,"INIT")
+                    (sym,signal_id,new_state,direction,entry,sl,tp1,tp2,tp3,tp4,price,first_seen,now,event)
                 )
-                events.append({"symbol":sym,"from":None,"to":desired,"event":"INIT","price":price})
-                continue
-
-            prev_state, prev_dir, pentry, psl, ptp1, ptp2, ptp3, ptp4, first_seen = row
-            new_state = prev_state
-            event = None
-
-            # Direction flip invalidates previous setup first.
-            if prev_dir and direction and prev_dir != direction and prev_state not in ("TP4","SL","INVALIDATED","EXITED"):
-                new_state = "INVALIDATED"
-                event = "DIRECTION_FLIP"
             else:
-                # Price milestone tracking for confirmed/active setups.
-                levels = [
-                    ("TP4", tp4 if tp4 is not None else ptp4),
-                    ("TP3", tp3 if tp3 is not None else ptp3),
-                    ("TP2", tp2 if tp2 is not None else ptp2),
-                    ("TP1", tp1 if tp1 is not None else ptp1),
-                ]
-                effective_sl = sl if sl is not None else psl
-                if _p1_price_hit(price, effective_sl, direction or prev_dir, "SL"):
-                    new_state, event = "SL", "SL_HIT"
-                else:
-                    for state_name, lv in levels:
-                        if _p1_price_hit(price, lv, direction or prev_dir, "TP"):
-                            new_state, event = state_name, f"{state_name}_HIT"
-                            break
-
-                if event is None:
-                    if desired == "CONFIRMED" and prev_state in ("CANDIDATE","WATCH"):
-                        new_state, event = "CONFIRMED", "SETUP_CONFIRMED"
-                    elif desired == "WATCH" and prev_state == "CANDIDATE":
-                        new_state, event = "WATCH", "WATCH_STARTED"
-                    elif prev_state == "CONFIRMED":
-                        # First subsequent observation of a still-valid confirmed setup becomes ACTIVE.
-                        new_state, event = "ACTIVE", "ACTIVE_TRACKING"
-
-            if new_state != prev_state or event:
                 conn.execute(
-                    """insert into signal_lifecycle_events(
-                       symbol,signal_id,from_state,to_state,event,price,created_at
-                       ) values(?,?,?,?,?,?,?)""",
+                    """update signal_lifecycle set signal_id=?,lifecycle_state=?,direction=?,entry=?,sl=?,tp1=?,tp2=?,tp3=?,tp4=?,
+                       last_price=?,updated_at=?,last_event=? where symbol=?""",
+                    (signal_id,new_state,direction,entry,sl,tp1,tp2,tp3,tp4,price,now,event,sym)
+                )
+
+            if prev_state is None or new_state != prev_state or event:
+                conn.execute(
+                    """insert into signal_lifecycle_events(symbol,signal_id,from_state,to_state,event,price,created_at)
+                       values(?,?,?,?,?,?,?)""",
                     (sym,signal_id,prev_state,new_state,event or "STATE_UPDATE",price,now)
                 )
-                events.append({"symbol":sym,"from":prev_state,"to":new_state,"event":event,"price":price})
+                ev = {"symbol":sym,"from":prev_state,"to":new_state,"event":event or "STATE_UPDATE","price":price}
+                events.append(ev)
+                supabase_event_rows.append({
+                    "timestamp": now_utc().isoformat(), "symbol": sym, "signal_id": signal_id,
+                    "from_state": prev_state, "to_state": new_state, "event": event or "STATE_UPDATE",
+                    "price": price, "direction": direction, "entry": entry, "sl": sl,
+                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4,
+                    "confidence": _aio_num(r.get("confidence"), None),
+                    "mtf_agreement_pct": _aio_num(r.get("mtf_agreement_pct"), None),
+                    "mtf_confirmation": r.get("mtf_confirmation"),
+                    "regime": r.get("regime_trend") or r.get("btc_regime") or r.get("trend"),
+                    "pnl_r": _p2_terminal_r(direction, entry if entry is not None else pentry,
+                                             sl if sl is not None else psl, price)
+                             if new_state in ("TP1","TP2","TP3","TP4","SL","INVALIDATED","EXITED") else None,
+                    "model_version": VERSION,
+                })
 
-            conn.execute(
-                """update signal_lifecycle set
-                   signal_id=?,lifecycle_state=?,direction=?,entry=?,sl=?,tp1=?,tp2=?,tp3=?,tp4=?,
-                   last_price=?,updated_at=?,last_event=?
-                   where symbol=?""",
-                (signal_id,new_state,direction,entry,sl,tp1,tp2,tp3,tp4,price,now,event,sym)
-            )
+            supabase_state_rows.append({
+                "symbol": sym, "signal_id": signal_id, "lifecycle_state": new_state,
+                "lifecycle_phase": _p2_lifecycle_phase(new_state), "direction": direction,
+                "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4,
+                "last_price": price, "first_seen_at": first_seen, "updated_at": now_utc().isoformat(),
+                "last_event": event, "confidence": _aio_num(r.get("confidence"), None),
+                "mtf_agreement_pct": _aio_num(r.get("mtf_agreement_pct"), None),
+                "mtf_confirmation": r.get("mtf_confirmation"),
+                "regime": r.get("regime_trend") or r.get("btc_regime") or r.get("trend"),
+                "model_version": VERSION,
+            })
             r["lifecycle_state"] = new_state
+            r["lifecycle_phase"] = _p2_lifecycle_phase(new_state)
             r["lifecycle_event"] = event
+
+        # Expire stale remote states not observed in the current selected universe.
+        cutoff = now_dt - timedelta(hours=max(1, ATLAS_LIFECYCLE_EXPIRE_HOURS))
+        for sym, rr in remote.items():
+            if sym in seen or str(rr.get("lifecycle_state") or "").upper() in ("TP4","SL","INVALIDATED","EXITED","EXPIRED"):
+                continue
+            try:
+                updated = datetime.fromisoformat(str(rr.get("updated_at") or "").replace("Z", "+00:00"))
+                if updated.tzinfo is None: updated = updated.replace(tzinfo=timezone.utc)
+                if updated.astimezone(TEHRAN) > cutoff:
+                    continue
+            except Exception:
+                continue
+            supabase_state_rows.append({**rr, "symbol": sym, "lifecycle_state": "EXPIRED",
+                                        "lifecycle_phase": "EXPIRED", "last_event": "STALE_EXPIRED",
+                                        "updated_at": now_utc().isoformat(), "model_version": VERSION})
+            supabase_event_rows.append({
+                "timestamp": now_utc().isoformat(), "symbol": sym, "signal_id": rr.get("signal_id"),
+                "from_state": rr.get("lifecycle_state"), "to_state": "EXPIRED", "event": "STALE_EXPIRED",
+                "price": rr.get("last_price"), "direction": rr.get("direction"), "entry": rr.get("entry"),
+                "sl": rr.get("sl"), "tp1": rr.get("tp1"), "tp2": rr.get("tp2"), "tp3": rr.get("tp3"),
+                "tp4": rr.get("tp4"), "confidence": rr.get("confidence"),
+                "mtf_agreement_pct": rr.get("mtf_agreement_pct"), "mtf_confirmation": rr.get("mtf_confirmation"),
+                "regime": rr.get("regime"), "pnl_r": None, "model_version": VERSION,
+            })
+            events.append({"symbol":sym,"from":rr.get("lifecycle_state"),"to":"EXPIRED","event":"STALE_EXPIRED","price":rr.get("last_price")})
 
         conn.commit()
     finally:
         conn.close()
+
+    # Supabase is primary persistent state; SQLite above remains local audit/fallback.
+    if supabase_state_rows:
+        STORE.upsert_many("atlas_signal_lifecycle", supabase_state_rows, "symbol")
+    if supabase_event_rows:
+        STORE.insert_many("atlas_signal_lifecycle_events", supabase_event_rows)
     return events
+
 
 def generate_lifecycle_csv():
     import csv, io
-    conn = _p1_lifecycle_db()
-    try:
-        rows = conn.execute(
-            """select symbol,signal_id,lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,
-                      last_price,first_seen_at,updated_at,last_event
-               from signal_lifecycle
-               order by updated_at desc"""
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = _p2_remote_lifecycle_rows()
+    if not rows:
+        conn = _p1_lifecycle_db()
+        try:
+            local = conn.execute(
+                """select symbol,signal_id,lifecycle_state,direction,entry,sl,tp1,tp2,tp3,tp4,
+                          last_price,first_seen_at,updated_at,last_event
+                   from signal_lifecycle order by updated_at desc"""
+            ).fetchall()
+            rows = [dict(zip(["symbol","signal_id","lifecycle_state","direction","entry","sl","tp1","tp2","tp3","tp4",
+                              "last_price","first_seen_at","updated_at","last_event"], row)) for row in local]
+        finally:
+            conn.close()
 
     out = io.StringIO(newline="")
-    cols = ["Symbol","SignalID","Lifecycle","Direction","Entry","SL","TP1","TP2","TP3","TP4",
-            "LastPrice","FirstSeen","UpdatedAt","LastEvent"]
+    cols = ["Symbol","SignalID","Lifecycle","Phase","Direction","Entry","SL","TP1","TP2","TP3","TP4",
+            "LastPrice","Confidence","MTF%","MTFConfirmation","Regime","FirstSeen","UpdatedAt","LastEvent"]
     w = csv.writer(out, lineterminator="\n")
     w.writerow(cols)
-    for row in rows:
-        w.writerow(row)
+    for x in sorted(rows, key=lambda z: str(z.get("updated_at") or ""), reverse=True):
+        w.writerow([x.get("symbol"),x.get("signal_id"),x.get("lifecycle_state"),
+                    x.get("lifecycle_phase") or _p2_lifecycle_phase(x.get("lifecycle_state")),x.get("direction"),
+                    x.get("entry"),x.get("sl"),x.get("tp1"),x.get("tp2"),x.get("tp3"),x.get("tp4"),
+                    x.get("last_price"),x.get("confidence"),x.get("mtf_agreement_pct"),x.get("mtf_confirmation"),
+                    x.get("regime"),x.get("first_seen_at"),x.get("updated_at"),x.get("last_event")])
     return out.getvalue()
+
 
 def send_phase1_documents(results, top10, risk_summary):
     dt = now_tehran()
@@ -10081,7 +10270,11 @@ def _opt_num(v, default=None):
     except Exception:
         return default
 
-def _opt_backtest_db_rows(limit=500):
+def _opt_backtest_db_rows(limit=1000):
+    """Supabase-primary analytics source; SQLite is fallback for local audit."""
+    remote = STORE.select("atlas_backtests", {"select": "*", "order": "timestamp.desc", "limit": str(limit)}) if STORE.enabled else []
+    if remote:
+        return remote
     conn=sqlite3.connect(DB_FILE)
     conn.row_factory=sqlite3.Row
     try:
@@ -10098,67 +10291,160 @@ def _opt_backtest_db_rows(limit=500):
     finally:
         conn.close()
 
-def _opt_backtest_metrics(rows):
-    import statistics
-    returns=[]; wins=0; losses=0; drawdowns=[]
-    explicit={"win_rate":[],"profit_factor":[],"sharpe":[],"max_drawdown":[]}
-    for r in rows or []:
-        for k in ("pnl_pct","return_pct","net_return_pct","profit_pct","pnl"):
-            v=_opt_num(r.get(k))
-            if v is not None:
-                returns.append(v); break
-        outcome=str(r.get("outcome") or r.get("result") or r.get("status") or "").upper()
-        if any(x in outcome for x in ("WIN","TP","PROFIT")): wins+=1
-        elif any(x in outcome for x in ("LOSS","SL","STOP")): losses+=1
-        for src,dst in (
-            ("win_rate","win_rate"),("profit_factor","profit_factor"),
-            ("sharpe","sharpe"),("sharpe_ratio","sharpe"),
-            ("max_drawdown","max_drawdown"),("max_drawdown_pct","max_drawdown")
-        ):
-            v=_opt_num(r.get(src))
-            if v is not None: explicit[dst].append(v)
-        dd=_opt_num(r.get("drawdown_pct"))
-        if dd is not None: drawdowns.append(abs(dd))
-    win_rate=(wins/(wins+losses)*100.0) if wins+losses else (statistics.mean(explicit["win_rate"]) if explicit["win_rate"] else None)
-    pf=statistics.mean(explicit["profit_factor"]) if explicit["profit_factor"] else None
-    if pf is None and returns:
-        gp=sum(x for x in returns if x>0); gl=abs(sum(x for x in returns if x<0))
-        if gl>0: pf=gp/gl
-    sharpe=statistics.mean(explicit["sharpe"]) if explicit["sharpe"] else None
-    if sharpe is None and len(returns)>=2:
-        sd=statistics.pstdev(returns)
-        if sd>0: sharpe=statistics.mean(returns)/sd
-    maxdd=max(drawdowns) if drawdowns else (max(explicit["max_drawdown"]) if explicit["max_drawdown"] else None)
-    expectancy=statistics.mean(returns) if returns else None
-    return {"samples":len(rows or []),"wins":wins,"losses":losses,"win_rate":win_rate,"profit_factor":pf,
-            "sharpe_like":sharpe,"max_drawdown_pct":maxdd,"expectancy_pct":expectancy}
+
+def _btv2_json(v):
+    if isinstance(v, dict): return v
+    if isinstance(v, str):
+        try: return json.loads(v)
+        except Exception: return {}
+    return {}
+
+
+def _btv2_ts(v):
+    try:
+        dt=datetime.fromisoformat(str(v).replace("Z","+00:00"))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _btv2_aggregate(rows):
+    rows=list(rows or [])
+    total=sum(int(_opt_num(r.get("trades"),0) or 0) for r in rows)
+    wins=sum(int(_opt_num(r.get("wins"),0) or 0) for r in rows)
+    losses=sum(int(_opt_num(r.get("losses"),0) or 0) for r in rows)
+    def wavg(key):
+        pairs=[(_opt_num(r.get(key)), max(1,int(_opt_num(r.get("trades"),0) or 0))) for r in rows]
+        pairs=[(v,w) for v,w in pairs if v is not None]
+        return (sum(v*w for v,w in pairs)/sum(w for _,w in pairs)) if pairs else None
+    pfs=[_opt_num(r.get("profit_factor")) for r in rows]; pfs=[x for x in pfs if x is not None]
+    dds=[abs(_opt_num(r.get("max_drawdown"),0) or 0) for r in rows]
+    return {
+        "rows":len(rows), "trades":total, "wins":wins, "losses":losses,
+        "win_rate": (wins/(wins+losses)*100.0) if wins+losses else wavg("win_rate"),
+        "profit_factor": (sum(pfs)/len(pfs)) if pfs else None,
+        "max_drawdown": max(dds) if dds else None,
+        "net_return_pct": wavg("net_return_pct"), "expectancy_r": wavg("expectancy_r"),
+        "sharpe": wavg("sharpe"), "sortino": wavg("sortino"),
+    }
+
+
+def _btv2_lifecycle_events(limit=3000):
+    if not STORE.enabled: return []
+    return STORE.select("atlas_signal_lifecycle_events", {"select":"*","order":"timestamp.asc","limit":str(limit)}) or []
+
+
+def _btv2_group_terminal(events, keyfn):
+    groups={}
+    terminal={"TP1","TP2","TP3","TP4","SL","INVALIDATED","EXITED"}
+    for e in events or []:
+        if str(e.get("to_state") or "").upper() not in terminal: continue
+        k=keyfn(e)
+        if not k: continue
+        g=groups.setdefault(k,{"n":0,"wins":0,"losses":0,"r":[]})
+        g["n"]+=1
+        st=str(e.get("to_state") or "").upper()
+        if st.startswith("TP"): g["wins"]+=1
+        elif st=="SL": g["losses"]+=1
+        rv=_opt_num(e.get("pnl_r"))
+        if rv is not None: g["r"].append(rv)
+    out={}
+    for k,g in groups.items():
+        out[k]={"samples":g["n"],"win_rate":(g["wins"]/(g["wins"]+g["losses"])*100.0) if g["wins"]+g["losses"] else None,
+                "avg_r":(sum(g["r"])/len(g["r"])) if g["r"] else None}
+    return out
+
+
+def _btv2_streaks(events):
+    seq=[]
+    for e in events or []:
+        st=str(e.get("to_state") or "").upper()
+        if st.startswith("TP"): seq.append("W")
+        elif st=="SL": seq.append("L")
+    mw=ml=cw=cl=0
+    for x in seq:
+        if x=="W": cw+=1; cl=0; mw=max(mw,cw)
+        else: cl+=1; cw=0; ml=max(ml,cl)
+    return mw,ml
+
+
+def build_backtest_analytics_v2():
+    rows=_opt_backtest_db_rows(1000)
+    events=_btv2_lifecycle_events(3000)
+    now=now_utc()
+    windows={}
+    for days in (30,60,90):
+        cutoff=now-timedelta(days=days)
+        subset=[r for r in rows if (_btv2_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))>=cutoff]
+        windows[days]=_btv2_aggregate(subset)
+    overall=_btv2_aggregate(rows)
+    by_symbol={}
+    for r in rows:
+        sym=str(r.get("coin") or r.get("symbol") or "").upper()
+        if sym: by_symbol.setdefault(sym,[]).append(r)
+    symbol_stats={k:_btv2_aggregate(v) for k,v in by_symbol.items()}
+    by_direction=_btv2_group_terminal(events, lambda e: str(e.get("direction") or "UNKNOWN").upper())
+    by_regime=_btv2_group_terminal(events, lambda e: str(e.get("regime") or "UNKNOWN").upper())
+    def conf_bucket(e):
+        c=_opt_num(e.get("confidence"))
+        if c is None:return "UNKNOWN"
+        return "<45" if c<45 else "45-54" if c<55 else "55-69" if c<70 else "70+"
+    by_conf=_btv2_group_terminal(events, conf_bucket)
+    def mtf_bucket(e):
+        c=_opt_num(e.get("mtf_agreement_pct"))
+        if c is None:return "UNKNOWN"
+        return "WEAK<50" if c<50 else "MODERATE50-74" if c<75 else "STRONG75+"
+    by_mtf=_btv2_group_terminal(events, mtf_bucket)
+    mw,ml=_btv2_streaks(events)
+    tp_counts={k:0 for k in ("TP1","TP2","TP3","TP4","SL")}
+    for e in events:
+        st=str(e.get("to_state") or "").upper()
+        if st in tp_counts: tp_counts[st]+=1
+    terminal_n=sum(tp_counts.values())
+    reliability="HIGH" if overall.get("trades",0)>=100 else "MEDIUM" if overall.get("trades",0)>=30 else "LOW"
+    return {"overall":overall,"windows":windows,"by_symbol":symbol_stats,"by_direction":by_direction,
+            "by_regime":by_regime,"by_confidence":by_conf,"by_mtf":by_mtf,"streaks":{"wins":mw,"losses":ml},
+            "milestones":{**tp_counts,"terminal_events":terminal_n},"sample_reliability":reliability,
+            "generated_at":now.isoformat(),"model_version":VERSION}
+
+
+def _btv2_persist_snapshot(a):
+    if not STORE.enabled: return False
+    o=a.get("overall") or {}
+    row={"timestamp":a.get("generated_at"),"model_version":VERSION,"sample_reliability":a.get("sample_reliability"),
+         "trades":o.get("trades"),"win_rate":o.get("win_rate"),"profit_factor":o.get("profit_factor"),
+         "expectancy_r":o.get("expectancy_r"),"max_drawdown":o.get("max_drawdown"),"details":a}
+    return STORE.insert("atlas_backtest_analytics_v2",row)
+
 
 def build_backtest_report():
-    rows=_opt_backtest_db_rows()
-    m=_opt_backtest_metrics(rows)
-    cut=max(1,len(rows)//2) if rows else 0
-    cur=_opt_backtest_metrics(rows[:cut]) if cut else {}
-    base=_opt_backtest_metrics(rows[cut:]) if len(rows)>=20 else {}
-    def f(v,d=2,s=""):
-        return "N/A" if v is None else f"{v:.{d}f}{s}"
-    return "\n".join([
-        "ATLAS AI — BACKTEST DASHBOARD","="*64,
-        f"Stored Samples: {m.get('samples',0)}",
-        f"Wins / Losses: {m.get('wins',0)} / {m.get('losses',0)}",
-        f"Win Rate: {f(m.get('win_rate'),1,'%')}",
-        f"Profit Factor: {f(m.get('profit_factor'))}",
-        f"Sharpe-like: {f(m.get('sharpe_like'))}",
-        f"Max Drawdown: {f(m.get('max_drawdown_pct'),2,'%')}",
-        f"Expectancy: {f(m.get('expectancy_pct'),3,'%')}",
-        "",
-        "Recent vs Baseline:",
-        f"Recent Win Rate: {f(cur.get('win_rate'),1,'%')}",
-        f"Baseline Win Rate: {f(base.get('win_rate'),1,'%')}",
-        f"Recent PF: {f(cur.get('profit_factor'))}",
-        f"Baseline PF: {f(base.get('profit_factor'))}",
-        "",
-        "N/A means the current persisted schema does not support a safe calculation."
-    ])
+    a=build_backtest_analytics_v2(); _btv2_persist_snapshot(a)
+    o=a["overall"]
+    def f2(v,d=2,s=""): return "N/A" if v is None else f"{v:.{d}f}{s}"
+    lines=["ATLAS AI — BACKTEST ANALYTICS v2","="*72,
+           f"Sample Reliability: {a['sample_reliability']}",f"Aggregate Backtest Trades: {o.get('trades',0)}",
+           f"Win Rate: {f2(o.get('win_rate'),1,'%')}",f"Profit Factor: {f2(o.get('profit_factor'))}",
+           f"Expectancy: {f2(o.get('expectancy_r'),3,' R')}",f"Max Drawdown: {f2(o.get('max_drawdown'),2,'%')}",
+           f"Net Return (weighted): {f2(o.get('net_return_pct'),2,'%')}",f"Sharpe-like: {f2(o.get('sharpe'))}",
+           f"Sortino-like: {f2(o.get('sortino'))}",f"Max Win/Loss Streak (live lifecycle): {a['streaks']['wins']} / {a['streaks']['losses']}",""]
+    lines.append("Rolling Analytics:")
+    for d in (30,60,90):
+        x=a["windows"][d]; lines.append(f"- {d}d | Trades={x.get('trades',0)} | WR={f2(x.get('win_rate'),1,'%')} | PF={f2(x.get('profit_factor'))} | Exp={f2(x.get('expectancy_r'),3,' R')}")
+    lines += ["","Performance by Symbol (top by sample):"]
+    ranked=sorted(a["by_symbol"].items(), key=lambda kv: kv[1].get("trades",0), reverse=True)[:12]
+    for sym,x in ranked: lines.append(f"- {sym}: n={x.get('trades',0)} | WR={f2(x.get('win_rate'),1,'%')} | PF={f2(x.get('profit_factor'))} | Exp={f2(x.get('expectancy_r'),3,' R')}")
+    def add_groups(title,data):
+        lines.extend(["",title+":"])
+        if not data: lines.append("- N/A — no persisted terminal lifecycle samples yet.")
+        for k,x in sorted(data.items()): lines.append(f"- {k}: n={x.get('samples',0)} | WR={f2(x.get('win_rate'),1,'%')} | AvgR={f2(x.get('avg_r'),3,' R')}")
+    add_groups("By Direction",a["by_direction"]); add_groups("By Market Regime",a["by_regime"])
+    add_groups("By Confidence Bucket",a["by_confidence"]); add_groups("By Real-MTF Alignment",a["by_mtf"])
+    m=a["milestones"]; lines += ["","Lifecycle Milestones:",f"TP1={m['TP1']} | TP2={m['TP2']} | TP3={m['TP3']} | TP4={m['TP4']} | SL={m['SL']}",
+        "","MAE/MFE/Median-R are preserved in new atlas_backtests.details.analytics_v2 records. Historical rows created before this upgrade may show N/A.",
+        "Backtest Gate pass/fail mathematics are unchanged; Analytics v2 is observational/diagnostic only."]
+    return "\n".join(lines)
+
 
 _ATLAS_2026_FOMC=[
     ("2026-09-15T00:00:00","FOMC Meeting — Day 1"),
@@ -10604,7 +10890,7 @@ def build_performance_telemetry_report():
         f"- SQLite OHLCV hot-path enabled: {ATLAS_SQLITE_OHLCV_CACHE_ENABLED}",
         "- signal/entry/SL/TP formulas unchanged",
         "- decision engine and evidence weights unchanged",
-        "- technical/MTF/regime/news/whale inputs unchanged",
+        "- technical/regime/news/whale inputs unchanged; MTF now includes real independent 15m trigger data",
         "- backtest mathematics unchanged; only its 24h reuse policy changed",
         "- output ordering preserved after concurrent analysis",
     ]
@@ -10751,6 +11037,7 @@ def main():
             with _AtlasTimer("Evidence + MTF + Risk + Lifecycle"):
                 results = apply_evidence_fusion(results, news)
                 results = apply_mtf_confirmation(results)
+                persist_mtf_snapshots(results)
                 portfolio_risk = build_portfolio_risk_intelligence(results, top10)
                 results = apply_portfolio_risk_context(results, portfolio_risk)
                 lifecycle_events = update_signal_lifecycle(results, top10)
