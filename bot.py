@@ -5,7 +5,7 @@
 # Stage 2: Regime Matrix (single RegimeEngine) + Volatility + Liquidation Cascade
 # Stage 3: Intelligence Scoring (Signal Score / Model Strength / Win Probability)
 # Stage 4: Decision Engine + Backtest Gate (real gate, not advisory)
-# Stage 5: Reporting (Telegram / PNG / split CSV / Voice)
+# Stage 5: Reporting (Telegram / PNG / split CSV / voice) + Decision Supportit CSV / Voice)
 #
 # Design principles:
 #   - ATLAS static radar is NEVER removed.
@@ -7723,6 +7723,140 @@ def win_probability_for_score(score):
     return (round(p * 100, 1) if p is not None else None), cal["tier"], cal["n"]
 
 
+
+# ============================================================
+# FINAL DECISION-SUPPORT LAYER
+# ============================================================
+# This layer is deliberately advisory: it ranks the quality and
+# actionability of a setup without changing the existing BUY/SELL
+# gate semantics. The price-arrow/snapshot architecture is untouched.
+# ============================================================
+
+def _ds_clamp(value, low=0.0, high=100.0):
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return low
+
+
+def _ds_direction_alignment(r):
+    """Measure agreement between asset direction and market/regime evidence."""
+    direction = str(r.get("direction") or "").upper()
+    regime_bias = str(r.get("regime_bias") or "").upper()
+    regime_trend = str(r.get("regime_trend") or "").upper()
+    score = 50.0
+
+    if direction == "LONG":
+        if regime_bias in ("BULLISH", "LONG", "RISK_ON"):
+            score += 25
+        elif regime_bias in ("BEARISH", "SHORT", "RISK_OFF"):
+            score -= 25
+        if regime_trend in ("UP", "BULLISH", "TRENDING_UP"):
+            score += 15
+        elif regime_trend in ("DOWN", "BEARISH", "TRENDING_DOWN"):
+            score -= 15
+    elif direction == "SHORT":
+        if regime_bias in ("BEARISH", "SHORT", "RISK_OFF"):
+            score += 25
+        elif regime_bias in ("BULLISH", "LONG", "RISK_ON"):
+            score -= 25
+        if regime_trend in ("DOWN", "BEARISH", "TRENDING_DOWN"):
+            score += 15
+        elif regime_trend in ("UP", "BULLISH", "TRENDING_UP"):
+            score -= 15
+
+    return _ds_clamp(score)
+
+
+def _ds_trigger_quality(r):
+    """Score the quality of the actual market trigger, not just oscillator state."""
+    trigger = str(r.get("intel_trigger") or (r.get("candle_trigger") or {}).get("state") or "").upper()
+    strong = {
+        "BREAKOUT_CLOSED", "BREAKDOWN_CLOSED",
+        "SUPPORT_RECLAIM", "RESISTANCE_REJECT",
+        "BREAKOUT", "BREAKDOWN",
+    }
+    weak = {"NONE", "NO_TRIGGER", "RANGE", "UNKNOWN", ""}
+    if trigger in strong:
+        return 90.0
+    if trigger in weak:
+        return 40.0
+    return 65.0
+
+
+def _ds_data_quality(r):
+    """Aggregate evidence completeness into a single auditable score."""
+    q = _ds_clamp(_i_quality(r))
+    required = ("price", "atr", "rsi", "macd", "volume_ratio")
+    present = sum(r.get(k) is not None for k in required)
+    completeness = present / len(required) * 100.0
+    return round(q * 0.65 + completeness * 0.35, 1)
+
+
+def decision_support_score(r):
+    """
+    Final ranking score for the decision-support layer.
+
+    It is NOT a probability and does not replace apply_decision_engine().
+    It answers: 'How actionable is this setup right now, given evidence,
+    risk geometry, trigger quality, regime alignment and data quality?'
+    """
+    signal = _ds_clamp(r.get("signal_score", r.get("intel_score", 50)))
+    opportunity = _ds_clamp(r.get("opportunity_score", 50))
+    alignment = _ds_direction_alignment(r)
+    trigger = _ds_trigger_quality(r)
+    dataq = _ds_data_quality(r)
+
+    rr = _i_num(r.get("rr"), 0.0) or 0.0
+    rr_quality = _ds_clamp(rr / 3.0 * 100.0)
+
+    contradictions = len(r.get("contradictions") or [])
+    contradiction_penalty = min(25.0, contradictions * 6.0)
+
+    # Evidence and actionability are intentionally separate from win probability.
+    score = (
+        signal * 0.28
+        + opportunity * 0.22
+        + alignment * 0.15
+        + trigger * 0.12
+        + rr_quality * 0.13
+        + dataq * 0.10
+        - contradiction_penalty
+    )
+    return round(_ds_clamp(score), 1)
+
+
+def build_decision_support(r):
+    """Attach an auditable decision-support packet to an asset result."""
+    score = decision_support_score(r)
+    direction = str(r.get("direction") or "").upper()
+    action = str(r.get("action") or r.get("decision_state") or "NO TRADE").upper()
+    win_prob = r.get("win_probability")
+
+    if action in ("BUY CONFIRMATION", "SELL CONFIRMATION", "BUY", "SELL") and score >= 75:
+        verdict = "EXECUTABLE_CANDIDATE"
+    elif score >= 68 and direction in ("LONG", "SHORT"):
+        verdict = "WATCH_HIGH_PRIORITY"
+    elif score >= 55:
+        verdict = "WATCH"
+    else:
+        verdict = "WAIT"
+
+    r["decision_support_score"] = score
+    r["decision_support"] = {
+        "verdict": verdict,
+        "signal_evidence": round(_ds_clamp(r.get("signal_score", r.get("intel_score", 50))), 1),
+        "opportunity": round(_ds_clamp(r.get("opportunity_score", 50)), 1),
+        "regime_alignment": round(_ds_direction_alignment(r), 1),
+        "trigger_quality": round(_ds_trigger_quality(r), 1),
+        "risk_geometry": round(_ds_clamp((_i_num(r.get("rr"), 0.0) or 0.0) / 3.0 * 100.0), 1),
+        "data_quality": _ds_data_quality(r),
+        "contradictions": len(r.get("contradictions") or []),
+        "calibrated_win_probability": win_prob,
+    }
+    return r
+
+
 def v11_apply_intelligence(r):
     """New evidence engine. It never claims its score is a win probability.
 
@@ -7826,6 +7960,7 @@ def v11_apply_intelligence(r):
     ).hexdigest()[:12]
     r["v11_estimated_probability"] = None
     r["v11_probability_status"] = "NOT_CALIBRATED"
+    build_decision_support(r)
     return r
 
 def _intel_rank(results, personal=False):
@@ -8019,34 +8154,6 @@ def _csv_row_for(sym, r, top10, dynamic30, personal_symbols):
     ]
 
 
-def _resolve_csv_universe(results, top10, dynamic30):
-    """Returns (ordered_symbols, result_map) shared by every CSV exporter."""
-    ordered=[]
-    for sym in list(top10 or ATLAS_PRIORITY_TOP10)+list(dynamic30 or [])+list(ATLAS_PERSONAL_ASSETS)+list(ATLAS_METALS):
-        s=str(sym).upper()
-        if s and s not in ordered: ordered.append(s)
-    result_map={str(r.get("coin") or "").upper():dict(r) for r in (results or []) if r.get("coin")}
-    return ordered, result_map
-
-
-def _csv_text_for_symbols(symbols, results, top10, dynamic30):
-    import csv, io
-    personal_symbols={str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    _, result_map = _resolve_csv_universe(results, top10, dynamic30)
-    rows=[]
-    for sym in symbols:
-        r=result_map.get(sym)
-        if r is None and sym in ATLAS_METALS:
-            r=_metal_analysis(sym)
-            if r: r=v11_apply_intelligence(r)
-        if not r: continue
-        rows.append(_csv_row_for(sym, r, top10, dynamic30, personal_symbols))
-    out=io.StringIO(newline="")
-    w=csv.writer(out,lineterminator="\n")
-    w.writerow(_new_csv_columns()); w.writerows(rows)
-    return out.getvalue()
-
-
 def generate_csv_report(results, top10, dynamic30):
     """Combined single-file export (kept for backward compatibility).
     For the split personal/metals/dynamic_top30 files, use
@@ -8054,35 +8161,6 @@ def generate_csv_report(results, top10, dynamic30):
     ordered, _ = _resolve_csv_universe(results, top10, dynamic30)
     return _csv_text_for_symbols(ordered, results, top10, dynamic30)
 
-
-def generate_split_csv_reports(results, top10, dynamic30):
-    """
-    Three separate CSV exports instead of one combined file, as requested:
-      - personal:      ATLAS_PERSONAL_ASSETS (excluding metals, which get their
-                        own file even if also personally held)
-      - metals:         ATLAS_METALS
-      - dynamic_top30:  the priority Top-10 list plus the Dynamic Top-30 scan,
-                        i.e. everything else ATLAS is actively scanning
-
-    Returns {"personal": csv_text, "metals": csv_text, "dynamic_top30": csv_text}.
-    A symbol appears in exactly one file, in the priority order above, so a
-    personally-held metal shows up once, in the metals file.
-    """
-    metals_set = {str(x).upper() for x in ATLAS_METALS}
-    personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS} - metals_set
-    top_dynamic_set = ({str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}
-                        | {str(x).upper() for x in (dynamic30 or [])}) - metals_set - personal_set
-
-    ordered, _ = _resolve_csv_universe(results, top10, dynamic30)
-    personal_syms = [s for s in ordered if s in personal_set]
-    metals_syms = [s for s in ordered if s in metals_set]
-    dynamic_syms = [s for s in ordered if s in top_dynamic_set]
-
-    return {
-        "personal": _csv_text_for_symbols(personal_syms, results, top10, dynamic30),
-        "metals": _csv_text_for_symbols(metals_syms, results, top10, dynamic30),
-        "dynamic_top30": _csv_text_for_symbols(dynamic_syms, results, top10, dynamic30),
-    }
 
 def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filename="signal_table.png"):
     """PNG ranking redesigned around opportunity/setup rather than raw price."""
