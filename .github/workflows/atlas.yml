@@ -7,28 +7,17 @@
 # اجرای خودکار:
 # هر 4 ساعت یک‌بار
 #
-# Cron بر اساس UTC است.
+# Cron بر اساس UTC است:
 # 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
 #
-# با توجه به UTC+3:30 ایران:
-# 04:00 / 08:00 / 12:00 / 16:00 / 20:00 / 00:00 تهران
+# تهران:
+# 04:00 / 08:00 / 12:00 / 16:00 / 20:00 / 00:00
 #
-# نکته:
-# GitHub ممکن است اجرای scheduled workflow را چند دقیقه
-# جابه‌جا کند؛ cron زمان دقیق تضمین‌شده نیست.
-#
-# ⚠️ تغییر مهم نسبت به نسخه قبلی:
-# timeout-minutes از 20 به 35 افزایش یافت. با در نظر گرفتن:
-#   - بک‌تست 180 روزه روی چندین نماد (ATLAS_BACKTEST_DAYS=180)
-#   - فراخوانی‌های ccxt به Bybit با retry
-#   - تأخیرهای عمدی ریت‌لیمیت تلگرام بین پیام‌ها/مقصدها
-#     (TELEGRAM_PRIVATE_DELAY=1.5s, TELEGRAM_GROUP_DELAY=3.0s؛
-#     با چندین بخش پیام و 2 مقصد جمع می‌شود)
-#   - تولید PNG (matplotlib) و صوت (edge-tts/gTTS)
-# اجرای کامل به‌سادگی می‌توانست از 20 دقیقه عبور کند و GitHub
-# پروسه را وسط ارسال گزارش‌های تلگرام Kill می‌کرد — یعنی برخی
-# پیام‌ها اصلاً ارسال نمی‌شدند، بدون این‌که خطای واضحی در لاگ باشد
-# (Job صرفاً به‌خاطر timeout قطع می‌شود).
+# Supabase:
+# - فقط SUPABASE_ANON_KEY استفاده می‌شود.
+# - SUPABASE_SERVICE_ROLE_KEY عمداً حذف شده است.
+# - Project Ref مورد انتظار:
+#   tmnfhsuwtqfpglckfxwg
 # ============================================================
 
 name: ATLAS AI Bot
@@ -56,6 +45,7 @@ concurrency:
   group: atlas-bot
   cancel-in-progress: false
 
+
 jobs:
 
   run-atlas:
@@ -66,18 +56,19 @@ jobs:
 
     timeout-minutes: 35
 
+
     steps:
 
-      # --------------------------------------------------------
+      # ========================================================
       # 1. Checkout
-      # --------------------------------------------------------
+      # ========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # --------------------------------------------------------
+      # ========================================================
       # 2. Python
-      # --------------------------------------------------------
+      # ========================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -85,26 +76,27 @@ jobs:
           cache: "pip"
 
 
-      # --------------------------------------------------------
+      # ========================================================
       # 3. Dependencies
-      # --------------------------------------------------------
+      # ========================================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
 
-      # --------------------------------------------------------
-      # 4. Environment / diagnostics
-      # --------------------------------------------------------
+      # ========================================================
+      # 4. ATLAS configuration diagnostics
+      # ========================================================
       - name: Show ATLAS configuration
         env:
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
           ATLAS_SCHEDULED_CADENCE: "workflow"
           ATLAS_ENGINE: "BOTH"
+
         run: |
           echo "=================================================="
-          echo "🚀 ATLAS AI"
+          echo "🚀 ATLAS AI v11.5"
           echo "=================================================="
           echo "ATLAS_RUN_MODE=${ATLAS_RUN_MODE}"
           echo "ATLAS_SCHEDULED_CADENCE=${ATLAS_SCHEDULED_CADENCE}"
@@ -113,33 +105,113 @@ jobs:
           echo "GitHub ref: ${{ github.ref }}"
           echo "=================================================="
 
-      # --------------------------------------------------------
-      # 4b. Sanity-check required Telegram secrets BEFORE running
-      #      the bot, so a missing secret fails fast with a clear
-      #      message instead of failing silently 20+ minutes later.
-      # --------------------------------------------------------
-      - name: Verify required secrets are present
+
+      # ========================================================
+      # 5. Verify Telegram secrets
+      # ========================================================
+      - name: Verify Telegram secrets
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
         run: |
           missing=0
-          if [ -z "${{ secrets.TELEGRAM_TOKEN }}" ]; then
+
+          if [ -z "$TELEGRAM_TOKEN" ]; then
             echo "❌ Secret TELEGRAM_TOKEN is missing"
             missing=1
           fi
-          if [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -z "${{ secrets.TELEGRAM_GROUP_CHAT_ID }}" ]; then
+
+          if [ -z "$TELEGRAM_CHAT_ID" ] && [ -z "$TELEGRAM_GROUP_CHAT_ID" ]; then
             echo "❌ Neither TELEGRAM_CHAT_ID nor TELEGRAM_GROUP_CHAT_ID is set"
             missing=1
           fi
+
           if [ "$missing" = "1" ]; then
-            echo "⛔ Required Telegram secrets are missing — see repo Settings → Secrets and variables → Actions"
+            echo "⛔ Required Telegram secrets are missing."
             exit 1
           fi
+
           echo "✅ Telegram secrets present"
 
 
-      # --------------------------------------------------------
-      # 5. Run ATLAS
-      # --------------------------------------------------------
+      # ========================================================
+      # 6. Verify Supabase configuration
+      #
+      # نکته امنیتی:
+      # API Key چاپ نمی‌شود.
+      # فقط URL و Project Ref بررسی می‌شود.
+      # ========================================================
+      - name: Verify Supabase configuration
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          expected_project_ref = "tmnfhsuwtqfpglckfxwg"
+
+          url = os.environ.get("SUPABASE_URL", "").strip()
+          anon_key = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+
+          errors = []
+
+          if not url:
+              errors.append("SUPABASE_URL is missing")
+
+          if not anon_key:
+              errors.append("SUPABASE_ANON_KEY is missing")
+
+          project_ref = "UNKNOWN"
+
+          if url:
+              try:
+                  parsed = urlparse(url)
+                  host = parsed.hostname or ""
+                  project_ref = host.split(".")[0] if host else "UNKNOWN"
+              except Exception:
+                  errors.append("SUPABASE_URL could not be parsed")
+
+          print("==================================================")
+          print("🗄️ Supabase configuration check")
+          print("==================================================")
+          print(f"Supabase Project Ref: {project_ref}")
+          print(
+              "SUPABASE_ANON_KEY:",
+              "PRESENT" if anon_key else "MISSING"
+          )
+
+          if project_ref != expected_project_ref:
+              errors.append(
+                  f"Wrong Supabase project: {project_ref} "
+                  f"(expected {expected_project_ref})"
+              )
+
+          if errors:
+              print("")
+              for error in errors:
+                  print(f"❌ {error}")
+
+              print("")
+              print("⛔ Supabase configuration is invalid.")
+              raise SystemExit(1)
+
+          print("")
+          print("✅ Correct ATLAS Supabase project")
+          print("✅ SUPABASE_ANON_KEY is present")
+          print("==================================================")
+          PY
+
+
+      # ========================================================
+      # 7. Run ATLAS
+      # ========================================================
       - name: Run ATLAS
+
         env:
 
           # ----------------------------------------------------
@@ -150,14 +222,13 @@ jobs:
           ATLAS_VERSION: "11.5"
           ATLAS_ENGINE: "BOTH"
 
-          # مهم:
-          # زمان‌بندی را GitHub کنترل می‌کند،
-          # نه منطق ساعت داخلی bot.py
+          # GitHub Workflow controls scheduling.
           ATLAS_SCHEDULED_CADENCE: "workflow"
 
           ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
 
           ATLAS_TIMEFRAME: "4H"
+
 
           # ----------------------------------------------------
           # TradingView / market configuration
@@ -165,10 +236,12 @@ jobs:
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
           ATLAS_TRADINGVIEW_INTERVAL: "240"
 
+
           # ----------------------------------------------------
           # Snapshot
           # ----------------------------------------------------
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
 
           # ----------------------------------------------------
           # Risk management
@@ -176,6 +249,7 @@ jobs:
           RISK_PER_TRADE_PCT: "1.5"
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
           ATLAS_MAX_LEVERAGE: "10"
+
 
           # ----------------------------------------------------
           # Signal thresholds
@@ -187,6 +261,7 @@ jobs:
 
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
 
+
           # ----------------------------------------------------
           # Backtest
           # ----------------------------------------------------
@@ -195,16 +270,30 @@ jobs:
           ATLAS_BACKTEST_IMPROVEMENT: "10"
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
+
+          # ----------------------------------------------------
+          # Performance / concurrency
+          # ----------------------------------------------------
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
+
+          # GitHub runners are ephemeral;
+          # SQLite OHLCV hot-path intentionally disabled.
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
+
+
           # ----------------------------------------------------
           # Event deduplication
           # ----------------------------------------------------
           ATLAS_CANDLE_EVENT_DEDUP: "1"
 
+
           # ----------------------------------------------------
-          # Local storage
+          # Local storage / fallback
           # ----------------------------------------------------
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
+
 
           # ----------------------------------------------------
           # Telegram
@@ -213,13 +302,22 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
+
           # ----------------------------------------------------
-          # SUPABASE
+          # SUPABASE — PRIMARY PERSISTENT STORAGE
           # ----------------------------------------------------
-          # حفظ شده برای ذخیره persistent داده‌های ATLAS
+          #
+          # مهم:
+          # Service Role عمداً پاس داده نمی‌شود.
+          #
+          # bot.py در نبود SUPABASE_SERVICE_ROLE_KEY
+          # به SUPABASE_ANON_KEY fallback می‌کند.
+          #
+          # این کار ambiguity بین دو API key را حذف می‌کند.
+          # ----------------------------------------------------
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
 
           # ----------------------------------------------------
           # Market / data APIs
@@ -228,38 +326,41 @@ jobs:
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
+
           # ----------------------------------------------------
           # News
           # ----------------------------------------------------
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
+
           # ----------------------------------------------------
           # Other APIs
           # ----------------------------------------------------
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
+
           # ----------------------------------------------------
-          # Market intelligence briefing (macro / whales / influential
-          # figures) — همه اختیاری‌اند؛ اگر ست نشوند همان بخش گزارش خالی
-          # می‌ماند و بقیه ربات بدون مشکل کار می‌کند.
-          # FRED_API_KEY: رایگان از https://fred.stlouisfed.org/docs/api/api_key.html
-          # WHALE_ALERT_API_KEY: از https://whale-alert.io (پلن رایگان/پولی)
+          # Market intelligence
           # ----------------------------------------------------
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           WHALE_ALERT_API_KEY: ${{ secrets.WHALE_ALERT_API_KEY }}
+
           ATLAS_WHALE_MIN_USD: "3000000"
           ATLAS_ENABLE_INTEL_BRIEFING: "1"
+
 
           # ----------------------------------------------------
           # TradingView confirmation
           # ----------------------------------------------------
           TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
+
           # ----------------------------------------------------
           # H4 fallback
           # ----------------------------------------------------
           ATLAS_H4_FALLBACK_MIN_SCORE: "60"
+
 
           # ----------------------------------------------------
           # Voice report
@@ -269,21 +370,25 @@ jobs:
           ATLAS_VOICE_LANGUAGE: "fa"
           ATLAS_AUTO_SEND_VOICE: "1"
 
+
           # ----------------------------------------------------
           # PNG report
           # ----------------------------------------------------
           ATLAS_ENABLE_IMAGE_TABLE: "1"
 
+
         run: |
           python bot.py
 
 
-      # --------------------------------------------------------
-      # 6. Upload logs if ATLAS fails
-      # --------------------------------------------------------
+      # ========================================================
+      # 8. Upload logs if ATLAS fails
+      # ========================================================
       - name: Upload ATLAS logs on failure
         if: failure()
+
         uses: actions/upload-artifact@v4
+
         with:
           name: atlas-failure-log-${{ github.run_id }}
 
@@ -296,11 +401,12 @@ jobs:
           if-no-files-found: ignore
 
 
-      # --------------------------------------------------------
-      # 7. Success marker
-      # --------------------------------------------------------
+      # ========================================================
+      # 9. Success marker
+      # ========================================================
       - name: ATLAS completed
         if: success()
+
         run: |
           echo "=================================================="
           echo "✅ ATLAS completed successfully"
@@ -308,7 +414,10 @@ jobs:
           echo "📌 Mode: ${{ github.event.inputs.run_mode || 'BOTH' }}"
           echo "📌 Cadence: workflow"
           echo "📌 Timeframe: 4H"
-          echo "📌 Supabase: configured"
+          echo "📌 Supabase: ANON KEY mode"
+          echo "📌 Backtest cache TTL: 24 hours"
+          echo "📌 Analysis workers: 3"
+          echo "📌 Exchange max concurrency: 2"
           echo "📌 Telegram: configured"
           echo "📌 Voice: enabled"
           echo "📌 PNG: enabled"
