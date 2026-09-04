@@ -8444,50 +8444,152 @@ def _aio_whale_bias(items):
             "DISTRIBUTION_RISK" if score <= -2 else "NEUTRAL"), score, rows
 
 def build_market_context_txt(macro, news, results, btc_regime=None):
-    macro, news = macro or {}, news or {}
-    label, wscore, whales = _aio_whale_bias(news.get("whale_items") or [])
-    btc = next((r for r in results or [] if _aio_symbol(r)=="BTC"), {})
-    eth = next((r for r in results or [] if _aio_symbol(r)=="ETH"), {})
+    """
+    گزارش Market Context به زبان فارسی.
+    منطق داده و منابع قبلی حفظ شده و فقط لایه ارائه/متن فارسی شده است.
+    """
+    economic_events = fetch_economic_calendar()
+    multi_exchange = compare_multi_exchange_prices()
+
     lines = [
-        "ATLAS AI — MARKET CONTEXT 4H", "="*60,
-        f"Generated: {shamsi(now_tehran())} {now_tehran().strftime('%H:%M:%S')} Tehran", "",
-        "1) GLOBAL MARKET REGIME",
-        f"BTC regime: {btc_regime or btc.get('regime_trend') or 'UNKNOWN'}",
-        f"News: {news.get('bias','MIXED/LIMITED')} | Impact: {news.get('impact','NORMAL')}",
-        f"Fed Funds: {macro.get('fed_funds_rate','N/A')} | US Unemployment: {macro.get('unemployment_rate','N/A')}",
-        "", "2) EFFECTIVE NEWS / MACRO"
+        "ATLAS AI — زمینه و وضعیت بازار 4H",
+        "=" * 64,
+        "",
+        "۱) وضعیت کلی بازار",
+        f"- رژیم بازار BTC: {btc_regime if btc_regime is not None else 'نامشخص'}",
     ]
-    items = news.get("items") or []
-    lines += [f"- {x.get('title','')} [{x.get('source','unknown')}]" for x in items[:12]] or ["- No verified news available."]
-    lines += ["", "3) BTC / ETH WHALE INTELLIGENCE", f"Whale context: {label} ({wscore:+d})"]
-    if whales:
-        for w in whales[:10]:
-            lines.append(
-                f"- {w.get('symbol','?')} ${_aio_num(w.get('amount_usd')):,.0f} | "
-                f"{w.get('from_type','unknown')} -> {w.get('to_type','unknown')} | "
-                f"{w.get('from_owner','') or '?'} -> {w.get('to_owner','') or '?'}"
-            )
+
+    # Breadth / macro summary if available
+    if isinstance(macro, dict):
+        fed = macro.get("fed_funds") or macro.get("fed_rate") or macro.get("federal_funds")
+        unemp = macro.get("unemployment") or macro.get("us_unemployment")
+        if fed is not None:
+            lines.append(f"- نرخ بهره فدرال رزرو: {fed}")
+        if unemp is not None:
+            lines.append(f"- نرخ بیکاری آمریکا: {unemp}")
+
+    lines += ["", "۲) خبرها و فضای کلان"]
+
+    if isinstance(news, dict):
+        bias = news.get("bias") or news.get("news_bias") or news.get("sentiment")
+        impact = news.get("impact") or news.get("news_impact")
+        if bias is not None:
+            lines.append(f"- جهت کلی اخبار: {bias}")
+        if impact is not None:
+            lines.append(f"- شدت اثر خبری: {impact}")
+
+        items = news.get("items") or news.get("news_items") or []
+        if isinstance(items, list) and items:
+            lines.append("- خبرهای مؤثر:")
+            for item in items[:8]:
+                if isinstance(item, dict):
+                    title = item.get("title") or item.get("headline") or item.get("name")
+                    if title:
+                        lines.append(f"  • {title}")
+
+    lines += ["", "۳) نهنگ‌ها و جریان‌های بزرگ"]
+
+    whale_items = news.get("whale_items") if isinstance(news, dict) else None
+    if isinstance(whale_items, list) and whale_items:
+        for w in whale_items[:8]:
+            if isinstance(w, dict):
+                sym = w.get("symbol") or w.get("coin") or "?"
+                amount = w.get("amount_usd") or w.get("usd_value") or w.get("amount")
+                direction = w.get("direction") or w.get("type") or w.get("flow")
+                src = w.get("from") or w.get("source")
+                dst = w.get("to") or w.get("destination")
+                parts = [str(sym)]
+                if amount is not None:
+                    parts.append(f"ارزش: {amount}")
+                if direction:
+                    parts.append(str(direction))
+                if src or dst:
+                    parts.append(f"{src or '?'} → {dst or '?'}")
+                lines.append("- " + " | ".join(parts))
     else:
-        lines.append("- No BTC/ETH large-transfer evidence available from configured sources.")
-    lines += ["", "4) DERIVATIVES PRESSURE"]
-    for name, r in (("BTC",btc),("ETH",eth)):
-        lines.append(
-            f"- {name}: OI={r.get('coinglass_open_interest','N/A')} | "
-            f"Funding={r.get('coinglass_funding_rate','N/A')} | "
-            f"Derivatives={r.get('regime_derivatives','N/A')} | Liquidity={r.get('liquidity','N/A')}"
-        )
-    pos = (1 if news.get("bias")=="POSITIVE" else 0) + (1 if label=="ACCUMULATION_LEAN" else 0)
-    neg = (1 if news.get("bias")=="NEGATIVE" else 0) + (1 if label=="DISTRIBUTION_RISK" else 0)
-    b = str(btc.get("intel_bias") or "").upper()
-    pos += 1 if b=="LONG" else 0
-    neg += 1 if b=="SHORT" else 0
-    context = ("BULLISH" if pos-neg>=2 else "CAUTIOUS BULLISH" if pos>neg else
-               "BEARISH" if neg-pos>=2 else "CAUTIOUS BEARISH" if neg>pos else "NEUTRAL")
-    lines += ["", "5) MARKET INTERPRETATION", f"Market Context: {context}",
-              "Whale/news evidence is contextual; it never acts as a standalone trade command."]
-    briefing = (news.get("intel_briefing") or {}).get("text")
-    if briefing: lines += ["", "6) EXISTING ATLAS INTELLIGENCE BRIEFING", briefing]
+        lines.append("- رویداد مهم و قابل‌اتکای نهنگ‌ها در این چرخه ثبت نشد.")
+
+    lines += ["", "۴) مشتقات و فشار بازار"]
+
+    # Keep this conservative and schema tolerant
+    shown_deriv = False
+    for r in results or []:
+        sym = str(r.get("coin") or r.get("symbol") or "").upper()
+        if sym not in ("BTC", "ETH"):
+            continue
+        cg = r.get("coinglass") or r.get("derivatives") or r.get("derivatives_context")
+        if cg:
+            lines.append(f"- {sym}: {cg}")
+            shown_deriv = True
+    if not shown_deriv:
+        lines.append("- داده مشتقات قابل‌اتکای جداگانه‌ای برای BTC/ETH در این چرخه موجود نبود.")
+
+    lines += ["", "۵) جمع‌بندی تفسیری"]
+
+    # Infer a conservative market interpretation from available values.
+    bullish_votes = 0
+    bearish_votes = 0
+
+    if isinstance(news, dict):
+        nb = str(news.get("bias") or news.get("news_bias") or "").upper()
+        if any(x in nb for x in ("BULL", "POSITIVE", "BUY")):
+            bullish_votes += 1
+        if any(x in nb for x in ("BEAR", "NEGATIVE", "SELL")):
+            bearish_votes += 1
+
+    br = str(btc_regime or "").upper()
+    if any(x in br for x in ("BULL", "UP", "TRENDING_UP")):
+        bullish_votes += 1
+    if any(x in br for x in ("BEAR", "DOWN", "TRENDING_DOWN")):
+        bearish_votes += 1
+
+    if bullish_votes >= bearish_votes + 2:
+        interpretation = "صعودی"
+    elif bullish_votes > bearish_votes:
+        interpretation = "محتاطانه صعودی"
+    elif bearish_votes >= bullish_votes + 2:
+        interpretation = "نزولی"
+    elif bearish_votes > bullish_votes:
+        interpretation = "محتاطانه نزولی"
+    else:
+        interpretation = "خنثی / بدون برتری روشن"
+
+    lines.append(f"- برداشت کلی ATLAS از شرایط فعلی: {interpretation}")
+    lines.append("- این بخش نقش زمینه تحلیلی دارد و به‌تنهایی فرمان خرید یا فروش محسوب نمی‌شود.")
+
+    lines += ["", "۶) تقویم اقتصادی"]
+    econ_lines = build_economic_calendar_context(economic_events)
+    for x in econ_lines:
+        s = str(x)
+        s = s.replace("Economic Calendar / Event Risk:", "تقویم اقتصادی / ریسک رویداد:")
+        s = s.replace("Economic Calendar: no tracked high-impact event in the configured lookahead window.",
+                      "در بازه زمانی تنظیم‌شده، رویداد اقتصادی پراثرِ ثبت‌شده‌ای مشاهده نشد.")
+        s = s.replace("[HIGH]", "[ریسک بالا]")
+        s = s.replace("[UPCOMING]", "[در پیش‌رو]")
+        s = s.replace("Forecast=", "پیش‌بینی=")
+        s = s.replace("Previous=", "قبلی=")
+        s = s.replace(" | in ", " | تا رویداد: ")
+        s = s.replace("h", " ساعت")
+        lines.append(s)
+
+    lines += ["", "۷) مقایسه قیمت بین صرافی‌ها"]
+    mx_lines = build_multi_exchange_context(multi_exchange)
+    for x in mx_lines:
+        s = str(x)
+        s = s.replace("Multi-Exchange Comparison:", "مقایسه چندصرافی:")
+        s = s.replace("Multi-Exchange: insufficient comparable prices or feature disabled.",
+                      "داده کافی برای مقایسه چندصرافی وجود ندارد یا این قابلیت غیرفعال است.")
+        s = s.replace("spread=", "اختلاف قیمت=")
+        s = s.replace("[⚠️ MEANINGFUL]", "[⚠️ معنادار]")
+        s = s.replace("[normal]", "[عادی]")
+        lines.append(s)
+
+    briefing = (news.get("intel_briefing") or {}).get("text") if isinstance(news, dict) else None
+    if briefing:
+        lines += ["", "۸) خلاصه هوشمندی فعلی ATLAS", briefing]
+
     return "\n".join(lines)
+
 
 def _aio_trigger(r):
     t = r.get("intel_trigger") or {}
@@ -8639,12 +8741,7 @@ def send_signal_change_notifications(results, top10):
                         (ptrend!=trend and trend not in ("UNKNOWN","RANGE","NEUTRAL")))
             score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")))
             if meaningful and score>=ATLAS_NOTIFICATION_MIN_SCORE:
-                msg=(f"🚨 ATLAS SIGNAL CHANGE\\n\\n{sym}\\n{pd} → {decision}\\n"
-                     f"Direction: {pdir} → {direction}\\nTrend: {ptrend} → {trend}\\n\\n"
-                     f"Entry: {fmt(r.get('entry'))}\\nSL: {fmt(r.get('sl'))}\\n"
-                     f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}\\n"
-                     f"RR: {r.get('rr','N/A')}\\nDecision Support: {r.get('decision_support_score','N/A')}\\n"
-                     f"Evidence: {r.get('evidence_agreement','N/A')}\\nTrigger: {_aio_trigger(r)}")
+                msg=format_signal_notification(r,pd,pdir,ptrend)
                 if ATLAS_SIGNAL_MENTIONS: msg += "\\n\\n"+ATLAS_SIGNAL_MENTIONS
                 for c in dict.fromkeys([x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x]):
                     try: telegram_send_one(c,msg); sent+=1
@@ -9221,6 +9318,350 @@ def send_phase1_documents(results, top10, risk_summary):
     return sent, errors
 
 
+
+# ============================================================
+# ATLAS v11.5 — CLEAN+ OPTIMIZATION PACK
+# Lifecycle Alerts + Backtest Dashboard + Economic Calendar
+# Rich Signal Notifications + Multi-Exchange Comparison
+# ============================================================
+
+ATLAS_LIFECYCLE_ALERTS = os.environ.get("ATLAS_LIFECYCLE_ALERTS", "1").strip().lower() not in ("0","false","no","off")
+ATLAS_LIFECYCLE_ALERT_LEVELS = tuple(
+    x.strip().upper() for x in os.environ.get("ATLAS_LIFECYCLE_ALERT_LEVELS", "TP1,TP2,TP3,TP4,SL").split(",")
+    if x.strip()
+)
+ATLAS_LIFECYCLE_ALERT_COOLDOWN_MIN = int(os.environ.get("ATLAS_LIFECYCLE_ALERT_COOLDOWN_MIN", "10"))
+ATLAS_MULTI_EXCHANGE_ENABLED = os.environ.get("ATLAS_MULTI_EXCHANGE_ENABLED", "1").strip().lower() not in ("0","false","no","off")
+ATLAS_MULTI_EXCHANGE_THRESHOLD_PCT = float(os.environ.get("ATLAS_MULTI_EXCHANGE_THRESHOLD_PCT", "0.35"))
+ATLAS_MULTI_EXCHANGE_SYMBOLS = tuple(
+    x.strip().upper() for x in os.environ.get("ATLAS_MULTI_EXCHANGE_SYMBOLS", "BTC,ETH").split(",")
+    if x.strip()
+)
+ATLAS_ECON_CALENDAR_ENABLED = os.environ.get("ATLAS_ECON_CALENDAR_ENABLED", "1").strip().lower() not in ("0","false","no","off")
+ATLAS_ECON_EVENT_LOOKAHEAD_HOURS = int(os.environ.get("ATLAS_ECON_EVENT_LOOKAHEAD_HOURS", "168"))
+ATLAS_ECON_HIGH_IMPACT_HOURS = int(os.environ.get("ATLAS_ECON_HIGH_IMPACT_HOURS", "12"))
+
+def _opt_telegram_destinations():
+    out=[]
+    for c in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
+        if c and c not in out:
+            out.append(c)
+    return out
+
+def _opt_alert_db():
+    conn=sqlite3.connect(DB_FILE)
+    conn.execute("""
+        create table if not exists lifecycle_alert_dedupe(
+            alert_key text primary key,
+            sent_at text not null
+        )
+    """)
+    conn.commit()
+    return conn
+
+def _opt_should_send_alert(key, cooldown_min=None):
+    cooldown_min=ATLAS_LIFECYCLE_ALERT_COOLDOWN_MIN if cooldown_min is None else cooldown_min
+    now=now_tehran()
+    conn=_opt_alert_db()
+    try:
+        row=conn.execute("select sent_at from lifecycle_alert_dedupe where alert_key=?",(key,)).fetchone()
+        if not row:
+            return True
+        try:
+            prev=datetime.fromisoformat(row[0])
+            if prev.tzinfo is None:
+                prev=prev.replace(tzinfo=now.tzinfo)
+            return (now-prev).total_seconds()/60.0 >= cooldown_min
+        except Exception:
+            return True
+    finally:
+        conn.close()
+
+def _opt_mark_alert_sent(key):
+    conn=_opt_alert_db()
+    try:
+        conn.execute(
+            """insert into lifecycle_alert_dedupe(alert_key,sent_at)
+               values(?,?)
+               on conflict(alert_key) do update set sent_at=excluded.sent_at""",
+            (key,now_tehran().isoformat())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def format_lifecycle_notification(event):
+    to_state=str(event.get("to") or "").upper()
+    icon="🎯" if to_state.startswith("TP") else "🛑" if to_state=="SL" else "🚨"
+    return (
+        f"{icon} ATLAS LIFECYCLE ALERT\n\n"
+        f"{event.get('symbol','?')} reached {to_state}\n"
+        f"Price: {fmt(event.get('price'))}\n"
+        f"Previous: {event.get('from') or 'N/A'}\n"
+        f"Event: {event.get('event') or to_state}\n"
+        f"Time: {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran"
+    )
+
+def notify_lifecycle_changes(events):
+    if not ATLAS_LIFECYCLE_ALERTS:
+        return 0,[]
+    sent,errors=0,[]
+    for event in events or []:
+        to_state=str(event.get("to") or "").upper()
+        if to_state not in ATLAS_LIFECYCLE_ALERT_LEVELS:
+            continue
+        key=f"{event.get('symbol')}|{to_state}|{event.get('price')}"
+        if not _opt_should_send_alert(key):
+            continue
+        msg=format_lifecycle_notification(event)
+        ok=False
+        for c in _opt_telegram_destinations():
+            try:
+                telegram_send_one(c,msg)
+                sent+=1
+                ok=True
+            except Exception as e:
+                errors.append(f"LIFECYCLE_ALERT[{event.get('symbol')}:{to_state}] {c}: {e}")
+        if ok:
+            _opt_mark_alert_sent(key)
+    return sent,errors
+
+def format_signal_notification(r, old_state, old_direction=None, old_trend=None):
+    coin=_aio_symbol(r)
+    new_state=r.get("intel_decision") or r.get("decision_state") or r.get("action") or "N/A"
+    confidence=r.get("confidence")
+    if confidence is None:
+        confidence=r.get("decision_support_score")
+    if confidence is None:
+        confidence=r.get("signal_score")
+    reason=r.get("intel_reason") or r.get("reason") or "No explicit reason available."
+    return (
+        f"🚨 ATLAS SIGNAL CHANGE\n\n"
+        f"{coin}\n"
+        f"Previous: {old_state}\n"
+        f"New: {new_state}\n"
+        f"Direction: {old_direction or 'N/A'} → {r.get('direction','N/A')}\n"
+        f"Trend: {old_trend or 'N/A'} → {r.get('regime_trend','N/A')}\n"
+        f"Confidence: {confidence if confidence is not None else 'N/A'}\n"
+        f"R/R: {r.get('rr','N/A')}\n"
+        f"Entry: {fmt(r.get('entry'))}\n"
+        f"SL: {fmt(r.get('sl'))}\n"
+        f"TP1: {fmt(r.get('tp1'))}\n"
+        f"TP2: {fmt(r.get('tp2'))}\n"
+        f"MTF: {r.get('mtf_agreement','N/A')}\n"
+        f"Evidence: {r.get('evidence_agreement','N/A')}\n"
+        f"Portfolio Risk Allowed: {'YES' if r.get('portfolio_risk_allowed', True) else 'NO'}\n\n"
+        f"Reason: {reason}"
+    )
+
+def _opt_num(v, default=None):
+    try:
+        if v is None or v=="":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+def _opt_backtest_db_rows(limit=500):
+    conn=sqlite3.connect(DB_FILE)
+    conn.row_factory=sqlite3.Row
+    try:
+        tables={r[0] for r in conn.execute("select name from sqlite_master where type='table'").fetchall()}
+        rows=[]
+        for name in ("backtests","signal_outcomes"):
+            if name in tables:
+                try:
+                    q=conn.execute(f"select * from {name} order by rowid desc limit ?",(limit,)).fetchall()
+                    rows.extend(dict(r) for r in q)
+                except Exception:
+                    pass
+        return rows
+    finally:
+        conn.close()
+
+def _opt_backtest_metrics(rows):
+    import statistics
+    returns=[]; wins=0; losses=0; drawdowns=[]
+    explicit={"win_rate":[],"profit_factor":[],"sharpe":[],"max_drawdown":[]}
+    for r in rows or []:
+        for k in ("pnl_pct","return_pct","net_return_pct","profit_pct","pnl"):
+            v=_opt_num(r.get(k))
+            if v is not None:
+                returns.append(v); break
+        outcome=str(r.get("outcome") or r.get("result") or r.get("status") or "").upper()
+        if any(x in outcome for x in ("WIN","TP","PROFIT")): wins+=1
+        elif any(x in outcome for x in ("LOSS","SL","STOP")): losses+=1
+        for src,dst in (
+            ("win_rate","win_rate"),("profit_factor","profit_factor"),
+            ("sharpe","sharpe"),("sharpe_ratio","sharpe"),
+            ("max_drawdown","max_drawdown"),("max_drawdown_pct","max_drawdown")
+        ):
+            v=_opt_num(r.get(src))
+            if v is not None: explicit[dst].append(v)
+        dd=_opt_num(r.get("drawdown_pct"))
+        if dd is not None: drawdowns.append(abs(dd))
+    win_rate=(wins/(wins+losses)*100.0) if wins+losses else (statistics.mean(explicit["win_rate"]) if explicit["win_rate"] else None)
+    pf=statistics.mean(explicit["profit_factor"]) if explicit["profit_factor"] else None
+    if pf is None and returns:
+        gp=sum(x for x in returns if x>0); gl=abs(sum(x for x in returns if x<0))
+        if gl>0: pf=gp/gl
+    sharpe=statistics.mean(explicit["sharpe"]) if explicit["sharpe"] else None
+    if sharpe is None and len(returns)>=2:
+        sd=statistics.pstdev(returns)
+        if sd>0: sharpe=statistics.mean(returns)/sd
+    maxdd=max(drawdowns) if drawdowns else (max(explicit["max_drawdown"]) if explicit["max_drawdown"] else None)
+    expectancy=statistics.mean(returns) if returns else None
+    return {"samples":len(rows or []),"wins":wins,"losses":losses,"win_rate":win_rate,"profit_factor":pf,
+            "sharpe_like":sharpe,"max_drawdown_pct":maxdd,"expectancy_pct":expectancy}
+
+def build_backtest_report():
+    rows=_opt_backtest_db_rows()
+    m=_opt_backtest_metrics(rows)
+    cut=max(1,len(rows)//2) if rows else 0
+    cur=_opt_backtest_metrics(rows[:cut]) if cut else {}
+    base=_opt_backtest_metrics(rows[cut:]) if len(rows)>=20 else {}
+    def f(v,d=2,s=""):
+        return "N/A" if v is None else f"{v:.{d}f}{s}"
+    return "\n".join([
+        "ATLAS AI — BACKTEST DASHBOARD","="*64,
+        f"Stored Samples: {m.get('samples',0)}",
+        f"Wins / Losses: {m.get('wins',0)} / {m.get('losses',0)}",
+        f"Win Rate: {f(m.get('win_rate'),1,'%')}",
+        f"Profit Factor: {f(m.get('profit_factor'))}",
+        f"Sharpe-like: {f(m.get('sharpe_like'))}",
+        f"Max Drawdown: {f(m.get('max_drawdown_pct'),2,'%')}",
+        f"Expectancy: {f(m.get('expectancy_pct'),3,'%')}",
+        "",
+        "Recent vs Baseline:",
+        f"Recent Win Rate: {f(cur.get('win_rate'),1,'%')}",
+        f"Baseline Win Rate: {f(base.get('win_rate'),1,'%')}",
+        f"Recent PF: {f(cur.get('profit_factor'))}",
+        f"Baseline PF: {f(base.get('profit_factor'))}",
+        "",
+        "N/A means the current persisted schema does not support a safe calculation."
+    ])
+
+_ATLAS_2026_FOMC=[
+    ("2026-09-15T00:00:00","FOMC Meeting — Day 1"),
+    ("2026-09-16T00:00:00","FOMC Meeting — Decision / Press Conference"),
+    ("2026-10-27T00:00:00","FOMC Meeting — Day 1"),
+    ("2026-10-28T00:00:00","FOMC Meeting — Decision / Press Conference"),
+    ("2026-12-08T00:00:00","FOMC Meeting — Day 1"),
+    ("2026-12-09T00:00:00","FOMC Meeting — Decision / Press Conference"),
+]
+
+def fetch_economic_calendar():
+    if not ATLAS_ECON_CALENDAR_ENABLED:
+        return []
+    now=now_tehran()
+    out=[]
+    for ds,name in _ATLAS_2026_FOMC:
+        try:
+            dt=datetime.fromisoformat(ds)
+            if dt.tzinfo is None: dt=dt.replace(tzinfo=now.tzinfo)
+            hours=(dt-now).total_seconds()/3600.0
+            if 0<=hours<=ATLAS_ECON_EVENT_LOOKAHEAD_HOURS:
+                out.append({"event":name,"date":dt.isoformat(),"importance":3,"source":"Federal Reserve","hours_until":round(hours,1)})
+        except Exception:
+            pass
+    te_key=os.environ.get("TRADINGECONOMICS_API_KEY","").strip()
+    if te_key:
+        try:
+            start=now.date().isoformat()
+            end=(now+timedelta(hours=ATLAS_ECON_EVENT_LOOKAHEAD_HOURS)).date().isoformat()
+            url=("https://api.tradingeconomics.com/calendar/country/United%20States/"
+                 f"{start}/{end}?c={te_key}&importance=3&f=json")
+            raw=safe_http_get(url, timeout=12)
+            if isinstance(raw,str): raw=json.loads(raw)
+            if isinstance(raw,dict): raw=raw.get("data") or raw.get("results") or []
+            for x in raw or []:
+                name=str(x.get("Event") or x.get("Category") or "")
+                if not any(k in name.upper() for k in ("CPI","CONSUMER PRICE","NON FARM","NFP","FOMC","FEDERAL FUNDS","PAYROLL")):
+                    continue
+                ds=x.get("Date")
+                dt=datetime.fromisoformat(str(ds).replace("Z","+00:00")) if ds else None
+                if dt is not None and dt.tzinfo is None: dt=dt.replace(tzinfo=now.tzinfo)
+                hours=((dt-now).total_seconds()/3600.0) if dt else None
+                out.append({
+                    "event":name,"date":dt.isoformat() if dt else str(ds),"importance":x.get("Importance",3),
+                    "actual":x.get("Actual"),"forecast":x.get("Forecast"),"previous":x.get("Previous"),
+                    "source":x.get("Source") or "Trading Economics",
+                    "hours_until":round(hours,1) if hours is not None else None
+                })
+        except Exception as e:
+            print(f"⚠️ Economic calendar augmentation unavailable: {e}")
+    seen=set(); events=[]
+    for e in sorted(out,key=lambda z:(z.get("hours_until") is None,z.get("hours_until") or 1e9)):
+        k=(e.get("event"),str(e.get("date"))[:16])
+        if k in seen: continue
+        seen.add(k); events.append(e)
+    return events
+
+def build_economic_calendar_context(events):
+    if not events:
+        return ["Economic Calendar: no tracked high-impact event in the configured lookahead window."]
+    lines=["Economic Calendar / Event Risk:"]
+    for e in events[:8]:
+        h=e.get("hours_until")
+        risk="HIGH" if h is not None and h<=ATLAS_ECON_HIGH_IMPACT_HOURS else "UPCOMING"
+        extra=[]
+        if e.get("forecast") not in (None,""): extra.append(f"Forecast={e.get('forecast')}")
+        if e.get("previous") not in (None,""): extra.append(f"Previous={e.get('previous')}")
+        lines.append(f"- [{risk}] {e.get('event')} | in {h if h is not None else '?'}h" + (f" | {' | '.join(extra)}" if extra else ""))
+    return lines
+
+def _opt_exchange_last_price(exchange_id,symbol):
+    try:
+        ex_class=getattr(ccxt,exchange_id)
+        ex=ex_class({"enableRateLimit":True})
+        t=ex.fetch_ticker(f"{symbol}/USDT")
+        last=t.get("last") or t.get("close")
+        return float(last) if last else None
+    except Exception:
+        return None
+
+def compare_multi_exchange_prices(symbols=None):
+    import statistics
+    if not ATLAS_MULTI_EXCHANGE_ENABLED:
+        return []
+    symbols=list(symbols or ATLAS_MULTI_EXCHANGE_SYMBOLS)
+    exchanges=[x for x in ("binance","okx","kucoin","gate") if hasattr(ccxt,x)]
+    rows=[]
+    for sym in symbols:
+        px={}
+        for exid in exchanges:
+            v=_opt_exchange_last_price(exid,sym)
+            if v is not None: px[exid]=v
+        if len(px)<2: continue
+        vals=list(px.values()); lo=min(vals); hi=max(vals); mid=statistics.mean(vals)
+        spread=((hi-lo)/mid*100.0) if mid else 0.0
+        rows.append({"symbol":sym,"prices":px,"spread_pct":round(spread,4),
+                     "meaningful":spread>=ATLAS_MULTI_EXCHANGE_THRESHOLD_PCT})
+    return rows
+
+def build_multi_exchange_context(rows):
+    if not rows:
+        return ["Multi-Exchange: insufficient comparable prices or feature disabled."]
+    lines=["Multi-Exchange Comparison:"]
+    for r in rows:
+        label="⚠️ MEANINGFUL" if r.get("meaningful") else "normal"
+        px=", ".join(f"{k}={fmt(v)}" for k,v in r.get("prices",{}).items())
+        lines.append(f"- {r.get('symbol')}: spread={r.get('spread_pct')}% [{label}] | {px}")
+    return lines
+
+def send_optimization_documents(backtest_text):
+    dt=now_tehran(); tag=shamsi(dt).replace("/","")+"_"+dt.strftime("%H%M%S")
+    fn=f"08_ATLAS_BACKTEST_DASHBOARD_{tag}.txt"
+    sent,errors=0,[]
+    for c in _opt_telegram_destinations():
+        try:
+            _telegram_send_document(c,backtest_text,fn,"📈 ATLAS | Backtest Dashboard")
+            sent+=1
+        except Exception as e:
+            errors.append(f"OPT_DOC[{fn}] {c}: {e}")
+    return sent,errors
+
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -9305,6 +9746,10 @@ def main():
             portfolio_risk = build_portfolio_risk_intelligence(results, top10)
             results = apply_portfolio_risk_context(results, portfolio_risk)
             lifecycle_events = update_signal_lifecycle(results, top10)
+            lifecycle_alert_sent, lifecycle_alert_errors = notify_lifecycle_changes(lifecycle_events)
+            total_sent += lifecycle_alert_sent
+            all_errors.extend(lifecycle_alert_errors)
+            print(f"🎯 Lifecycle alerts sent: {lifecycle_alert_sent}, errors={len(lifecycle_alert_errors)}")
             print(f"📊 Building reports...")
             
             # ========================================================
@@ -9350,6 +9795,11 @@ def main():
                 f"🧩 Phase-1 documents sent: {phase1_sent}, "
                 f"lifecycle_events={len(lifecycle_events)}, errors={len(phase1_errors)}"
             )
+            backtest_dashboard = build_backtest_report()
+            opt_sent, opt_errors = send_optimization_documents(backtest_dashboard)
+            total_sent += opt_sent
+            all_errors.extend(opt_errors)
+            print(f"📈 Backtest dashboard sent: {opt_sent}, errors={len(opt_errors)}")
 
             # Keep a small compatibility marker for existing run metadata.
             outputs = []
