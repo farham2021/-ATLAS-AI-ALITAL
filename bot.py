@@ -8259,6 +8259,182 @@ def generate_voice_summary(results, news=None, btc_regime=None):
     return " ".join(lines)
 
 
+
+# ============================================================
+# FINAL ANALYSIS DELIVERY — 3 SEPARATE DOCUMENTS
+# ============================================================
+# Delivery-only layer. Existing engines, snapshot/arrow logic,
+# PNG, voice, Supabase and risk logic are intentionally untouched.
+# Telegram receives exactly three comprehensive CSV documents:
+#   1) MARKET 4H
+#   2) PERSONAL PORTFOLIO 4H
+#   3) MARKET INTELLIGENCE 4H
+# ============================================================
+
+def _analysis_detail_row(r, report_type):
+    """Export the existing analysis fields without changing their values."""
+    trig = r.get("intel_trigger") or {}
+    scenarios = r.get("scenarios") or []
+    contradictions = r.get("contradictions") or []
+
+    scenario_text = []
+    for item in scenarios:
+        try:
+            side, direction, trigger, explanation = item
+            scenario_text.append(
+                f"{side} | {direction} | trigger={trigger} | {explanation}"
+            )
+        except Exception:
+            scenario_text.append(str(item))
+
+    return [
+        report_type, r.get("coin", ""), r.get("price", ""), r.get("change", ""),
+        r.get("h4_trend", ""), r.get("d1_trend", ""), r.get("w1_trend", ""),
+        r.get("rsi", ""), r.get("macd", ""), r.get("volume", ""),
+        r.get("volume_ratio", ""), r.get("atr_pct", ""),
+        r.get("support", ""), r.get("resistance", ""), r.get("entry", ""),
+        r.get("sl", ""), r.get("tp1", ""), r.get("tp2", ""), r.get("tp3", ""),
+        r.get("tp4", ""), r.get("rr_intel", r.get("rr", "")),
+        r.get("direction", ""), r.get("decision_state", ""),
+        r.get("decision_confidence", r.get("confidence", "")),
+        r.get("confidence_label", ""), r.get("intel_bias", ""),
+        r.get("setup_type", ""), r.get("opportunity_score", ""),
+        r.get("structure_score", ""), r.get("momentum_score", ""),
+        r.get("volume_score", ""), r.get("sr_score", ""), len(contradictions),
+        " | ".join(map(str, contradictions)), trig.get("long", ""),
+        trig.get("short", ""), r.get("intel_decision", ""),
+        r.get("executable", ""), r.get("signal_score", ""),
+        r.get("model_strength", ""), r.get("win_probability", ""),
+        r.get("win_probability_tier", ""), r.get("win_probability_samples", ""),
+        r.get("regime_trend", ""), r.get("regime_volatility", ""),
+        r.get("regime_derivatives", ""), r.get("regime_score", ""),
+        r.get("gate", ""), r.get("gate_reason", ""), r.get("data_quality", ""),
+        r.get("liquidity", ""), r.get("repeat_signal", ""), r.get("signal_id", ""),
+        r.get("intel_signal_id", ""), r.get("intel_reason", r.get("reason", "")),
+        " || ".join(scenario_text), " || ".join(map(str, why_not_trade(r))),
+    ]
+
+
+_ANALYSIS_EXPORT_COLUMNS = [
+    "ReportType","Symbol","Price","Change24H","H4Trend","D1Trend","W1Trend",
+    "RSI","MACD","Volume","VolumeRatio","ATR_pct","Support","Resistance",
+    "Entry","SL","TP1","TP2","TP3","TP4","RR","Direction","DecisionState",
+    "DecisionConfidence","ConfidenceLabel","IntelBias","SetupType",
+    "OpportunityScore","StructureScore","MomentumScore","VolumeScore","SRScore",
+    "ContradictionCount","Contradictions","LongTrigger","ShortTrigger",
+    "IntelDecision","Executable","SignalScore","ModelStrength","WinProbability",
+    "WinProbabilityTier","WinProbabilitySamples","RegimeTrend",
+    "RegimeVolatility","RegimeDerivatives","RegimeScore","Gate","GateReason",
+    "DataQuality","Liquidity","RepeatSignal","SignalID","IntelSignalID",
+    "AnalyticalReason","ScenarioMap","WhyNotTrade"
+]
+
+
+def _write_analysis_csv(rows):
+    out = io.StringIO(newline="")
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(_ANALYSIS_EXPORT_COLUMNS)
+    writer.writerows(rows)
+    return out.getvalue()
+
+
+def generate_three_analysis_documents(results, top10, dynamic30):
+    """Generate the three requested comprehensive analysis CSVs."""
+    personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
+    ordered, _ = _resolve_csv_universe(results, top10, dynamic30)
+
+    by_symbol = {}
+    for r in results or []:
+        sym = str(r.get("coin") or r.get("symbol") or "").upper()
+        if sym:
+            by_symbol[sym] = r
+
+    # MARKET = resolved universe excluding configured personal assets.
+    market_symbols = [
+        str(s).upper() for s in ordered
+        if str(s).upper() not in personal_set and str(s).upper() in by_symbol
+    ]
+
+    # PERSONAL = configured portfolio assets.
+    personal_symbols = [
+        str(s).upper() for s in ordered
+        if str(s).upper() in personal_set and str(s).upper() in by_symbol
+    ]
+
+    # INTELLIGENCE = existing intelligence ranking, then any missed symbols.
+    intel_symbols = []
+    for r in _intel_rank(results, False):
+        sym = str(r.get("coin") or r.get("symbol") or "").upper()
+        if sym and sym in by_symbol and sym not in intel_symbols:
+            intel_symbols.append(sym)
+    for s in ordered:
+        su = str(s).upper()
+        if su in by_symbol and su not in intel_symbols:
+            intel_symbols.append(su)
+
+    def make_rows(symbols, title):
+        return [
+            _analysis_detail_row(by_symbol[s], title)
+            for s in symbols if s in by_symbol
+        ]
+
+    return {
+        "market_4h": _write_analysis_csv(
+            make_rows(market_symbols, "ATLAS AI MARKET 4H")
+        ),
+        "personal_4h": _write_analysis_csv(
+            make_rows(personal_symbols, "ATLAS AI PERSONAL PORTFOLIO 4H")
+        ),
+        "market_intelligence_4h": _write_analysis_csv(
+            make_rows(intel_symbols, "ATLAS AI MARKET INTELLIGENCE 4H")
+        ),
+    }
+
+
+def send_three_analysis_documents(results, top10, dynamic30):
+    """Send exactly three comprehensive CSV documents to Telegram."""
+    dt = now_tehran()
+    date_tag = shamsi(dt).replace("/", "")
+    time_tag = dt.strftime("%H%M%S")
+
+    docs = generate_three_analysis_documents(results, top10, dynamic30)
+    labels = {
+        "market_4h": "MARKET 4H",
+        "personal_4h": "PERSONAL PORTFOLIO 4H",
+        "market_intelligence_4h": "MARKET INTELLIGENCE 4H",
+    }
+
+    destinations = []
+    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if chat_id and chat_id not in destinations:
+            destinations.append(chat_id)
+
+    sent = 0
+    errors = []
+
+    for key, content in docs.items():
+        if not content.strip():
+            continue
+        filename = f"atlas_{key}_{date_tag}_{time_tag}.csv"
+        caption = (
+            f"📊 ATLAS AI | {labels[key]}\n"
+            f"📅 {shamsi(dt)} | ⏰ {dt.strftime('%H:%M:%S')} تهران\n"
+            f"📎 گزارش جامع — CSV"
+        )
+        for chat_id in destinations:
+            try:
+                _telegram_send_document(chat_id, content, filename, caption)
+                sent += 1
+                print(f"✅ Sent {filename} to Telegram")
+            except Exception as e:
+                errors.append(f"ANALYSIS_DOC[{key}] {chat_id}: {e}")
+                append_changelog(
+                    "ANALYSIS_DOCUMENT", None, None, str(e),
+                    {"file": key, "traceback": traceback.format_exc()}
+                )
+    return sent, errors
+
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -8340,38 +8516,31 @@ def main():
             
             print(f"📊 Building reports...")
             
-            # تولید گزارش یکپارچه با تفسیر انسانی
-            unified_report = generate_unified_report(
-                results, top10, dynamic30, macro, news, btc_regime, breadth, market_info
+            # ========================================================
+            # FINAL TELEGRAM DELIVERY — THREE ANALYSIS DOCUMENTS
+            # ========================================================
+            # Do not send the old long text reports. The analysis engines
+            # above remain unchanged; only the Telegram presentation layer
+            # is changed to three comprehensive CSV documents.
+            # ========================================================
+
+            print("📊 Generating 3 separate analysis documents...")
+
+            analysis_doc_sent, analysis_doc_errors = send_three_analysis_documents(
+                results, top10, dynamic30
             )
-            
-            print(f"📄 Unified report: {len(unified_report)} chars → {len(split_telegram(unified_report))} parts")
-            
-            # ارسال گزارش یکپارچه
-            parts, sent, errors = send_report(unified_report)
-            total_sent += sent
-            all_errors.extend(errors)
-            if sent > 0:
-                print(f"✅ Sent {sent} parts (unified report)")
-            
-            # همچنین گزارش‌های قبلی برای سازگاری ارسال می‌شوند
-            outputs = build_two_engine_reports(
-                results, top10, dynamic30, macro, news, market_info,
-                unavailable, btc_regime, breadth
+
+            total_sent += analysis_doc_sent
+            all_errors.extend(analysis_doc_errors)
+
+            print(
+                f"📎 Analysis documents sent: {analysis_doc_sent}, "
+                f"errors={len(analysis_doc_errors)}"
             )
-            
-            print(f"📄 Total text outputs: {len(outputs)}")
-            for idx, payload in enumerate(outputs, 1):
-                parts = split_telegram(payload)
-                print(f"  Output {idx}: {len(payload)} chars → {len(parts)} parts")
-            
-            for payload in outputs:
-                parts, sent, errors = send_report(payload)
-                total_sent += sent
-                all_errors.extend(errors)
-                if sent > 0:
-                    print(f"✅ Sent {sent} parts")
-            
+
+            # Keep a small compatibility marker for existing run metadata.
+            outputs = []
+
             # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
             if ENABLE_IMAGE_TABLE:
                 print("📸 Generating image table...")
@@ -8389,8 +8558,10 @@ def main():
             # accuracy of the 4H/24H direction lookups in build_price_snapshot.
             _save_snapshot_history(results, now_tehran().isoformat())
             
-            # ارسال CSV کامل (شامل تمام جداول و داده‌ها)
-            print("📊 Generating CSV report...")
+            # Keep the existing legacy CSV delivery active exactly as before.
+            # The three requested analysis documents are additional outputs;
+            # personal / metals / dynamic_top30 remain enabled.
+            print("📊 Generating legacy split CSV reports...")
             csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
             total_sent += csv_sent
             all_errors.extend(csv_errors)
