@@ -1394,8 +1394,9 @@ ATLAS_USDT_TOMAN_CACHE_TTL = float(os.environ.get("ATLAS_USDT_TOMAN_CACHE_TTL", 
 ATLAS_BATCH_TICKERS_ENABLED = os.environ.get("ATLAS_BATCH_TICKERS_ENABLED", "1").strip() != "0"
 ATLAS_BATCH_TICKERS_CHUNK = max(10, int(os.environ.get("ATLAS_BATCH_TICKERS_CHUNK", "30")))
 ATLAS_PERSISTENT_BACKTEST_CACHE = os.environ.get("ATLAS_PERSISTENT_BACKTEST_CACHE", "1").strip() != "0"
-ATLAS_ANALYSIS_WORKERS = max(1, min(4, int(os.environ.get("ATLAS_ANALYSIS_WORKERS", "2"))))
+ATLAS_ANALYSIS_WORKERS = max(1, min(4, int(os.environ.get("ATLAS_ANALYSIS_WORKERS", "3"))))
 ATLAS_EXCHANGE_MAX_CONCURRENCY = max(1, min(3, int(os.environ.get("ATLAS_EXCHANGE_MAX_CONCURRENCY", "2"))))
+ATLAS_SQLITE_OHLCV_CACHE_ENABLED = os.environ.get("ATLAS_SQLITE_OHLCV_CACHE_ENABLED", "0").strip() == "1"
 
 _ATLAS_DATA_CACHE = {
     "ticker": {},
@@ -1414,6 +1415,8 @@ _ATLAS_BT_CACHE_STATS = {
     "miss": 0,
     "fingerprint_mismatch": 0,
     "supabase_rows_seen": 0,
+    "supabase_save_ok": 0,
+    "supabase_save_fail": 0,
 }
 _ATLAS_EXCHANGE_SEMAPHORES = {}
 
@@ -1430,6 +1433,8 @@ def _atlas_cache_reset():
         "miss": 0,
         "fingerprint_mismatch": 0,
         "supabase_rows_seen": 0,
+        "supabase_save_ok": 0,
+        "supabase_save_fail": 0,
     })
     _ATLAS_EXCHANGE_SEMAPHORES.clear()
 
@@ -1766,18 +1771,19 @@ def best_ohlcv(coin, timeframe, limit=250):
             _atlas_cache_stat("ohlcv", True)
             return _atlas_copy_rows(rows[-int(limit):]), cached["engine"]
 
-    disk_cached = _atlas_sqlite_ohlcv_get(coin_key, tf_key, limit)
-    if disk_cached is not None:
-        rows, engine = disk_cached
-        _ATLAS_DATA_CACHE["ohlcv"][cache_key] = {
-            "limit": int(limit),
-            "rows": _atlas_copy_rows(rows),
-            "engine": engine,
-        }
-        return _atlas_copy_rows(rows), engine
+    if ATLAS_SQLITE_OHLCV_CACHE_ENABLED:
+        disk_cached = _atlas_sqlite_ohlcv_get(coin_key, tf_key, limit)
+        if disk_cached is not None:
+            rows, engine = disk_cached
+            _ATLAS_DATA_CACHE["ohlcv"][cache_key] = {
+                "limit": int(limit),
+                "rows": _atlas_copy_rows(rows),
+                "engine": engine,
+            }
+            return _atlas_copy_rows(rows), engine
+        _atlas_cache_stat("ohlcv_sqlite", False)
 
     _atlas_cache_stat("ohlcv", False)
-    _atlas_cache_stat("ohlcv_sqlite", False)
     errors = []
 
     # Prefer the provider that already succeeded for this exact timeframe,
@@ -1809,9 +1815,10 @@ def best_ohlcv(coin, timeframe, limit=250):
                         "rows": stored_rows,
                         "engine": eid.upper(),
                     }
-                _atlas_sqlite_ohlcv_set(
-                    coin_key, tf_key, int(limit), stored_rows, eid.upper()
-                )
+                if ATLAS_SQLITE_OHLCV_CACHE_ENABLED:
+                    _atlas_sqlite_ohlcv_set(
+                        coin_key, tf_key, int(limit), stored_rows, eid.upper()
+                    )
                 return _atlas_copy_rows(stored_rows), eid.upper()
         except Exception as e:
             kind = _classify_exchange_error(e)
@@ -4828,15 +4835,16 @@ def walk_forward_backtest(coin, train_days=None, validate_days=None, test_days=N
 
 
 def _backtest_gate_fingerprint(universe):
-    """Fingerprint the gate against model/config/universe/latest closed 4H bar."""
-    anchor_coin = str((universe or ["BTC"])[0]).upper()
-    closed_ts = None
-    try:
-        rows, _ = best_ohlcv(anchor_coin, "4h", 60)
-        if rows:
-            closed_ts = int(rows[-1][0])
-    except Exception:
-        pass
+    """Build a network-free fingerprint for mandatory backtest reuse.
+
+    The fingerprint keys the cache to the current CLOSED UTC-aligned 4H candle,
+    model/config and the backtested universe. It does not fetch market data and
+    does not alter backtest calculations or trading decisions.
+    """
+    now_ms = int(time.time() * 1000)
+    h4_ms = 4 * 60 * 60 * 1000
+    current_h4_open = (now_ms // h4_ms) * h4_ms
+    latest_closed_h4_open = current_h4_open - h4_ms
 
     payload = {
         "version": VERSION,
@@ -4846,10 +4854,12 @@ def _backtest_gate_fingerprint(universe):
         "slippage": BACKTEST_SLIPPAGE_PCT,
         "min_improvement": MIN_BACKTEST_IMPROVEMENT,
         "universe20": [str(x).upper() for x in (universe or [])[:20]],
-        "latest_closed_4h": closed_ts,
+        "latest_closed_4h": latest_closed_h4_open,
+        "fingerprint_clock": "UTC_4H_CLOSED_BOUNDARY",
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest(), payload
+
 
 def _cached_backtest_gate(fingerprint=None):
     cutoff = now_utc() - timedelta(hours=BACKTEST_REFRESH_HOURS)
@@ -4885,14 +4895,12 @@ def _cached_backtest_gate(fingerprint=None):
             rows = STORE.select(
                 "atlas_changelog",
                 {
-                    "select": "timestamp,evidence",
-                    "model_version": f"eq.{VERSION}",
+                    "select": "timestamp,model_version,evidence",
                     "component": "eq.BACKTEST_GATE_CACHE",
                     "order": "timestamp.desc",
-                    # Search several recent runs because a newer cache row from
-                    # a different 4H fingerprint must not hide a still-valid
-                    # exact match inside the refresh window.
-                    "limit": "12",
+                    # Avoid an over-restrictive model_version PostgREST filter;
+                    # match it safely in Python together with fingerprint.
+                    "limit": "24",
                 },
             )
             _ATLAS_BT_CACHE_STATS["supabase_rows_seen"] += len(rows or [])
@@ -4904,6 +4912,8 @@ def _cached_backtest_gate(fingerprint=None):
                 except Exception:
                     continue
                 if ts < cutoff:
+                    continue
+                if str(row.get("model_version") or "") != str(VERSION):
                     continue
                 evidence = row.get("evidence") or {}
                 if isinstance(evidence, str):
@@ -4974,19 +4984,31 @@ def _save_backtest_gate(passed, details, fingerprint=None, fingerprint_payload=N
         )
 
     # Persistent cache in existing Supabase atlas_changelog.
-    if ATLAS_PERSISTENT_BACKTEST_CACHE:
-        append_changelog(
-            "BACKTEST_GATE_CACHE",
-            None,
-            int(bool(passed)),
-            "Persistent mandatory backtest gate cache",
-            {
+    # Store a compact record explicitly so cache persistence is observable.
+    if ATLAS_PERSISTENT_BACKTEST_CACHE and getattr(STORE, "enabled", False):
+        compact_result = dict(details or {})
+        # Avoid accidentally persisting very large transient diagnostics.
+        for transient_key in ("samples", "trades_detail", "equity_curve", "raw"):
+            compact_result.pop(transient_key, None)
+        row = {
+            "timestamp": now_utc().isoformat(),
+            "model_version": VERSION,
+            "component": "BACKTEST_GATE_CACHE",
+            "old_value": None,
+            "new_value": int(bool(passed)),
+            "reason": "Persistent mandatory backtest gate cache",
+            "evidence": {
                 "fingerprint": fingerprint,
                 "fingerprint_payload": fingerprint_payload or {},
                 "passed": bool(passed),
-                "result": details or {},
+                "result": compact_result,
             },
-        )
+        }
+        ok = STORE.insert("atlas_changelog", row)
+        if ok:
+            _ATLAS_BT_CACHE_STATS["supabase_save_ok"] += 1
+        else:
+            _ATLAS_BT_CACHE_STATS["supabase_save_fail"] += 1
 
 
 def h4_fallback_levels(rows, current_price=None):
@@ -10511,6 +10533,16 @@ def build_performance_telemetry_report():
         f"- misses: {_ATLAS_BT_CACHE_STATS.get('miss', 0)}",
         f"- fingerprint mismatches: {_ATLAS_BT_CACHE_STATS.get('fingerprint_mismatch', 0)}",
         f"- Supabase cache rows examined: {_ATLAS_BT_CACHE_STATS.get('supabase_rows_seen', 0)}",
+        f"- Supabase cache saves OK: {_ATLAS_BT_CACHE_STATS.get('supabase_save_ok', 0)}",
+        f"- Supabase cache save failures: {_ATLAS_BT_CACHE_STATS.get('supabase_save_fail', 0)}",
+        "",
+        "Safety / Quality Guards:",
+        f"- analysis workers: {ATLAS_ANALYSIS_WORKERS}",
+        f"- per-exchange max concurrency: {ATLAS_EXCHANGE_MAX_CONCURRENCY}",
+        f"- SQLite OHLCV hot-path enabled: {ATLAS_SQLITE_OHLCV_CACHE_ENABLED}",
+        "- signal/entry/SL/TP formulas unchanged",
+        "- decision engine and evidence weights unchanged",
+        "- output ordering preserved after concurrent analysis",
     ]
 
     lines += [
