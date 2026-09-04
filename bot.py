@@ -9662,11 +9662,316 @@ def send_optimization_documents(backtest_text):
     return sent,errors
 
 
+
+# ============================================================
+# ATLAS PERFORMANCE TELEMETRY — FULL PROFILING
+# Function-level + subsystem-level timing/call/error statistics.
+# Observability only: no decision logic is changed.
+# ============================================================
+import time as _atlas_time
+import functools as _atlas_functools
+
+_ATLAS_PERF = {}
+_ATLAS_FUNC_PERF = {}
+_ATLAS_PROFILE_INSTALLED = False
+
+class _AtlasTimer:
+    def __init__(self, name):
+        self.name = name
+        self.started = None
+    def __enter__(self):
+        self.started = _atlas_time.perf_counter()
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = _atlas_time.perf_counter() - self.started
+        _ATLAS_PERF[self.name] = _ATLAS_PERF.get(self.name, 0.0) + elapsed
+        return False
+
+def _atlas_perf_reset():
+    _ATLAS_PERF.clear()
+    _ATLAS_FUNC_PERF.clear()
+    _ATLAS_PERF["_TOTAL_STARTED"] = _atlas_time.perf_counter()
+
+def _atlas_record_function(name, elapsed, failed=False):
+    row = _ATLAS_FUNC_PERF.setdefault(
+        name, {"calls": 0, "total": 0.0, "max": 0.0, "errors": 0}
+    )
+    row["calls"] += 1
+    row["total"] += float(elapsed)
+    row["max"] = max(float(row["max"]), float(elapsed))
+    if failed:
+        row["errors"] += 1
+
+def _atlas_profile_wrapper(name, fn):
+    if getattr(fn, "_atlas_profiled", False):
+        return fn
+    @_atlas_functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        started = _atlas_time.perf_counter()
+        failed = False
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            _atlas_record_function(
+                name,
+                _atlas_time.perf_counter() - started,
+                failed=failed,
+            )
+    wrapped._atlas_profiled = True
+    return wrapped
+
+# Functions grouped by subsystem. Missing names are skipped safely.
+_ATLAS_PROFILE_GROUPS = {
+    "Preflight / Scheduler": [
+        "telegram_preflight", "get_run_mode", "_automatic_run_plan",
+    ],
+    "Database / Persistence": [
+        "init_sqlite", "evaluate_open_outcomes", "store_signal",
+        "save_context", "save_run", "_save_snapshot_history",
+        "_snapshot_previous_prices", "_p1_lifecycle_db",
+        "_aio_notification_db", "_opt_alert_db",
+    ],
+    "Universe / Market Discovery": [
+        "build_universe", "global_market_intelligence",
+        "market_breadth", "btc_market_regime",
+    ],
+    "Backtest / Self-Healing": [
+        "mandatory_backtest_gate", "backtest_coin",
+        "self_diagnostic", "_cached_backtest_gate",
+        "_store_backtest_gate_cache",
+    ],
+    "News / Macro / Whale": [
+        "news_feed", "macro_snapshot", "fetch_fed_macro",
+        "fetch_whale_activity", "_fetch_whale_activity_paid",
+        "_fetch_whale_activity_free", "fetch_influential_figures_news",
+        "build_intelligence_briefing", "fetch_economic_calendar",
+    ],
+    "Market Data / Exchange I/O": [
+        "ensure_exchanges", "exchange_ticker", "best_ohlcv",
+        "tf_snapshot", "price_consensus", "safe_http_get", "http_get",
+        "_opt_exchange_last_price", "compare_multi_exchange_prices",
+    ],
+    "Per-Asset Technical Analysis": [
+        "analyze_coin", "technical_score", "indicator_snapshot",
+        "support_resistance", "build_trade_plan",
+    ],
+    "Decision / Intelligence": [
+        "apply_decision_engine", "v11_apply_intelligence",
+        "v11_portfolio_diagnostics", "apply_evidence_fusion",
+        "apply_mtf_confirmation", "build_portfolio_risk_intelligence",
+        "apply_portfolio_risk_context", "update_signal_lifecycle",
+        "decision_support_score", "build_decision_support",
+    ],
+    "Lifecycle / Signal Alerts": [
+        "notify_lifecycle_changes", "send_signal_change_notifications",
+        "format_lifecycle_notification", "format_signal_notification",
+    ],
+    "Report Generation": [
+        "generate_analysis_documents", "build_market_context_txt",
+        "build_deep_analysis_txt", "build_why_not_trade_txt",
+        "build_portfolio_risk_txt", "generate_best_watch_csv",
+        "generate_opportunity_ranking_csv", "generate_lifecycle_csv",
+        "build_backtest_report", "build_image_table",
+        "generate_split_csv_reports",
+    ],
+    "Telegram Documents / Reports": [
+        "send_analysis_documents", "send_all_in_one_documents",
+        "send_phase1_documents", "send_optimization_documents",
+        "send_image_table", "send_csv_report",
+    ],
+    "Telegram Low-Level I/O": [
+        "_telegram_send_document", "telegram_send_one",
+        "send_with_retry", "telegram_api_get_me",
+    ],
+    "Snapshot": [
+        "fetch_snapshot_results", "build_price_snapshot",
+        "send_price_snapshot", "fetch_usdt_toman_public",
+    ],
+    "Voice": [
+        "generate_voice_summary", "generate_audio_report",
+        "text_to_speech_persian", "send_audio_report",
+    ],
+}
+
+_ATLAS_FUNC_TO_GROUP = {
+    fn: group
+    for group, names in _ATLAS_PROFILE_GROUPS.items()
+    for fn in names
+}
+
+def _atlas_install_full_profiler():
+    global _ATLAS_PROFILE_INSTALLED
+    if _ATLAS_PROFILE_INSTALLED:
+        return
+    installed = 0
+    for fn_name in _ATLAS_FUNC_TO_GROUP:
+        fn = globals().get(fn_name)
+        if callable(fn):
+            globals()[fn_name] = _atlas_profile_wrapper(fn_name, fn)
+            installed += 1
+    _ATLAS_PROFILE_INSTALLED = True
+    print(f"⏱ Full profiler installed on {installed} ATLAS functions")
+
+def _atlas_perf_mark_total():
+    started = _ATLAS_PERF.get("_TOTAL_STARTED")
+    if started is not None:
+        _ATLAS_PERF["TOTAL_BEFORE_TELEMETRY_SEND"] = (
+            _atlas_time.perf_counter() - started
+        )
+
+def _atlas_group_stats():
+    grouped = {}
+    for fn_name, row in _ATLAS_FUNC_PERF.items():
+        group = _ATLAS_FUNC_TO_GROUP.get(fn_name, "Other")
+        g = grouped.setdefault(
+            group, {"calls": 0, "total": 0.0, "errors": 0, "functions": 0}
+        )
+        g["calls"] += int(row.get("calls", 0))
+        g["total"] += float(row.get("total", 0.0))
+        g["errors"] += int(row.get("errors", 0))
+        g["functions"] += 1
+    return grouped
+
+def build_performance_telemetry_report():
+    _atlas_perf_mark_total()
+    grouped = _atlas_group_stats()
+
+    lines = [
+        "ATLAS AI — FULL PERFORMANCE PROFILING",
+        "=" * 78,
+        f"زمان گزارش: {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} تهران",
+        "",
+        "نکته: زمان گروه‌ها cumulative است؛ چون برخی توابع داخل توابع دیگر اجرا",
+        "می‌شوند، جمع گروه‌ها الزاماً برابر TOTAL نیست. TOTAL زمان واقعی چرخه است.",
+        "",
+        "1) SUBSYSTEM PROFILE",
+        "-" * 78,
+        f"{'Subsystem':34} {'Calls':>8} {'Errors':>8} {'Cum.Time(s)':>14}",
+    ]
+
+    for group, row in sorted(
+        grouped.items(), key=lambda kv: kv[1]["total"], reverse=True
+    ):
+        lines.append(
+            f"{group[:34]:34} "
+            f"{row['calls']:>8d} {row['errors']:>8d} "
+            f"{row['total']:>14.2f}"
+        )
+
+    lines += [
+        "",
+        "2) SLOWEST FUNCTIONS — TOP 25",
+        "-" * 78,
+        f"{'Function':38} {'Calls':>7} {'Err':>5} {'Total(s)':>10} {'Max(s)':>10} {'Avg(s)':>10}",
+    ]
+
+    ranked = sorted(
+        _ATLAS_FUNC_PERF.items(),
+        key=lambda kv: kv[1]["total"],
+        reverse=True,
+    )
+    for name, row in ranked[:25]:
+        calls = max(1, int(row["calls"]))
+        avg = float(row["total"]) / calls
+        lines.append(
+            f"{name[:38]:38} "
+            f"{int(row['calls']):>7d} {int(row['errors']):>5d} "
+            f"{float(row['total']):>10.2f} {float(row['max']):>10.2f} {avg:>10.3f}"
+        )
+
+    # High-call diagnostics can expose chatty APIs / repeated work.
+    lines += [
+        "",
+        "3) HIGHEST CALL COUNTS — TOP 15",
+        "-" * 78,
+        f"{'Function':42} {'Calls':>10} {'Total(s)':>12}",
+    ]
+    by_calls = sorted(
+        _ATLAS_FUNC_PERF.items(),
+        key=lambda kv: kv[1]["calls"],
+        reverse=True,
+    )
+    for name, row in by_calls[:15]:
+        lines.append(
+            f"{name[:42]:42} {int(row['calls']):>10d} {float(row['total']):>12.2f}"
+        )
+
+    if _ATLAS_PERF:
+        lines += ["", "4) EXPLICIT MAIN-STAGE TIMERS", "-" * 78]
+        for key, sec in sorted(
+            ((k, v) for k, v in _ATLAS_PERF.items()
+             if k not in ("_TOTAL_STARTED", "TOTAL_BEFORE_TELEMETRY_SEND")),
+            key=lambda kv: kv[1],
+            reverse=True,
+        ):
+            lines.append(f"- {key}: {float(sec):.2f}s")
+
+    total = _ATLAS_PERF.get("TOTAL_BEFORE_TELEMETRY_SEND")
+    lines += [
+        "",
+        "5) TOTAL RUNTIME",
+        "-" * 78,
+        f"TOTAL BEFORE TELEMETRY SEND: {float(total or 0.0):.2f}s",
+    ]
+
+    if ranked:
+        slow_name, slow_row = ranked[0]
+        lines += [
+            "",
+            "6) AUTOMATIC BOTTLENECK HINT",
+            "-" * 78,
+            f"کندترین تابع تجمعی: {slow_name} ({slow_row['total']:.2f}s / {slow_row['calls']} calls)",
+        ]
+        if slow_name in ("safe_http_get", "http_get", "exchange_ticker", "best_ohlcv"):
+            lines.append("پیشنهاد: TTL cache، کاهش retry غیرضروری و reuse اتصال/metadata را بررسی کنید.")
+        elif slow_name in ("mandatory_backtest_gate", "backtest_coin"):
+            lines.append("پیشنهاد: cache بک‌تست، کاهش universe بک‌تست یا اجرای incremental را بررسی کنید.")
+        elif slow_name.startswith("send_") or slow_name in ("_telegram_send_document", "send_with_retry"):
+            lines.append("پیشنهاد: تعداد فایل‌ها، حجم payload، retry و latency تلگرام را بررسی کنید.")
+        elif slow_name in ("analyze_coin", "tf_snapshot", "price_consensus"):
+            lines.append("پیشنهاد: cache کندل بر اساس timeframe و اشتراک داده بین asset-analysisها را بررسی کنید.")
+
+    lines += [
+        "",
+        "این profiling فقط observability است و سیگنال، Entry/SL/TP، Evidence،",
+        "Backtest Gate، Legacy CSV یا Snapshot Arrow را تغییر نمی‌دهد.",
+    ]
+    return "\n".join(lines)
+
+def send_performance_telemetry_report():
+    content = build_performance_telemetry_report()
+    dt = now_tehran()
+    tag = shamsi(dt).replace("/", "") + "_" + dt.strftime("%H%M%S")
+    filename = f"09_ATLAS_FULL_PERFORMANCE_PROFILING_{tag}.txt"
+    sent, errors = 0, []
+    destinations = []
+    for c in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if c and c not in destinations:
+            destinations.append(c)
+    for c in destinations:
+        try:
+            _telegram_send_document(
+                c, content, filename,
+                "⏱ ATLAS | Full Performance Profiling"
+            )
+            sent += 1
+        except Exception as e:
+            errors.append(f"FULL_PROFILE[{c}]: {e}")
+    return sent, errors
+
+# Install wrappers after all profiler-target functions above have been defined
+# and before main() starts using them.
+_atlas_install_full_profiler()
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
 
 def main():
+    _atlas_perf_reset()
     try:
         print(f"\n{'='*50}")
         print(f"🚀 {VERSION}")
@@ -9732,21 +10037,25 @@ def main():
 
         if do_analysis:
             print("🔍 Starting ANALYSIS...")
-            text, results, macro, news, market_info, unavailable = report()
+            with _AtlasTimer("FULL CORE REPORT()"):
+                text, results, macro, news, market_info, unavailable = report()
             print(f"✅ Analysis complete: {len(results)} results, {unavailable} unavailable")
             
-            results = [v11_apply_intelligence(r) for r in results]
-            v11_portfolio = v11_portfolio_diagnostics(results)
-            top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
-            btc_regime = btc_market_regime()
-            breadth = market_breadth(results)
+            with _AtlasTimer("POST-REPORT INTELLIGENCE"):
+                results = [v11_apply_intelligence(r) for r in results]
+                v11_portfolio = v11_portfolio_diagnostics(results)
+                top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
+                btc_regime = btc_market_regime()
+                breadth = market_breadth(results)
             
-            results = apply_evidence_fusion(results, news)
-            results = apply_mtf_confirmation(results)
-            portfolio_risk = build_portfolio_risk_intelligence(results, top10)
-            results = apply_portfolio_risk_context(results, portfolio_risk)
-            lifecycle_events = update_signal_lifecycle(results, top10)
-            lifecycle_alert_sent, lifecycle_alert_errors = notify_lifecycle_changes(lifecycle_events)
+            with _AtlasTimer("Evidence + MTF + Risk + Lifecycle"):
+                results = apply_evidence_fusion(results, news)
+                results = apply_mtf_confirmation(results)
+                portfolio_risk = build_portfolio_risk_intelligence(results, top10)
+                results = apply_portfolio_risk_context(results, portfolio_risk)
+                lifecycle_events = update_signal_lifecycle(results, top10)
+            with _AtlasTimer("LIFECYCLE ALERT DELIVERY"):
+                lifecycle_alert_sent, lifecycle_alert_errors = notify_lifecycle_changes(lifecycle_events)
             total_sent += lifecycle_alert_sent
             all_errors.extend(lifecycle_alert_errors)
             print(f"🎯 Lifecycle alerts sent: {lifecycle_alert_sent}, errors={len(lifecycle_alert_errors)}")
@@ -9762,9 +10071,10 @@ def main():
 
             print("📊 Generating 2 separate analysis documents...")
 
-            analysis_doc_sent, analysis_doc_errors = send_analysis_documents(
-                results, top10, dynamic30
-            )
+            with _AtlasTimer("Analysis CSV Reports"):
+                analysis_doc_sent, analysis_doc_errors = send_analysis_documents(
+                    results, top10, dynamic30
+                )
 
             total_sent += analysis_doc_sent
             all_errors.extend(analysis_doc_errors)
@@ -9774,29 +10084,33 @@ def main():
                 f"errors={len(analysis_doc_errors)}"
             )
 
-            aio_sent, aio_errors = send_all_in_one_documents(
-                results, top10, macro, news, btc_regime
-            )
+            with _AtlasTimer("ALL-IN-ONE REPORT DELIVERY"):
+                aio_sent, aio_errors = send_all_in_one_documents(
+                    results, top10, macro, news, btc_regime
+                )
             total_sent += aio_sent
             all_errors.extend(aio_errors)
             print(f"🧠 All-in-One documents sent: {aio_sent}, errors={len(aio_errors)}")
 
-            notify_sent, notify_errors = send_signal_change_notifications(results, top10)
+            with _AtlasTimer("Signal Notifications"):
+                notify_sent, notify_errors = send_signal_change_notifications(results, top10)
             total_sent += notify_sent
             all_errors.extend(notify_errors)
             print(f"🚨 Signal-change notifications sent: {notify_sent}, errors={len(notify_errors)}")
 
-            phase1_sent, phase1_errors = send_phase1_documents(
-                results, top10, portfolio_risk
-            )
+            with _AtlasTimer("PHASE-1 REPORT DELIVERY"):
+                phase1_sent, phase1_errors = send_phase1_documents(
+                    results, top10, portfolio_risk
+                )
             total_sent += phase1_sent
             all_errors.extend(phase1_errors)
             print(
                 f"🧩 Phase-1 documents sent: {phase1_sent}, "
                 f"lifecycle_events={len(lifecycle_events)}, errors={len(phase1_errors)}"
             )
-            backtest_dashboard = build_backtest_report()
-            opt_sent, opt_errors = send_optimization_documents(backtest_dashboard)
+            with _AtlasTimer("Backtest Dashboard"):
+                backtest_dashboard = build_backtest_report()
+                opt_sent, opt_errors = send_optimization_documents(backtest_dashboard)
             total_sent += opt_sent
             all_errors.extend(opt_errors)
             print(f"📈 Backtest dashboard sent: {opt_sent}, errors={len(opt_errors)}")
@@ -9807,7 +10121,8 @@ def main():
             # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
             if ENABLE_IMAGE_TABLE:
                 print("📸 Generating image table...")
-                image_sent = send_image_table(results, top10, dynamic30)
+                with _AtlasTimer("PNG / IMAGE"):
+                    image_sent = send_image_table(results, top10, dynamic30)
                 if image_sent:
                     print("✅ Image table sent successfully")
                 else:
@@ -9819,25 +10134,35 @@ def main():
             # Also log to the price history table on analysis runs (every 4H),
             # not just snapshot runs (every 3H) — denser history improves the
             # accuracy of the 4H/24H direction lookups in build_price_snapshot.
-            _save_snapshot_history(results, now_tehran().isoformat())
+            with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
+                _save_snapshot_history(results, now_tehran().isoformat())
             
             # Keep the existing legacy CSV delivery active exactly as before.
             # The three requested analysis documents are additional outputs;
             # personal / metals / dynamic_top30 remain enabled.
             print("📊 Generating legacy split CSV reports...")
-            csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
+            with _AtlasTimer("LEGACY CSV DELIVERY"):
+                csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
             total_sent += csv_sent
             all_errors.extend(csv_errors)
             print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
+
+            perf_sent, perf_errors = send_performance_telemetry_report()
+            total_sent += perf_sent
+            all_errors.extend(perf_errors)
+            print(f"⏱ Performance telemetry sent: {perf_sent}, errors={len(perf_errors)}")
             
-            save_context(macro, news, market_liquidity_index(results), market_info)
-            save_run(results, sum(len(split_telegram(x)) for x in outputs), macro, news, unavailable)
+            with _AtlasTimer("FINAL PERSISTENCE"):
+                save_context(macro, news, market_liquidity_index(results), market_info)
+                save_run(results, sum(len(split_telegram(x)) for x in outputs), macro, news, unavailable)
 
         if do_snapshot:
             print("📸 Starting SNAPSHOT...")
-            snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
+            with _AtlasTimer("SNAPSHOT FETCH"):
+                snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
             print(f"✅ Snapshot results: {len(snapshot_results)}")
-            snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
+            with _AtlasTimer("SNAPSHOT DELIVERY"):
+                snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
             total_sent += snapshot_sent
             all_errors.extend(snapshot_errors)
             print(f"✅ Snapshot sent: {snapshot_sent}")
@@ -9864,9 +10189,11 @@ def main():
                     # استفاده از متغیرهای تعریف شده با مقدار پیش‌فرض
                     news_data = news if news is not None else None
                     btc_data = btc_regime if btc_regime is not None else None
-                    audio_file = generate_audio_report(voice_data, news_data, btc_data)
+                    with _AtlasTimer("VOICE GENERATION"):
+                        audio_file = generate_audio_report(voice_data, news_data, btc_data)
                     if audio_file:
-                        result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
+                        with _AtlasTimer("VOICE DELIVERY"):
+                            result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
                         if result:
                             print("✅ Audio report sent successfully")
                         try:
@@ -9883,6 +10210,17 @@ def main():
                 print(f"ℹ️ Voice disabled: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}")
             elif not AUTO_SEND_VOICE:
                 print(f"ℹ️ Voice disabled: AUTO_SEND_VOICE={AUTO_SEND_VOICE}")
+
+        # Full profiling is deliberately sent after analysis, persistence,
+        # snapshot and voice so it measures the complete production cycle.
+        try:
+            perf_sent, perf_errors = send_performance_telemetry_report()
+            total_sent += perf_sent
+            all_errors.extend(perf_errors)
+            print(f"⏱ Full performance profiling sent: {perf_sent}, errors={len(perf_errors)}")
+        except Exception as perf_e:
+            all_errors.append(f"FULL_PROFILE: {perf_e}")
+            print(f"⚠️ Full performance profiling failed: {perf_e}")
 
         print(f"\n{'='*50}")
         print(f"📊 SUMMARY:")
