@@ -920,6 +920,18 @@ def init_sqlite():
             passed integer not null,
             details text
         );
+        create table if not exists ohlcv_cache(
+            coin text not null,
+            timeframe text not null,
+            provider text not null,
+            limit_n integer not null,
+            last_closed_ts integer not null,
+            cached_at text not null,
+            rows_json text not null,
+            primary key(coin, timeframe)
+        );
+        create index if not exists idx_ohlcv_cache_tf_ts
+            on ohlcv_cache(timeframe, last_closed_ts);
         create table if not exists candle_events(
             coin text not null,
             timeframe text not null,
@@ -1380,8 +1392,10 @@ ATLAS_PRICE_CONSENSUS_CACHE_TTL = float(os.environ.get("ATLAS_PRICE_CONSENSUS_CA
 ATLAS_GECKO_CACHE_TTL = float(os.environ.get("ATLAS_GECKO_CACHE_TTL", "300"))
 ATLAS_USDT_TOMAN_CACHE_TTL = float(os.environ.get("ATLAS_USDT_TOMAN_CACHE_TTL", "300"))
 ATLAS_BATCH_TICKERS_ENABLED = os.environ.get("ATLAS_BATCH_TICKERS_ENABLED", "1").strip() != "0"
-ATLAS_BATCH_TICKERS_CHUNK = max(10, int(os.environ.get("ATLAS_BATCH_TICKERS_CHUNK", "80")))
+ATLAS_BATCH_TICKERS_CHUNK = max(10, int(os.environ.get("ATLAS_BATCH_TICKERS_CHUNK", "30")))
 ATLAS_PERSISTENT_BACKTEST_CACHE = os.environ.get("ATLAS_PERSISTENT_BACKTEST_CACHE", "1").strip() != "0"
+ATLAS_ANALYSIS_WORKERS = max(1, min(4, int(os.environ.get("ATLAS_ANALYSIS_WORKERS", "2"))))
+ATLAS_EXCHANGE_MAX_CONCURRENCY = max(1, min(3, int(os.environ.get("ATLAS_EXCHANGE_MAX_CONCURRENCY", "2"))))
 
 _ATLAS_DATA_CACHE = {
     "ticker": {},
@@ -1393,7 +1407,15 @@ _ATLAS_DATA_CACHE = {
 _ATLAS_CACHE_STATS = {}
 _ATLAS_OHLCV_PROVIDER_AFFINITY = {}
 _ATLAS_OHLCV_PROVIDER_FAILURES = set()
-_ATLAS_BATCH_TICKER_STATS = {"requests": 0, "symbols": 0, "failures": 0}
+_ATLAS_BATCH_TICKER_STATS = {"requests": 0, "symbols": 0, "failures": 0, "jit_batches": 0}
+_ATLAS_BT_CACHE_STATS = {
+    "sqlite_hit": 0,
+    "supabase_hit": 0,
+    "miss": 0,
+    "fingerprint_mismatch": 0,
+    "supabase_rows_seen": 0,
+}
+_ATLAS_EXCHANGE_SEMAPHORES = {}
 
 def _atlas_cache_reset():
     for bucket in _ATLAS_DATA_CACHE.values():
@@ -1401,7 +1423,15 @@ def _atlas_cache_reset():
     _ATLAS_CACHE_STATS.clear()
     _ATLAS_OHLCV_PROVIDER_AFFINITY.clear()
     _ATLAS_OHLCV_PROVIDER_FAILURES.clear()
-    _ATLAS_BATCH_TICKER_STATS.update({"requests": 0, "symbols": 0, "failures": 0})
+    _ATLAS_BATCH_TICKER_STATS.update({"requests": 0, "symbols": 0, "failures": 0, "jit_batches": 0})
+    _ATLAS_BT_CACHE_STATS.update({
+        "sqlite_hit": 0,
+        "supabase_hit": 0,
+        "miss": 0,
+        "fingerprint_mismatch": 0,
+        "supabase_rows_seen": 0,
+    })
+    _ATLAS_EXCHANGE_SEMAPHORES.clear()
 
 def _atlas_cache_stat(name, hit):
     row = _ATLAS_CACHE_STATS.setdefault(name, {"hit": 0, "miss": 0})
@@ -1462,6 +1492,15 @@ def symbol_for(eid, coin):
     return None
 
 
+
+def _atlas_exchange_guard(eid):
+    key = str(eid).lower()
+    sem = _ATLAS_EXCHANGE_SEMAPHORES.get(key)
+    if sem is None:
+        sem = _atlas_threading.BoundedSemaphore(ATLAS_EXCHANGE_MAX_CONCURRENCY)
+        _ATLAS_EXCHANGE_SEMAPHORES[key] = sem
+    return sem
+
 def _atlas_store_prefetched_ticker(eid, coin, ticker):
     if not isinstance(ticker, dict):
         return False
@@ -1515,10 +1554,12 @@ def _atlas_prefetch_tickers(universe):
             try:
                 _ATLAS_BATCH_TICKER_STATS["requests"] += 1
                 try:
-                    payload = fn(chunk)
+                    with _atlas_exchange_guard(eid):
+                        payload = fn(chunk)
                 except TypeError:
                     # Some CCXT adapters only accept fetch_tickers() without symbols.
-                    payload = fn()
+                    with _atlas_exchange_guard(eid):
+                        payload = fn()
                 if not isinstance(payload, dict):
                     continue
 
@@ -1554,7 +1595,8 @@ def exchange_ticker(eid, coin):
     sym = symbol_for(eid, coin)
     if not sym:
         raise RuntimeError(f"{eid}: pair unavailable")
-    t = ex.fetch_ticker(sym)
+    with _atlas_exchange_guard(eid):
+        t = ex.fetch_ticker(sym)
     result = {
         "source": eid.upper(),
         "price": f(t.get("last")),
@@ -1574,7 +1616,8 @@ def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
     supported = getattr(ex, "timeframes", None) or {}
     if supported and timeframe not in supported:
         raise RuntimeError(f"{eid}: timeframe {timeframe} unsupported")
-    rows = ex.fetch_ohlcv(sym, timeframe=timeframe, limit=limit)
+    with _atlas_exchange_guard(eid):
+        rows = ex.fetch_ohlcv(sym, timeframe=timeframe, limit=limit)
     if len(rows) < 60:
         raise RuntimeError(f"{eid}: insufficient candles")
     return strip_incomplete(rows, timeframe)
@@ -1643,6 +1686,72 @@ def candle_event(coin, timeframe, rows):
             )
     return {"status": status, "closed_ts": latest, "timeframe": timeframe}
 
+
+def _atlas_fixed_tf_ms(timeframe):
+    return {
+        "30m": 30 * 60 * 1000,
+        "1h": 60 * 60 * 1000,
+        "4h": 4 * 60 * 60 * 1000,
+        "1d": 24 * 60 * 60 * 1000,
+    }.get(str(timeframe))
+
+def _atlas_expected_last_closed_open_ts(timeframe, now_ms=None):
+    tf_ms = _atlas_fixed_tf_ms(timeframe)
+    if not tf_ms:
+        return None
+    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+    current_open = (now_ms // tf_ms) * tf_ms
+    return current_open - tf_ms
+
+def _atlas_sqlite_ohlcv_get(coin, timeframe, limit):
+    # Only fixed UTC-aligned timeframes use exact freshness validation.
+    expected = _atlas_expected_last_closed_open_ts(timeframe)
+    if expected is None:
+        return None
+    try:
+        init_sqlite()
+        with sqlite_conn() as c:
+            row = c.execute(
+                "select provider,limit_n,last_closed_ts,rows_json "
+                "from ohlcv_cache where coin=? and timeframe=?",
+                (str(coin).upper(), str(timeframe)),
+            ).fetchone()
+        if not row:
+            return None
+        provider, limit_n, last_closed_ts, rows_json = row
+        if int(last_closed_ts) != int(expected) or int(limit_n) < int(limit):
+            return None
+        rows = json.loads(rows_json)
+        if not isinstance(rows, list) or len(rows) < min(60, int(limit)):
+            return None
+        _atlas_cache_stat("ohlcv_sqlite", True)
+        return _atlas_copy_rows(rows[-int(limit):]), str(provider)
+    except Exception:
+        return None
+
+def _atlas_sqlite_ohlcv_set(coin, timeframe, limit, rows, provider):
+    expected = _atlas_expected_last_closed_open_ts(timeframe)
+    if expected is None or not rows:
+        return
+    try:
+        last_ts = int(rows[-1][0])
+        if last_ts != int(expected):
+            return
+        init_sqlite()
+        with sqlite_conn() as c:
+            c.execute(
+                "insert or replace into ohlcv_cache"
+                "(coin,timeframe,provider,limit_n,last_closed_ts,cached_at,rows_json)"
+                " values(?,?,?,?,?,?,?)",
+                (
+                    str(coin).upper(), str(timeframe), str(provider),
+                    int(limit), last_ts, now_utc().isoformat(),
+                    json.dumps(rows, separators=(",", ":")),
+                ),
+            )
+    except Exception:
+        pass
+
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
     coin_key = str(coin).upper()
@@ -1657,7 +1766,18 @@ def best_ohlcv(coin, timeframe, limit=250):
             _atlas_cache_stat("ohlcv", True)
             return _atlas_copy_rows(rows[-int(limit):]), cached["engine"]
 
+    disk_cached = _atlas_sqlite_ohlcv_get(coin_key, tf_key, limit)
+    if disk_cached is not None:
+        rows, engine = disk_cached
+        _ATLAS_DATA_CACHE["ohlcv"][cache_key] = {
+            "limit": int(limit),
+            "rows": _atlas_copy_rows(rows),
+            "engine": engine,
+        }
+        return _atlas_copy_rows(rows), engine
+
     _atlas_cache_stat("ohlcv", False)
+    _atlas_cache_stat("ohlcv_sqlite", False)
     errors = []
 
     # Prefer the provider that already succeeded for this exact timeframe,
@@ -1689,6 +1809,9 @@ def best_ohlcv(coin, timeframe, limit=250):
                         "rows": stored_rows,
                         "engine": eid.upper(),
                     }
+                _atlas_sqlite_ohlcv_set(
+                    coin_key, tf_key, int(limit), stored_rows, eid.upper()
+                )
                 return _atlas_copy_rows(stored_rows), eid.upper()
         except Exception as e:
             kind = _classify_exchange_error(e)
@@ -4746,7 +4869,10 @@ def _cached_backtest_gate(fingerprint=None):
                 details = {}
             fp_ok = fingerprint is None or details.get("fingerprint") == fingerprint
             if ts >= cutoff and fp_ok:
+                _ATLAS_BT_CACHE_STATS["sqlite_hit"] += 1
                 return bool(row[1]), {"cached": True, "cache_source": "sqlite", **details}
+            if ts >= cutoff and not fp_ok:
+                _ATLAS_BT_CACHE_STATS["fingerprint_mismatch"] += 1
     except Exception as e:
         append_changelog(
             "BACKTEST_CACHE", None, None, str(e),
@@ -4763,14 +4889,22 @@ def _cached_backtest_gate(fingerprint=None):
                     "model_version": f"eq.{VERSION}",
                     "component": "eq.BACKTEST_GATE_CACHE",
                     "order": "timestamp.desc",
-                    "limit": "1",
+                    # Search several recent runs because a newer cache row from
+                    # a different 4H fingerprint must not hide a still-valid
+                    # exact match inside the refresh window.
+                    "limit": "12",
                 },
             )
-            if rows:
-                row = rows[0]
-                ts = datetime.fromisoformat(
-                    str(row.get("timestamp") or "").replace("Z", "+00:00")
-                )
+            _ATLAS_BT_CACHE_STATS["supabase_rows_seen"] += len(rows or [])
+            for row in rows or []:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(row.get("timestamp") or "").replace("Z", "+00:00")
+                    )
+                except Exception:
+                    continue
+                if ts < cutoff:
+                    continue
                 evidence = row.get("evidence") or {}
                 if isinstance(evidence, str):
                     try:
@@ -4778,39 +4912,44 @@ def _cached_backtest_gate(fingerprint=None):
                     except Exception:
                         evidence = {}
                 fp_ok = fingerprint is None or evidence.get("fingerprint") == fingerprint
-                if ts >= cutoff and fp_ok and "passed" in evidence:
-                    result = evidence.get("result") or {}
-                    # Warm the local SQLite cache for the remainder of the run.
-                    try:
-                        with sqlite_conn() as c:
-                            local_details = {
-                                **result,
-                                "fingerprint": evidence.get("fingerprint"),
-                                "fingerprint_payload": evidence.get("fingerprint_payload"),
-                            }
-                            c.execute(
-                                "insert or replace into backtest_gate_cache"
-                                "(id,timestamp,passed,details) values(1,?,?,?)",
-                                (
-                                    ts.isoformat(),
-                                    int(bool(evidence.get("passed"))),
-                                    safe_json(local_details),
-                                ),
-                            )
-                    except Exception:
-                        pass
-                    return bool(evidence.get("passed")), {
-                        "cached": True,
-                        "cache_source": "supabase",
-                        "fingerprint": evidence.get("fingerprint"),
-                        **result,
-                    }
+                if not fp_ok:
+                    _ATLAS_BT_CACHE_STATS["fingerprint_mismatch"] += 1
+                    continue
+                if "passed" not in evidence:
+                    continue
+                result = evidence.get("result") or {}
+                try:
+                    with sqlite_conn() as c:
+                        local_details = {
+                            **result,
+                            "fingerprint": evidence.get("fingerprint"),
+                            "fingerprint_payload": evidence.get("fingerprint_payload"),
+                        }
+                        c.execute(
+                            "insert or replace into backtest_gate_cache"
+                            "(id,timestamp,passed,details) values(1,?,?,?)",
+                            (
+                                ts.isoformat(),
+                                int(bool(evidence.get("passed"))),
+                                safe_json(local_details),
+                            ),
+                        )
+                except Exception:
+                    pass
+                _ATLAS_BT_CACHE_STATS["supabase_hit"] += 1
+                return bool(evidence.get("passed")), {
+                    "cached": True,
+                    "cache_source": "supabase",
+                    "fingerprint": evidence.get("fingerprint"),
+                    **result,
+                }
         except Exception as e:
             append_changelog(
                 "BACKTEST_CACHE_SUPABASE", None, None, str(e),
                 {"traceback": traceback.format_exc()},
             )
 
+    _ATLAS_BT_CACHE_STATS["miss"] += 1
     return None
 
 def _save_backtest_gate(passed, details, fingerprint=None, fingerprint_payload=None):
@@ -6645,7 +6784,6 @@ def report():
     init_sqlite()
     evaluate_open_outcomes()
     universe, top10, dynamic30 = build_universe()
-    _atlas_prefetch_tickers(universe)
     global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
@@ -6680,17 +6818,64 @@ def report():
     market_info = global_market_intelligence()
     results = []
     unavailable = 0
-    for coin in universe:
+
+    # JIT ticker strategy:
+    # - prefetch only the symbols about to be analyzed;
+    # - refresh again for each ~30-coin block, preventing the 45s cache from
+    #   expiring before late-universe symbols are used;
+    # - keep per-symbol fallback for unsupported batch exchanges.
+    active_universe = [c for c in universe if not is_stable(c)]
+    chunk_size = max(10, ATLAS_BATCH_TICKERS_CHUNK)
+
+    def _analyze_one(index_coin):
+        idx, coin = index_coin
         try:
-            if is_stable(coin):
-                continue
             r = analyze_coin(coin, news, weights)
-            if r and not is_stable(str(r.get("coin") or "")):
-                results.append(r)
+            return idx, coin, r, None
         except Exception as e:
-            unavailable += 1
-            append_changelog("ASSET_ERROR", None, None, f"{coin}: {e}", {"traceback": traceback.format_exc()})
-        time.sleep(REQUEST_SLEEP_SECONDS)
+            return idx, coin, None, (e, traceback.format_exc())
+
+    indexed_results = []
+    for chunk_start in range(0, len(active_universe), chunk_size):
+        chunk = active_universe[chunk_start:chunk_start + chunk_size]
+        _ATLAS_BATCH_TICKER_STATS["jit_batches"] += 1
+        _atlas_prefetch_tickers(chunk)
+
+        if ATLAS_ANALYSIS_WORKERS <= 1 or len(chunk) <= 1:
+            chunk_outputs = [
+                _analyze_one((chunk_start + offset, coin))
+                for offset, coin in enumerate(chunk)
+            ]
+        else:
+            chunk_outputs = []
+            with _AtlasThreadPoolExecutor(
+                max_workers=min(ATLAS_ANALYSIS_WORKERS, len(chunk)),
+                thread_name_prefix="atlas-analysis",
+            ) as pool:
+                futures = [
+                    pool.submit(_analyze_one, (chunk_start + offset, coin))
+                    for offset, coin in enumerate(chunk)
+                ]
+                for fut in _atlas_as_completed(futures):
+                    chunk_outputs.append(fut.result())
+
+        # Preserve original universe ordering in output/reporting.
+        chunk_outputs.sort(key=lambda x: x[0])
+        for idx, coin, r, err in chunk_outputs:
+            if err is not None:
+                unavailable += 1
+                exc, tb = err
+                append_changelog(
+                    "ASSET_ERROR", None, None,
+                    f"{coin}: {exc}",
+                    {"traceback": tb},
+                )
+            elif r and not is_stable(str(r.get("coin") or "")):
+                indexed_results.append((idx, r))
+            time.sleep(REQUEST_SLEEP_SECONDS)
+
+    indexed_results.sort(key=lambda x: x[0])
+    results = [r for _, r in indexed_results]
 
     btc_regime = btc_market_regime()
     breadth = market_breadth(results)
@@ -10051,6 +10236,8 @@ def send_optimization_documents(backtest_text):
 # ============================================================
 import time as _atlas_time
 import functools as _atlas_functools
+import threading as _atlas_threading
+from concurrent.futures import ThreadPoolExecutor as _AtlasThreadPoolExecutor, as_completed as _atlas_as_completed
 
 _ATLAS_PERF = {}
 _ATLAS_FUNC_PERF = {}
@@ -10132,6 +10319,7 @@ _ATLAS_PROFILE_GROUPS = {
     ],
     "Market Data / Exchange I/O": [
         "ensure_exchanges", "_atlas_prefetch_tickers", "exchange_ticker", "best_ohlcv",
+        "_atlas_sqlite_ohlcv_get", "_atlas_sqlite_ohlcv_set",
         "tf_snapshot", "price_consensus", "safe_http_get", "http_get",
         "_opt_exchange_last_price", "compare_multi_exchange_prices",
     ],
@@ -10311,8 +10499,18 @@ def build_performance_telemetry_report():
         f"- requests: {_ATLAS_BATCH_TICKER_STATS.get('requests', 0)}",
         f"- symbols cached: {_ATLAS_BATCH_TICKER_STATS.get('symbols', 0)}",
         f"- batch failures: {_ATLAS_BATCH_TICKER_STATS.get('failures', 0)}",
+        f"- JIT ticker batches: {_ATLAS_BATCH_TICKER_STATS.get('jit_batches', 0)}",
+        f"- analysis workers: {ATLAS_ANALYSIS_WORKERS}",
+        f"- exchange max concurrency: {ATLAS_EXCHANGE_MAX_CONCURRENCY}",
         f"- OHLCV provider affinities learned: {len(_ATLAS_OHLCV_PROVIDER_AFFINITY)}",
         f"- OHLCV failed provider/timeframe routes skipped: {len(_ATLAS_OHLCV_PROVIDER_FAILURES)}",
+        "",
+        "Persistent Backtest Cache:",
+        f"- SQLite hits: {_ATLAS_BT_CACHE_STATS.get('sqlite_hit', 0)}",
+        f"- Supabase hits: {_ATLAS_BT_CACHE_STATS.get('supabase_hit', 0)}",
+        f"- misses: {_ATLAS_BT_CACHE_STATS.get('miss', 0)}",
+        f"- fingerprint mismatches: {_ATLAS_BT_CACHE_STATS.get('fingerprint_mismatch', 0)}",
+        f"- Supabase cache rows examined: {_ATLAS_BT_CACHE_STATS.get('supabase_rows_seen', 0)}",
     ]
 
     lines += [
