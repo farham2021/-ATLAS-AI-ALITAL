@@ -6327,6 +6327,9 @@ def report():
             whale_items = fetch_whale_activity()
             figure_items = fetch_influential_figures_news(news.get("items"))
             news["intel_briefing"] = build_intelligence_briefing(macro, fed_macro, whale_items, figure_items)
+            news["whale_items"] = whale_items
+            news["figure_items"] = figure_items
+            news["fed_macro"] = fed_macro
             macro["fed_funds_rate"] = fed_macro.get("fed_funds_rate")
             macro["unemployment_rate"] = fed_macro.get("unemployment_rate")
         except Exception as e:
@@ -8340,57 +8343,35 @@ def _write_analysis_csv(rows):
 
 
 def generate_three_analysis_documents(results, top10, dynamic30):
-    """Generate the three requested comprehensive analysis CSVs."""
-    personal_set = {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}
-    ordered = _resolve_csv_universe(results, top10, dynamic30)
-
-    by_symbol = {}
-    for r in results or []:
-        sym = str(r.get("coin") or r.get("symbol") or "").upper()
-        if sym:
-            by_symbol[sym] = r
-
-    # MARKET = resolved universe excluding configured personal assets.
-    market_symbols = [
-        str(s).upper() for s in ordered
-        if str(s).upper() not in personal_set and str(s).upper() in by_symbol
-    ]
-
-    # PERSONAL = configured portfolio assets.
-    personal_symbols = [
-        str(s).upper() for s in ordered
-        if str(s).upper() in personal_set and str(s).upper() in by_symbol
-    ]
-
-    # INTELLIGENCE = existing intelligence ranking, then any missed symbols.
+    """Deep CSV analysis is intentionally restricted to Top10 + Personal."""
+    personal_order = [str(x).upper() for x in ATLAS_PERSONAL_ASSETS]
+    top_order = [str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)]
+    by_symbol = {
+        str(r.get("coin") or r.get("symbol") or "").upper(): r
+        for r in (results or []) if (r.get("coin") or r.get("symbol"))
+    }
+    top_symbols = [x for x in top_order if x in by_symbol]
+    personal_symbols = [x for x in personal_order if x in by_symbol]
     intel_symbols = []
-    for r in _intel_rank(results, False):
-        sym = str(r.get("coin") or r.get("symbol") or "").upper()
-        if sym and sym in by_symbol and sym not in intel_symbols:
-            intel_symbols.append(sym)
-    for s in ordered:
-        su = str(s).upper()
-        if su in by_symbol and su not in intel_symbols:
-            intel_symbols.append(su)
-
-    def make_rows(symbols, title):
-        return [
-            _analysis_detail_row(by_symbol[s], title)
-            for s in symbols if s in by_symbol
-        ]
-
+    for x in top_symbols + personal_symbols:
+        if x not in intel_symbols:
+            intel_symbols.append(x)
+    intel_symbols.sort(
+        key=lambda x: (
+            _i_num(by_symbol[x].get("decision_support_score"), 0),
+            _i_num(by_symbol[x].get("opportunity_score"), 0),
+            _i_num(by_symbol[x].get("signal_score"), 0),
+        ), reverse=True
+    )
+    def rows(symbols, title):
+        return [_analysis_detail_row(by_symbol[x], title) for x in symbols if x in by_symbol]
     return {
-        "market_4h": _write_analysis_csv(
-            make_rows(market_symbols, "ATLAS AI MARKET 4H")
-        ),
-        "personal_4h": _write_analysis_csv(
-            make_rows(personal_symbols, "ATLAS AI PERSONAL PORTFOLIO 4H")
-        ),
+        "market_4h": _write_analysis_csv(rows(top_symbols, "ATLAS AI TOP 10 MARKET 4H")),
+        "personal_4h": _write_analysis_csv(rows(personal_symbols, "ATLAS AI PERSONAL PORTFOLIO 4H")),
         "market_intelligence_4h": _write_analysis_csv(
-            make_rows(intel_symbols, "ATLAS AI MARKET INTELLIGENCE 4H")
+            rows(intel_symbols, "ATLAS AI TOP10 + PERSONAL INTELLIGENCE 4H")
         ),
     }
-
 
 def send_three_analysis_documents(results, top10, dynamic30):
     """Send exactly three comprehensive CSV documents to Telegram."""
@@ -8434,6 +8415,267 @@ def send_three_analysis_documents(results, top10, dynamic30):
                     {"file": key, "traceback": traceback.format_exc()}
                 )
     return sent, errors
+
+
+
+# ============================================================
+# ATLAS v11.5 — ALL-IN-ONE TRADING INTELLIGENCE
+# ============================================================
+ATLAS_SIGNAL_MENTIONS = os.environ.get("ATLAS_SIGNAL_MENTIONS", "").strip()
+ATLAS_NOTIFICATION_MIN_SCORE = float(os.environ.get("ATLAS_NOTIFICATION_MIN_SCORE", "68"))
+
+def _aio_num(v, default=0.0):
+    try: return float(v)
+    except (TypeError, ValueError): return default
+
+def _aio_symbol(r):
+    return str(r.get("coin") or r.get("symbol") or "").upper()
+
+def _aio_selected_results(results, top10):
+    wanted = []
+    for x in list(top10 or ATLAS_PRIORITY_TOP10) + list(ATLAS_PERSONAL_ASSETS):
+        x = str(x).upper()
+        if x and x not in wanted: wanted.append(x)
+    by = {_aio_symbol(r): r for r in (results or []) if _aio_symbol(r)}
+    return [by[x] for x in wanted if x in by]
+
+def _aio_whale_bias(items):
+    score, rows = 0, []
+    for w in items or []:
+        sym = str(w.get("symbol") or "").upper()
+        if sym not in ("BTC","ETH"): continue
+        rows.append(w)
+        frm, to = str(w.get("from_type") or "").lower(), str(w.get("to_type") or "").lower()
+        if "exchange" in to and "exchange" not in frm: score -= 1
+        elif "exchange" in frm and "exchange" not in to: score += 1
+    return ("ACCUMULATION_LEAN" if score >= 2 else
+            "DISTRIBUTION_RISK" if score <= -2 else "NEUTRAL"), score, rows
+
+def build_market_context_txt(macro, news, results, btc_regime=None):
+    macro, news = macro or {}, news or {}
+    label, wscore, whales = _aio_whale_bias(news.get("whale_items") or [])
+    btc = next((r for r in results or [] if _aio_symbol(r)=="BTC"), {})
+    eth = next((r for r in results or [] if _aio_symbol(r)=="ETH"), {})
+    lines = [
+        "ATLAS AI — MARKET CONTEXT 4H", "="*60,
+        f"Generated: {shamsi(now_tehran())} {now_tehran().strftime('%H:%M:%S')} Tehran", "",
+        "1) GLOBAL MARKET REGIME",
+        f"BTC regime: {btc_regime or btc.get('regime_trend') or 'UNKNOWN'}",
+        f"News: {news.get('bias','MIXED/LIMITED')} | Impact: {news.get('impact','NORMAL')}",
+        f"Fed Funds: {macro.get('fed_funds_rate','N/A')} | US Unemployment: {macro.get('unemployment_rate','N/A')}",
+        "", "2) EFFECTIVE NEWS / MACRO"
+    ]
+    items = news.get("items") or []
+    lines += [f"- {x.get('title','')} [{x.get('source','unknown')}]" for x in items[:12]] or ["- No verified news available."]
+    lines += ["", "3) BTC / ETH WHALE INTELLIGENCE", f"Whale context: {label} ({wscore:+d})"]
+    if whales:
+        for w in whales[:10]:
+            lines.append(
+                f"- {w.get('symbol','?')} ${_aio_num(w.get('amount_usd')):,.0f} | "
+                f"{w.get('from_type','unknown')} -> {w.get('to_type','unknown')} | "
+                f"{w.get('from_owner','') or '?'} -> {w.get('to_owner','') or '?'}"
+            )
+    else:
+        lines.append("- No BTC/ETH large-transfer evidence available from configured sources.")
+    lines += ["", "4) DERIVATIVES PRESSURE"]
+    for name, r in (("BTC",btc),("ETH",eth)):
+        lines.append(
+            f"- {name}: OI={r.get('coinglass_open_interest','N/A')} | "
+            f"Funding={r.get('coinglass_funding_rate','N/A')} | "
+            f"Derivatives={r.get('regime_derivatives','N/A')} | Liquidity={r.get('liquidity','N/A')}"
+        )
+    pos = (1 if news.get("bias")=="POSITIVE" else 0) + (1 if label=="ACCUMULATION_LEAN" else 0)
+    neg = (1 if news.get("bias")=="NEGATIVE" else 0) + (1 if label=="DISTRIBUTION_RISK" else 0)
+    b = str(btc.get("intel_bias") or "").upper()
+    pos += 1 if b=="LONG" else 0
+    neg += 1 if b=="SHORT" else 0
+    context = ("BULLISH" if pos-neg>=2 else "CAUTIOUS BULLISH" if pos>neg else
+               "BEARISH" if neg-pos>=2 else "CAUTIOUS BEARISH" if neg>pos else "NEUTRAL")
+    lines += ["", "5) MARKET INTERPRETATION", f"Market Context: {context}",
+              "Whale/news evidence is contextual; it never acts as a standalone trade command."]
+    briefing = (news.get("intel_briefing") or {}).get("text")
+    if briefing: lines += ["", "6) EXISTING ATLAS INTELLIGENCE BRIEFING", briefing]
+    return "\n".join(lines)
+
+def _aio_trigger(r):
+    t = r.get("intel_trigger") or {}
+    d = str(r.get("direction") or "").upper()
+    if d=="LONG" and t.get("long") is not None:
+        return f"Confirm above {fmt(t.get('long'))} with volume/structure confirmation"
+    if d=="SHORT" and t.get("short") is not None:
+        return f"Confirm below {fmt(t.get('short'))} with volume/structure confirmation"
+    return "Confirmed trigger + acceptable RR + evidence alignment"
+
+def _aio_fuse(r, news=None):
+    d = str(r.get("direction") or "").upper()
+    tech = _aio_num(r.get("signal_score"),50) >= 60
+    opp = _aio_num(r.get("opportunity_score"),50) >= 60
+    reg = str(r.get("regime_trend") or "").upper()
+    der = str(r.get("regime_derivatives") or "").upper()
+    nb = str((news or {}).get("bias") or "MIXED/LIMITED").upper()
+    if d=="LONG":
+        votes=[("Technical",tech),("Opportunity",opp),("Regime",reg in ("UPTREND","BULLISH","UP")),
+               ("Derivatives",der not in ("LONG_CROWDED","BEARISH")),("News",nb!="NEGATIVE")]
+    elif d=="SHORT":
+        votes=[("Technical",tech),("Opportunity",opp),("Regime",reg in ("DOWNTREND","BEARISH","DOWN")),
+               ("Derivatives",der not in ("SHORT_CROWDED","BULLISH")),("News",nb!="POSITIVE")]
+    else:
+        votes=[("Technical",False),("Opportunity",opp),("Regime",False),("Derivatives",True),("News",True)]
+    votes += [("RiskGeometry",_aio_num(r.get("rr"),0)>=1.5),
+              ("DataQuality",_aio_num(r.get("data_quality"),0)>=60),
+              ("BacktestGate",bool(_LAST_BACKTEST_OK))]
+    agree=sum(1 for _,ok in votes if ok)
+    r["evidence_agreement_count"]=agree
+    r["evidence_total_count"]=len(votes)
+    r["evidence_agreement"]=f"{agree}/{len(votes)}"
+    r["evidence_details"]={k:bool(v) for k,v in votes}
+    r["conviction_score"]=round(agree/len(votes)*100,1)
+    return r
+
+def apply_evidence_fusion(results, news=None):
+    return [_aio_fuse(r, news) for r in (results or [])]
+
+def build_deep_analysis_txt(results, top10):
+    lines=["ATLAS AI — TOP10 + PERSONAL DEEP ANALYSIS 4H","="*64,
+           "Scope: Top10 + Personal Portfolio only",""]
+    for r in _aio_selected_results(results, top10):
+        lines += [
+            f"[{_aio_symbol(r)}]",
+            f"Price: {fmt(r.get('price'))}",
+            f"Decision: {r.get('intel_decision') or r.get('decision_state') or r.get('action') or 'WAIT'}",
+            f"Direction: {r.get('direction','NEUTRAL')} | Setup: {r.get('setup_type','NO SETUP')}",
+            f"4H/1D/1W: {r.get('h4_trend',r.get('trend_4h','?'))} / {r.get('d1_trend',r.get('trend_1d','?'))} / {r.get('w1_trend',r.get('trend_1w','?'))}",
+            f"Signal: {_aio_num(r.get('signal_score')):.0f}/100 | Opportunity: {_aio_num(r.get('opportunity_score')):.0f}/100 | Conviction: {_aio_num(r.get('conviction_score')):.0f}/100 | Evidence: {r.get('evidence_agreement','N/A')}",
+            f"RSI: {r.get('rsi','N/A')} | MACD: {r.get('macd','N/A')} | VolumeRatio: {r.get('volume_ratio','N/A')}",
+            f"Regime: {r.get('regime_trend','N/A')} | Volatility: {r.get('regime_volatility','N/A')} | Derivatives: {r.get('regime_derivatives','N/A')}",
+            f"Entry: {fmt(r.get('entry'))} | SL: {fmt(r.get('sl'))} | TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))} | TP3: {fmt(r.get('tp3'))} | TP4: {fmt(r.get('tp4'))} | RR: {r.get('rr','N/A')}",
+            f"Interpretation: {r.get('intel_reason') or r.get('analytical_reason') or r.get('reason') or 'N/A'}",
+            f"Decision-change condition: {_aio_trigger(r)}",""
+        ]
+    return "\n".join(lines)
+
+def build_why_not_trade_txt(results, top10):
+    lines=["ATLAS AI — WHY NOT TRADE?","="*60,"Scope: Top10 + Personal Portfolio only",""]
+    for r in _aio_selected_results(results, top10):
+        raw = why_not_trade(r)
+        reasons = [raw] if isinstance(raw,str) and raw else list(raw or [])
+        lines += [f"[{_aio_symbol(r)}]",
+                  f"Decision: {r.get('intel_decision') or r.get('decision_state') or 'WAIT'}",
+                  f"Evidence Agreement: {r.get('evidence_agreement','N/A')}",
+                  "Why Not Trade:"]
+        if reasons:
+            lines += [f"- {translate_reason_fa(str(x))}" for x in reasons[:8]]
+        elif r.get("executable"):
+            lines.append("- Current setup is executable; no blocking reason.")
+        else:
+            lines.append("- Combined evidence is below the execution threshold.")
+        lines += ["What Changes The Decision:",f"- {_aio_trigger(r)}",""]
+    return "\n".join(lines)
+
+def _aio_csv(rows, cols):
+    import csv, io
+    out=io.StringIO(newline="")
+    w=csv.DictWriter(out,fieldnames=cols,lineterminator="\n",extrasaction="ignore")
+    w.writeheader()
+    for x in rows: w.writerow(x)
+    return out.getvalue()
+
+def generate_best_watch_csv(results, top10):
+    rows=[]
+    for r in _aio_selected_results(results, top10):
+        if r.get("executable"): continue
+        score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")))
+        if score<55: continue
+        rows.append({"Rank":0,"Symbol":_aio_symbol(r),"Direction":r.get("direction","NEUTRAL"),
+            "Decision":r.get("intel_decision") or r.get("decision_state") or "WATCH",
+            "Opportunity":r.get("opportunity_score"),"DecisionSupport":r.get("decision_support_score"),
+            "Conviction":r.get("conviction_score"),"EvidenceAgreement":r.get("evidence_agreement"),
+            "Trigger":_aio_trigger(r),"RR":r.get("rr"),"Regime":r.get("regime_trend"),
+            "DataQuality":r.get("data_quality"),"WhyWatch":r.get("intel_reason") or r.get("gate_reason") or ""})
+    rows.sort(key=lambda x:(_aio_num(x["DecisionSupport"]),_aio_num(x["Opportunity"])),reverse=True)
+    for i,x in enumerate(rows,1): x["Rank"]=i
+    cols=["Rank","Symbol","Direction","Decision","Opportunity","DecisionSupport","Conviction",
+          "EvidenceAgreement","Trigger","RR","Regime","DataQuality","WhyWatch"]
+    return _aio_csv(rows,cols)
+
+def generate_opportunity_ranking_csv(results):
+    rows=[]
+    for r in results or []:
+        rows.append({"Rank":0,"Symbol":_aio_symbol(r),"Direction":r.get("direction","NEUTRAL"),
+            "Decision":r.get("intel_decision") or r.get("decision_state") or "WAIT",
+            "Opportunity":r.get("opportunity_score"),"SignalScore":r.get("signal_score"),
+            "DecisionSupport":r.get("decision_support_score"),"Conviction":r.get("conviction_score"),
+            "EvidenceAgreement":r.get("evidence_agreement"),"RR":r.get("rr"),
+            "Regime":r.get("regime_trend"),"Derivatives":r.get("regime_derivatives"),
+            "DataQuality":r.get("data_quality"),"Executable":bool(r.get("executable"))})
+    rows.sort(key=lambda x:(_aio_num(x["DecisionSupport"]),_aio_num(x["Opportunity"]),_aio_num(x["SignalScore"])),reverse=True)
+    for i,x in enumerate(rows,1): x["Rank"]=i
+    cols=["Rank","Symbol","Direction","Decision","Opportunity","SignalScore","DecisionSupport",
+          "Conviction","EvidenceAgreement","RR","Regime","Derivatives","DataQuality","Executable"]
+    return _aio_csv(rows,cols)
+
+def send_all_in_one_documents(results, top10, macro, news, btc_regime):
+    dt=now_tehran(); tag=shamsi(dt).replace("/","")+"_"+dt.strftime("%H%M%S")
+    docs=[
+      (f"01_ATLAS_MARKET_CONTEXT_{tag}.txt",build_market_context_txt(macro,news,results,btc_regime),"🌍 ATLAS | Market Context"),
+      (f"02_ATLAS_TOP10_PERSONAL_DEEP_ANALYSIS_{tag}.txt",build_deep_analysis_txt(results,top10),"🧠 ATLAS | Top10 + Personal Deep Analysis"),
+      (f"03_ATLAS_WHY_NOT_TRADE_{tag}.txt",build_why_not_trade_txt(results,top10),"⛔ ATLAS | Why Not Trade"),
+      (f"04_ATLAS_BEST_WATCH_{tag}.csv",generate_best_watch_csv(results,top10),"👀 ATLAS | Best Watch"),
+      (f"05_ATLAS_OPPORTUNITY_RANKING_{tag}.csv",generate_opportunity_ranking_csv(results),"🏆 ATLAS | Opportunity Ranking")]
+    destinations=[]
+    for c in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID):
+        if c and c not in destinations: destinations.append(c)
+    sent=0; errors=[]
+    for fn,content,cap in docs:
+        if not content.strip(): continue
+        for c in destinations:
+            try: _telegram_send_document(c,content,fn,cap); sent+=1
+            except Exception as e:
+                errors.append(f"AIO_DOC[{fn}] {c}: {e}")
+                append_changelog("AIO_DOCUMENT",None,None,str(e))
+    return sent,errors
+
+def _aio_notification_db():
+    conn=sqlite3.connect(SQLITE_PATH)
+    conn.execute("""create table if not exists signal_notifications(
+        symbol text primary key,state text not null,direction text,trend text,notified_at text not null)""")
+    conn.commit(); return conn
+
+def send_signal_change_notifications(results, top10):
+    """Notify meaningful state/trend changes; first observation only seeds state."""
+    conn=_aio_notification_db(); sent=0; errors=[]; now=now_tehran()
+    try:
+        for r in _aio_selected_results(results,top10):
+            sym=_aio_symbol(r)
+            decision=str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
+            direction=str(r.get("direction") or "NEUTRAL").upper()
+            trend=str(r.get("regime_trend") or "UNKNOWN").upper()
+            old=conn.execute("select state,direction,trend from signal_notifications where symbol=?",(sym,)).fetchone()
+            if not old:
+                conn.execute("insert or replace into signal_notifications values(?,?,?,?,?)",
+                             (sym,decision,direction,trend,now.isoformat())); continue
+            pd,pdir,ptrend=old
+            if (pd,pdir,ptrend)==(decision,direction,trend): continue
+            important={"BUY","SELL","EXIT","BUY CONFIRMATION","SELL CONFIRMATION","WATCH LONG","WATCH SHORT"}
+            meaningful=(decision in important or pd in important or
+                        (ptrend!=trend and trend not in ("UNKNOWN","RANGE","NEUTRAL")))
+            score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")))
+            if meaningful and score>=ATLAS_NOTIFICATION_MIN_SCORE:
+                msg=(f"🚨 ATLAS SIGNAL CHANGE\\n\\n{sym}\\n{pd} → {decision}\\n"
+                     f"Direction: {pdir} → {direction}\\nTrend: {ptrend} → {trend}\\n\\n"
+                     f"Entry: {fmt(r.get('entry'))}\\nSL: {fmt(r.get('sl'))}\\n"
+                     f"TP1: {fmt(r.get('tp1'))} | TP2: {fmt(r.get('tp2'))}\\n"
+                     f"RR: {r.get('rr','N/A')}\\nDecision Support: {r.get('decision_support_score','N/A')}\\n"
+                     f"Evidence: {r.get('evidence_agreement','N/A')}\\nTrigger: {_aio_trigger(r)}")
+                if ATLAS_SIGNAL_MENTIONS: msg += "\\n\\n"+ATLAS_SIGNAL_MENTIONS
+                for c in dict.fromkeys([x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x]):
+                    try: telegram_send_one(c,msg); sent+=1
+                    except Exception as e: errors.append(f"SIGNAL_NOTIFY[{sym}] {c}: {e}")
+            conn.execute("update signal_notifications set state=?,direction=?,trend=?,notified_at=? where symbol=?",
+                         (decision,direction,trend,now.isoformat(),sym))
+        conn.commit()
+    finally: conn.close()
+    return sent,errors
 
 
 # ============================================================
@@ -8515,6 +8757,7 @@ def main():
             btc_regime = btc_market_regime()
             breadth = market_breadth(results)
             
+            results = apply_evidence_fusion(results, news)
             print(f"📊 Building reports...")
             
             # ========================================================
@@ -8538,6 +8781,18 @@ def main():
                 f"📎 Analysis documents sent: {analysis_doc_sent}, "
                 f"errors={len(analysis_doc_errors)}"
             )
+
+            aio_sent, aio_errors = send_all_in_one_documents(
+                results, top10, macro, news, btc_regime
+            )
+            total_sent += aio_sent
+            all_errors.extend(aio_errors)
+            print(f"🧠 All-in-One documents sent: {aio_sent}, errors={len(aio_errors)}")
+
+            notify_sent, notify_errors = send_signal_change_notifications(results, top10)
+            total_sent += notify_sent
+            all_errors.extend(notify_errors)
+            print(f"🚨 Signal-change notifications sent: {notify_sent}, errors={len(notify_errors)}")
 
             # Keep a small compatibility marker for existing run metadata.
             outputs = []
