@@ -1018,6 +1018,33 @@ class SupabaseStore:
                     pass
             return False
 
+    def insert_many(self, table, rows):
+        """Batch insert using one Supabase REST request; preserves Supabase as primary."""
+        rows = list(rows or [])
+        if not rows or not self.enabled:
+            return False
+        try:
+            url = f"{SUPABASE_URL}/rest/v1/{table}"
+            req = urllib.request.Request(
+                url,
+                data=safe_json(rows).encode(),
+                headers=self.headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15):
+                return True
+        except Exception as e:
+            if table != "atlas_changelog":
+                try:
+                    with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
+                        fh.write(
+                            f"{now_utc().isoformat()} | SUPABASE | batch insert failed: "
+                            f"{table}: {e}\n"
+                        )
+                except Exception:
+                    pass
+            return False
+
     def update(self, table, match, row):
         if not self.enabled:
             return False
@@ -1343,6 +1370,54 @@ def init_exchanges():
 EX = {}
 MARKETS = {}
 
+
+# ============================================================
+# ATLAS DATA EFFICIENCY LAYER
+# In-run reuse only. It does not alter trading thresholds/decisions.
+# ============================================================
+ATLAS_TICKER_CACHE_TTL = float(os.environ.get("ATLAS_TICKER_CACHE_TTL", "45"))
+ATLAS_PRICE_CONSENSUS_CACHE_TTL = float(os.environ.get("ATLAS_PRICE_CONSENSUS_CACHE_TTL", "45"))
+ATLAS_GECKO_CACHE_TTL = float(os.environ.get("ATLAS_GECKO_CACHE_TTL", "300"))
+ATLAS_USDT_TOMAN_CACHE_TTL = float(os.environ.get("ATLAS_USDT_TOMAN_CACHE_TTL", "300"))
+
+_ATLAS_DATA_CACHE = {
+    "ticker": {},
+    "ohlcv": {},
+    "price_consensus": {},
+    "gecko_top": {},
+    "usdt_toman": {},
+}
+_ATLAS_CACHE_STATS = {}
+
+def _atlas_cache_reset():
+    for bucket in _ATLAS_DATA_CACHE.values():
+        bucket.clear()
+    _ATLAS_CACHE_STATS.clear()
+
+def _atlas_cache_stat(name, hit):
+    row = _ATLAS_CACHE_STATS.setdefault(name, {"hit": 0, "miss": 0})
+    row["hit" if hit else "miss"] += 1
+
+def _atlas_ttl_get(bucket, key, ttl):
+    item = _ATLAS_DATA_CACHE[bucket].get(key)
+    if not item:
+        _atlas_cache_stat(bucket, False)
+        return None
+    ts, value = item
+    if time.monotonic() - ts > ttl:
+        _ATLAS_DATA_CACHE[bucket].pop(key, None)
+        _atlas_cache_stat(bucket, False)
+        return None
+    _atlas_cache_stat(bucket, True)
+    return value
+
+def _atlas_ttl_set(bucket, key, value):
+    _ATLAS_DATA_CACHE[bucket][key] = (time.monotonic(), value)
+
+def _atlas_copy_rows(rows):
+    # Prevent downstream accidental mutation of the shared OHLCV cache.
+    return [list(x) if isinstance(x, (list, tuple)) else x for x in (rows or [])]
+
 def ensure_exchanges(force=False):
     if EX and MARKETS and not force:
         return True
@@ -1378,6 +1453,11 @@ def symbol_for(eid, coin):
     return None
 
 def exchange_ticker(eid, coin):
+    key = (str(eid).lower(), str(coin).upper())
+    cached = _atlas_ttl_get("ticker", key, ATLAS_TICKER_CACHE_TTL)
+    if cached is not None:
+        return dict(cached)
+
     ex = EX.get(eid)
     if ex is None:
         raise RuntimeError(f"{eid}: exchange unavailable")
@@ -1385,12 +1465,14 @@ def exchange_ticker(eid, coin):
     if not sym:
         raise RuntimeError(f"{eid}: pair unavailable")
     t = ex.fetch_ticker(sym)
-    return {
+    result = {
         "source": eid.upper(),
         "price": f(t.get("last")),
         "change": f(t.get("percentage")),
         "quoteVolume": f(t.get("quoteVolume")),
     }
+    _atlas_ttl_set("ticker", key, dict(result))
+    return result
 
 def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
     ex = EX.get(eid)
@@ -1473,21 +1555,40 @@ def candle_event(coin, timeframe, rows):
 
 def best_ohlcv(coin, timeframe, limit=250):
     ensure_exchanges()
+    coin_key = str(coin).upper()
+    tf_key = str(timeframe)
+    cache_key = (coin_key, tf_key)
+
+    cached = _ATLAS_DATA_CACHE["ohlcv"].get(cache_key)
+    if cached is not None:
+        cached_limit = int(cached["limit"])
+        rows = cached["rows"]
+        if cached_limit >= int(limit) and len(rows) >= min(60, int(limit)):
+            _atlas_cache_stat("ohlcv", True)
+            # Preserve original best_ohlcv semantics: caller receives at most
+            # the requested recent candles and the original provider.
+            return _atlas_copy_rows(rows[-int(limit):]), cached["engine"]
+
+    _atlas_cache_stat("ohlcv", False)
     errors = []
-    # Prefer currently healthy providers; unavailable providers never get
-    # retried in the same pass because that only adds latency/noise.
     for eid in EXCHANGE_IDS:
         if eid not in EX:
             continue
         try:
             rows = exchange_ohlcv(eid, coin, timeframe, limit)
             if rows:
-                return rows, eid.upper()
+                stored_rows = _atlas_copy_rows(rows)
+                previous = _ATLAS_DATA_CACHE["ohlcv"].get(cache_key)
+                if previous is None or int(limit) >= int(previous["limit"]):
+                    _ATLAS_DATA_CACHE["ohlcv"][cache_key] = {
+                        "limit": int(limit),
+                        "rows": stored_rows,
+                        "engine": eid.upper(),
+                    }
+                return _atlas_copy_rows(stored_rows), eid.upper()
         except Exception as e:
             kind = _classify_exchange_error(e)
             errors.append(f"{eid}:{kind}")
-            # A provider may become unhealthy after initialization. Record it
-            # but keep searching other venues.
             _record_exchange_status(
                 eid, kind, e, EXCHANGE_CCXT_IDS.get(eid), len(MARKETS.get(eid, {}))
             )
@@ -1501,6 +1602,11 @@ def best_ohlcv(coin, timeframe, limit=250):
 # ============================================================
 
 def gecko_top(limit=40):
+    cache_key = int(limit)
+    cached = _atlas_ttl_get("gecko_top", cache_key, ATLAS_GECKO_CACHE_TTL)
+    if cached is not None:
+        return [dict(x) for x in cached]
+
     headers = {}
     if COINGECKO_API_KEY:
         headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
@@ -1522,8 +1628,11 @@ def gecko_top(limit=40):
                 "name": x.get("name"),
                 "rank": x.get("market_cap_rank"),
                 "market_cap": f(x.get("market_cap")),
+                "price": f(x.get("current_price")),
             })
+    _atlas_ttl_set("gecko_top", cache_key, [dict(x) for x in result])
     return result
+
 
 def binance_top(limit=40):
     ensure_exchanges()
@@ -2455,6 +2564,14 @@ def market_liquidity_index(results):
 # ============================================================
 
 def price_consensus(coin):
+    cache_key = str(coin).upper()
+    cached = _atlas_ttl_get(
+        "price_consensus", cache_key, ATLAS_PRICE_CONSENSUS_CACHE_TTL
+    )
+    if cached is not None:
+        med, sources, quality, sp, errors = cached
+        return med, [dict(x) for x in sources], quality, sp, list(errors)
+
     vals = []
     sources = []
     errors = []
@@ -2467,26 +2584,21 @@ def price_consensus(coin):
         except Exception as e:
             errors.append(str(e))
     try:
-        headers = {}
-        if COINGECKO_API_KEY:
-            headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
         rows = gecko_top(50)
         lookup_symbol = data_symbol(coin)
         x = next(
             (z for z in rows if (z.get("symbol") or "").upper() == lookup_symbol),
             None,
         )
-        gecko_id = (x or {}).get("id")
-        if gecko_id:
-            url = "https://api.coingecko.com/api/v3/simple/price?" + urllib.parse.urlencode({
-                "ids": gecko_id,
-                "vs_currencies": "usd",
-            })
-            d = safe_http_get(url, headers=headers, default={})
-            p = f((d.get(gecko_id) or {}).get("usd")) if isinstance(d, dict) else None
+        if x:
+            p = f(x.get("price"))
             if p is not None:
                 vals.append(p)
-                sources.append({"source": "CoinGecko", "price": p, "id": gecko_id})
+                sources.append({
+                    "source": "CoinGecko",
+                    "price": p,
+                    "id": x.get("id"),
+                })
     except Exception:
         pass
     if errors:
@@ -2505,6 +2617,8 @@ def price_consensus(coin):
         else "MEDIUM" if len(vals) >= 3 and sp <= 3
         else "LOW"
     )
+    result = (med, [dict(x) for x in sources], quality, sp, list(errors))
+    _atlas_ttl_set("price_consensus", cache_key, result)
     return med, sources, quality, sp, errors
 
 
@@ -6462,7 +6576,12 @@ def _parse_usdt_toman_page(url, html):
 
 
 def fetch_usdt_toman_public():
-    """Read USDT/Toman from reputable Iranian exchange web pages, without API keys."""
+    """Read USDT/Toman once per short TTL and reuse it across the same run."""
+    cached = _atlas_ttl_get(
+        "usdt_toman", "public", ATLAS_USDT_TOMAN_CACHE_TTL
+    )
+    if cached is not None:
+        return cached
     candidates = []
     for url in PUBLIC_USDT_PAGES:
         try:
@@ -6474,7 +6593,9 @@ def fetch_usdt_toman_public():
             append_changelog("USDT_PUBLIC_SOURCE", None, None, f"{url}: {e}")
     if not candidates:
         return None
-    return round(median([x[0] for x in candidates]), 0)
+    result = round(median([x[0] for x in candidates]), 0)
+    _atlas_ttl_set("usdt_toman", "public", result)
+    return result
 
 def fetch_snapshot_results():
     """Lightweight 3H snapshot path: tickers only, no 4H technical analysis."""
@@ -6600,44 +6721,51 @@ def _save_snapshot_prices(results, captured_at):
 
 
 def _save_snapshot_history(results, captured_at):
-    """ذخیره تاریخچه‌ی append-only قیمت‌ها — برای محاسبه‌ی دقیق تغییرات ۴ساعته/۲۴ساعته/۷روزه.
-
-    برخلاف snapshot_prices (که فقط آخرین قیمت را با upsert نگه می‌دارد و بنابراین
-    امکان مقایسه با "دقیقاً ۴ ساعت قبل" را از بین می‌برد)، این جدول هر بار یک ردیف
-    جدید اضافه می‌کند (نه overwrite) تا بشود به هر بازه‌ی زمانی دلخواه رجوع کرد.
-    نیازمند migration زیر روی Supabase:
-
-        create table if not exists snapshot_price_history (
-            id bigserial primary key,
-            symbol text not null,
-            price double precision not null,
-            captured_at timestamptz not null
-        );
-        create index if not exists idx_snapshot_history_symbol_time
-            on snapshot_price_history(symbol, captured_at);
-    """
-    saved_count = 0
+    """Append-only snapshot history with batched Supabase + SQLite writes."""
+    rows_to_save = []
+    sqlite_rows = []
     for r in results or []:
         sym = str(r.get("coin") or "").upper()
         price = f(r.get("price"))
         if not sym or price is None or price <= 0:
             continue
-        row = {"symbol": sym, "price": price, "captured_at": captured_at}
-        if STORE.insert("snapshot_price_history", row):
-            saved_count += 1
+        rows_to_save.append({
+            "symbol": sym,
+            "price": price,
+            "captured_at": captured_at,
+        })
+        sqlite_rows.append((sym, price, captured_at))
+
+    saved_count = 0
+    if rows_to_save:
+        if hasattr(STORE, "insert_many") and STORE.insert_many(
+            "snapshot_price_history", rows_to_save
+        ):
+            saved_count = len(rows_to_save)
+        else:
+            # Compatibility fallback if batch API is unavailable.
+            for row in rows_to_save:
+                if STORE.insert("snapshot_price_history", row):
+                    saved_count += 1
+
+    if sqlite_rows:
         try:
             con = sqlite3.connect(DB_FILE, timeout=10)
             try:
-                con.execute(
+                con.executemany(
                     "insert into snapshot_price_history(symbol,price,captured_at) values(?,?,?)",
-                    (sym, price, captured_at),
+                    sqlite_rows,
                 )
                 con.commit()
             finally:
                 con.close()
         except Exception as e:
-            print(f"⚠️ Snapshot history save error (SQLite): {e}")
-    print(f"📊 Saved {saved_count} rows to snapshot_price_history (Supabase); SQLite mirror always attempted")
+            print(f"⚠️ Snapshot history save error (SQLite batch): {e}")
+
+    print(
+        f"📊 Saved {saved_count} rows to snapshot_price_history (Supabase); "
+        f"SQLite mirror batch attempted for {len(sqlite_rows)} rows"
+    )
 
 
 def _lookup_history_price(symbol, target_dt):
@@ -9610,13 +9738,21 @@ def build_economic_calendar_context(events):
         lines.append(f"- [{risk}] {e.get('event')} | in {h if h is not None else '?'}h" + (f" | {' | '.join(extra)}" if extra else ""))
     return lines
 
-def _opt_exchange_last_price(exchange_id,symbol):
+def _opt_exchange_last_price(exchange_id, symbol):
     try:
-        ex_class=getattr(ccxt,exchange_id)
-        ex=ex_class({"enableRateLimit":True})
-        t=ex.fetch_ticker(f"{symbol}/USDT")
-        last=t.get("last") or t.get("close")
-        return float(last) if last else None
+        # Resolve native CCXT id (e.g. gate) to ATLAS alias (e.g. gateio).
+        alias = None
+        for atlas_name, native_id in EXCHANGE_CCXT_IDS.items():
+            if exchange_id == atlas_name or exchange_id == native_id:
+                if atlas_name in EX:
+                    alias = atlas_name
+                    break
+        if alias is None and exchange_id in EX:
+            alias = exchange_id
+        if alias is None:
+            return None
+        t = exchange_ticker(alias, symbol)
+        return f(t.get("price"))
     except Exception:
         return None
 
@@ -9624,20 +9760,39 @@ def compare_multi_exchange_prices(symbols=None):
     import statistics
     if not ATLAS_MULTI_EXCHANGE_ENABLED:
         return []
-    symbols=list(symbols or ATLAS_MULTI_EXCHANGE_SYMBOLS)
-    exchanges=[x for x in ("binance","okx","kucoin","gate") if hasattr(ccxt,x)]
-    rows=[]
+    ensure_exchanges()
+    symbols = list(symbols or ATLAS_MULTI_EXCHANGE_SYMBOLS)
+
+    preferred_native = ("binance", "okx", "kucoin", "gate")
+    exchanges = []
+    for native in preferred_native:
+        for atlas_name, ccxt_id in EXCHANGE_CCXT_IDS.items():
+            if (native == atlas_name or native == ccxt_id) and atlas_name in EX:
+                if atlas_name not in exchanges:
+                    exchanges.append(atlas_name)
+                break
+
+    rows = []
     for sym in symbols:
-        px={}
-        for exid in exchanges:
-            v=_opt_exchange_last_price(exid,sym)
-            if v is not None: px[exid]=v
-        if len(px)<2: continue
-        vals=list(px.values()); lo=min(vals); hi=max(vals); mid=statistics.mean(vals)
-        spread=((hi-lo)/mid*100.0) if mid else 0.0
-        rows.append({"symbol":sym,"prices":px,"spread_pct":round(spread,4),
-                     "meaningful":spread>=ATLAS_MULTI_EXCHANGE_THRESHOLD_PCT})
+        px = {}
+        for atlas_eid in exchanges:
+            v = _opt_exchange_last_price(atlas_eid, sym)
+            if v is not None:
+                px[atlas_eid] = v
+        if len(px) < 2:
+            continue
+        vals = list(px.values())
+        lo, hi = min(vals), max(vals)
+        mid = statistics.mean(vals)
+        spread = ((hi - lo) / mid * 100.0) if mid else 0.0
+        rows.append({
+            "symbol": sym,
+            "prices": px,
+            "spread_pct": round(spread, 4),
+            "meaningful": spread >= ATLAS_MULTI_EXCHANGE_THRESHOLD_PCT,
+        })
     return rows
+
 
 def build_multi_exchange_context(rows):
     if not rows:
@@ -9912,7 +10067,22 @@ def build_performance_telemetry_report():
     total = _ATLAS_PERF.get("TOTAL_BEFORE_TELEMETRY_SEND")
     lines += [
         "",
-        "5) TOTAL RUNTIME",
+        "5) DATA CACHE EFFICIENCY",
+        "-" * 78,
+        f"{'Cache':26} {'Hits':>10} {'Misses':>10} {'Hit Rate':>12}",
+    ]
+    for cache_name, row in sorted(_ATLAS_CACHE_STATS.items()):
+        hits = int(row.get("hit", 0))
+        misses = int(row.get("miss", 0))
+        total_cache = hits + misses
+        rate = (hits / total_cache * 100.0) if total_cache else 0.0
+        lines.append(
+            f"{cache_name[:26]:26} {hits:>10d} {misses:>10d} {rate:>11.1f}%"
+        )
+
+    lines += [
+        "",
+        "6) TOTAL RUNTIME",
         "-" * 78,
         f"TOTAL BEFORE TELEMETRY SEND: {float(total or 0.0):.2f}s",
     ]
@@ -9921,7 +10091,7 @@ def build_performance_telemetry_report():
         slow_name, slow_row = ranked[0]
         lines += [
             "",
-            "6) AUTOMATIC BOTTLENECK HINT",
+            "7) AUTOMATIC BOTTLENECK HINT",
             "-" * 78,
             f"کندترین تابع تجمعی: {slow_name} ({slow_row['total']:.2f}s / {slow_row['calls']} calls)",
         ]
@@ -9972,6 +10142,7 @@ _atlas_install_full_profiler()
 
 def main():
     _atlas_perf_reset()
+    _atlas_cache_reset()
     try:
         print(f"\n{'='*50}")
         print(f"🚀 {VERSION}")
