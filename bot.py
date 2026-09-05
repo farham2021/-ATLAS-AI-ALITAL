@@ -105,6 +105,10 @@
 # - Supabase-primary cross-run alert dedupe with SQLite fallback.
 # - Telegram advisory alerts; no order execution and no changes to canonical
 #   Signal/Entry/SL/TP, evidence, Decision Engine, Backtest Gate or Snapshot Arrow.
+# PHASE 3.1 CORRECTIVE OPTIMIZATION
+# - Telegram WATCH/STRONG alerts are ranked and batched (10-15 per message).
+# - INFO events are persisted/deduplicated but suppressed from Telegram by default.
+# - Exact in-run OHLCV cache reuse is now reported separately from concurrent-wait reuse.
 # ============================================================
 
 import os
@@ -1907,12 +1911,18 @@ def _atlas_ohlcv_cache_satisfies(coin, timeframe, limit):
         return False
 
 
-def _atlas_ohlcv_cache_read(coin, timeframe, limit):
+def _atlas_ohlcv_cache_read(coin, timeframe, limit, shared_telemetry=True):
     cache_key = (str(coin).upper(), str(timeframe))
     cached = _ATLAS_DATA_CACHE.get("ohlcv", {}).get(cache_key)
     if not cached or not _atlas_ohlcv_cache_satisfies(coin, timeframe, limit):
         return None
     _atlas_cache_stat("ohlcv", True)
+    # Any second consumer of the exact same symbol/timeframe dataset is a true
+    # quality-safe shared reuse. This is telemetry only: rows/provider/math are
+    # unchanged. The separate ohlcv_wait_reuse counter below tells us whether
+    # the reuse happened specifically after waiting on the keyed concurrency lock.
+    if shared_telemetry:
+        _atlas_cache_stat("ohlcv_shared", True)
     rows = cached.get("rows") or []
     return _atlas_copy_rows(rows[-int(limit):]), cached.get("engine")
 
@@ -1931,21 +1941,23 @@ def best_ohlcv(coin, timeframe, limit=250):
     """Quality-safe, per-run shared OHLCV access.
 
     The first consumer for an exact (coin,timeframe) key performs the unchanged
-    provider/cache path. Concurrent consumers of that same key wait, then reuse
-    the exact dataset if it satisfies their requested limit. There is no
-    cross-asset candle sharing and no synthetic timeframe derivation.
+    provider/cache path. Any later consumer reuses that exact stored dataset if
+    it satisfies the requested limit. Concurrent consumers wait on a keyed lock
+    so duplicate in-flight fetches cannot occur. There is no cross-asset sharing,
+    no synthetic timeframe derivation, and no provider/value substitution.
     """
-    cached = _atlas_ohlcv_cache_read(coin, timeframe, limit)
+    cached = _atlas_ohlcv_cache_read(coin, timeframe, limit, shared_telemetry=True)
     if cached is not None:
         return cached
 
     lock = _atlas_ohlcv_key_lock(coin, timeframe)
     with lock:
-        cached = _atlas_ohlcv_cache_read(coin, timeframe, limit)
+        cached = _atlas_ohlcv_cache_read(coin, timeframe, limit, shared_telemetry=True)
         if cached is not None:
-            _atlas_cache_stat("ohlcv_shared", True)
+            _atlas_cache_stat("ohlcv_wait_reuse", True)
             return cached
         _atlas_cache_stat("ohlcv_shared", False)
+        _atlas_cache_stat("ohlcv_wait_reuse", False)
         return _best_ohlcv_impl(coin, timeframe, limit)
 
 
@@ -10696,6 +10708,13 @@ ATLAS_FREE_ALERT_TIMEFRAMES = tuple(
 ATLAS_FREE_ALERT_RSI_OVERSOLD = float(os.environ.get("ATLAS_FREE_ALERT_RSI_OVERSOLD", "30"))
 ATLAS_FREE_ALERT_RSI_OVERBOUGHT = float(os.environ.get("ATLAS_FREE_ALERT_RSI_OVERBOUGHT", "70"))
 ATLAS_FREE_ALERT_MAX_HISTORY = int(os.environ.get("ATLAS_FREE_ALERT_MAX_HISTORY", "5000"))
+ATLAS_FREE_ALERT_BATCH_SIZE = max(10, min(15, int(os.environ.get("ATLAS_FREE_ALERT_BATCH_SIZE", "12"))))
+ATLAS_FREE_ALERT_MAX_MESSAGE_CHARS = max(2500, min(3900, int(os.environ.get("ATLAS_FREE_ALERT_MAX_MESSAGE_CHARS", "3600"))))
+ATLAS_FREE_ALERT_SEND_INFO = os.environ.get("ATLAS_FREE_ALERT_SEND_INFO", "0").strip().lower() in ("1", "true", "yes", "on")
+_ATLAS_FREE_ALERT_STATS = {
+    "detected": 0, "dedup_skipped": 0, "eligible": 0, "info_suppressed": 0,
+    "telegram_batches": 0, "telegram_events": 0, "telegram_errors": 0,
+}
 
 
 def _atlas_free_alert_db():
@@ -10857,16 +10876,27 @@ def build_free_alert_events(results):
 
 
 def _atlas_existing_alert_state():
+    """Return terminal delivery/dedupe state with schema-compatible fallback."""
     state = {}
     if STORE.enabled:
         rows = STORE.select(
             "atlas_free_alert_events",
-            {"select": "alert_key,sent,sent_at", "order": "timestamp.desc", "limit": str(ATLAS_FREE_ALERT_MAX_HISTORY)},
+            {"select": "alert_key,sent,sent_at,telegram_status", "order": "timestamp.desc", "limit": str(ATLAS_FREE_ALERT_MAX_HISTORY)},
         ) or []
+        # Older Phase-3 schema has no telegram_status. SupabaseStore.select()
+        # intentionally returns [] on a PostgREST column error, so retry legacy.
+        if not rows:
+            rows = STORE.select(
+                "atlas_free_alert_events",
+                {"select": "alert_key,sent,sent_at", "order": "timestamp.desc", "limit": str(ATLAS_FREE_ALERT_MAX_HISTORY)},
+            ) or []
         for row in rows:
             key = str(row.get("alert_key") or "")
-            if key:
-                state[key] = {"sent": bool(row.get("sent")), "sent_at": row.get("sent_at")}
+            if not key:
+                continue
+            status = str(row.get("telegram_status") or "").upper()
+            terminal = bool(row.get("sent")) or status in ("SENT", "SUPPRESSED_INFO")
+            state[key] = {"sent": terminal, "sent_at": row.get("sent_at"), "telegram_status": status or None}
         if rows:
             return state, "SUPABASE"
     try:
@@ -10874,14 +10904,14 @@ def _atlas_existing_alert_state():
         rows = conn.execute("select alert_key,sent,sent_at from free_alert_dedupe").fetchall()
         conn.close()
         for key, sent, sent_at in rows:
-            state[str(key)] = {"sent": bool(sent), "sent_at": sent_at}
+            state[str(key)] = {"sent": bool(sent), "sent_at": sent_at, "telegram_status": "SENT" if sent else None}
     except Exception:
         pass
     return state, "SQLITE"
 
 
-def format_free_alert(event):
-    names = {
+def _atlas_alert_event_name(event_type):
+    return {
         "RSI_OVERSOLD_ENTER": "RSI وارد اشباع فروش شد",
         "RSI_OVERSOLD_RECOVERY": "RSI از اشباع فروش برگشت",
         "RSI_OVERBOUGHT_ENTER": "RSI وارد اشباع خرید شد",
@@ -10891,7 +10921,11 @@ def format_free_alert(event):
         "MACD_ZERO_UP": "عبور MACD به بالای خط صفر",
         "MACD_ZERO_DOWN": "عبور MACD به زیر خط صفر",
         "RSI_MACD_CONFIRMATION": "تأیید همزمان RSI + MACD",
-    }
+    }.get(event_type, event_type)
+
+
+def format_free_alert(event):
+    """Legacy single-event formatter retained for compatibility/tests."""
     icon = "🟢" if event.get("direction") == "BULLISH" else "🔴"
     sev_icon = {"STRONG": "🔥", "WATCH": "👀", "INFO": "ℹ️"}.get(event.get("severity"), "ℹ️")
     rsi_txt = "N/A"
@@ -10903,7 +10937,7 @@ def format_free_alert(event):
     return (
         f"🚨 ATLAS FREE ALERT\n\n"
         f"{icon} {event.get('symbol')} | {event.get('timeframe')}\n"
-        f"رویداد: {names.get(event.get('event_type'), event.get('event_type'))}\n"
+        f"رویداد: {_atlas_alert_event_name(event.get('event_type'))}\n"
         f"شدت: {sev_icon} {event.get('severity')}\n\n"
         f"RSI(14): {rsi_txt}\n"
         f"MACD / Signal: {macd_txt}\n"
@@ -10914,66 +10948,183 @@ def format_free_alert(event):
     )
 
 
+def _atlas_alert_sort_key(event):
+    rank = {"STRONG": 0, "WATCH": 1, "INFO": 2}
+    return (
+        rank.get(str(event.get("severity") or "INFO").upper(), 3),
+        -_aio_num(event.get("confidence"), 0),
+        -_aio_num(event.get("mtf_agreement_pct"), 0),
+        str(event.get("symbol") or ""),
+        str(event.get("timeframe") or ""),
+        str(event.get("event_type") or ""),
+    )
+
+
+def _atlas_format_alert_line(event, index):
+    sev = str(event.get("severity") or "INFO").upper()
+    sev_icon = {"STRONG": "🔥", "WATCH": "👀", "INFO": "ℹ️"}.get(sev, "ℹ️")
+    direction = "🟢" if event.get("direction") == "BULLISH" else "🔴"
+    rsi = event.get("rsi_value")
+    rsi_txt = f"RSI {float(rsi):.1f}" if rsi is not None else "RSI N/A"
+    return (
+        f"{index}. {sev_icon}{direction} {event.get('symbol')} | {event.get('timeframe')}\n"
+        f"   {_atlas_alert_event_name(event.get('event_type'))}\n"
+        f"   {rsi_txt} | MTF {_aio_num(event.get('mtf_agreement_pct')):.0f}% | "
+        f"Conf {_aio_num(event.get('confidence')):.0f}% | {event.get('decision_state') or 'N/A'}"
+    )
+
+
+def _atlas_build_alert_batches(events):
+    """Build deterministic Telegram batches: max 10-15 events and < Telegram text limit."""
+    ordered = sorted(list(events or []), key=_atlas_alert_sort_key)
+    batches, current = [], []
+    base_header = "🚨 ATLAS FREE ALERTS\nاولویت: STRONG → WATCH\n"
+    for event in ordered:
+        candidate = current + [event]
+        body = "\n\n".join(_atlas_format_alert_line(e, i + 1) for i, e in enumerate(candidate))
+        candidate_text = base_header + "\n" + body + "\n\n⚠️ هشدار تکنیکال است؛ دستور معامله خودکار نیست."
+        if current and (len(candidate) > ATLAS_FREE_ALERT_BATCH_SIZE or len(candidate_text) > ATLAS_FREE_ALERT_MAX_MESSAGE_CHARS):
+            batches.append(current)
+            current = [event]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _atlas_format_alert_batch(batch, batch_no, batch_total, info_suppressed=0):
+    strong_n = sum(1 for e in batch if str(e.get("severity") or "").upper() == "STRONG")
+    watch_n = sum(1 for e in batch if str(e.get("severity") or "").upper() == "WATCH")
+    body = "\n\n".join(_atlas_format_alert_line(e, i + 1) for i, e in enumerate(batch))
+    extra = f"\nℹ️ INFO ثبت‌شده و ارسال‌نشده: {info_suppressed}" if info_suppressed and batch_no == 1 else ""
+    return (
+        f"🚨 ATLAS FREE ALERTS | بسته {batch_no}/{batch_total}\n"
+        f"🔥 STRONG: {strong_n} | 👀 WATCH: {watch_n}{extra}\n\n"
+        f"{body}\n\n"
+        f"⚠️ هشدار تکنیکال است؛ دستور معامله خودکار نیست."
+    )
+
+
+def _atlas_alert_db_rows(rows, legacy=False):
+    """Return Supabase-safe rows; legacy=True strips Phase-3.1 additive columns."""
+    if not legacy:
+        return rows
+    allowed = {
+        "alert_key", "timestamp", "symbol", "timeframe", "event_type", "direction", "severity", "candle_ts",
+        "rsi_prev", "rsi_value", "macd_prev_line", "macd_prev_signal", "macd_line", "macd_signal", "macd_hist",
+        "mtf_agreement_pct", "mtf_confirmation", "mtf_trigger_state", "decision_state", "confidence", "model_version",
+        "sent", "sent_at",
+    }
+    return [{k: v for k, v in row.items() if k in allowed} for row in rows]
+
+
+def _atlas_persist_alert_rows(rows):
+    """Supabase-primary write with automatic compatibility fallback to Phase-3 schema."""
+    rows = list(rows or [])
+    if not rows:
+        return True
+    if STORE.enabled:
+        if STORE.upsert_many("atlas_free_alert_events", rows, "alert_key"):
+            return True
+        return STORE.upsert_many("atlas_free_alert_events", _atlas_alert_db_rows(rows, legacy=True), "alert_key")
+    try:
+        conn = _atlas_free_alert_db()
+        for e in rows:
+            # SQLite uses sent as terminal/dedup state. INFO suppression is terminal too.
+            terminal = bool(e.get("sent")) or str(e.get("telegram_status") or "").upper() == "SUPPRESSED_INFO"
+            conn.execute(
+                "insert into free_alert_dedupe(alert_key,sent,sent_at,payload_json,updated_at) values(?,?,?,?,?) "
+                "on conflict(alert_key) do update set sent=excluded.sent,sent_at=excluded.sent_at,payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+                (e["alert_key"], 1 if terminal else 0, e.get("sent_at"), safe_json(e), now_utc().isoformat()),
+            )
+        conn.commit(); conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def process_free_alert_events(events):
-    """Supabase-primary cross-run dedupe + Telegram delivery; SQLite fallback."""
+    """Ranked/batched Telegram delivery with Supabase-primary event-level dedupe.
+
+    STRONG then WATCH are Telegram-eligible. INFO is persisted and considered
+    handled, but is suppressed from Telegram by default. A Telegram batch is
+    marked SENT only for the events in that successfully delivered batch; failed
+    batches remain PENDING and are retried on the next run.
+    """
     if not ATLAS_FREE_ALERTS_ENABLED or not events:
         return 0, [], 0, 0
+
+    _ATLAS_FREE_ALERT_STATS["detected"] += len(events)
     existing, source = _atlas_existing_alert_state()
     pending = [e for e in events if not existing.get(e["alert_key"], {}).get("sent", False)]
     skipped = len(events) - len(pending)
+    _ATLAS_FREE_ALERT_STATS["dedup_skipped"] += skipped
     if not pending:
         return 0, [], skipped, 0
 
-    # Persist pending state before sending; a failed Telegram send is retried next run.
-    if STORE.enabled:
-        STORE.upsert_many("atlas_free_alert_events", pending, "alert_key")
-    else:
-        try:
-            conn = _atlas_free_alert_db()
-            for e in pending:
-                conn.execute(
-                    "insert into free_alert_dedupe(alert_key,sent,sent_at,payload_json,updated_at) values(?,?,?,?,?) "
-                    "on conflict(alert_key) do update set payload_json=excluded.payload_json,updated_at=excluded.updated_at",
-                    (e["alert_key"], 0, None, safe_json(e), now_utc().isoformat()),
-                )
-            conn.commit(); conn.close()
-        except Exception:
-            pass
-
-    sent_count = 0
-    errors = []
-    final_rows = []
-    destinations = _opt_telegram_destinations()
+    now_iso = now_utc().isoformat()
+    info_events = []
+    eligible = []
     for e in pending:
+        sev = str(e.get("severity") or "INFO").upper()
+        e["telegram_status"] = "PENDING"
+        e["telegram_batch_id"] = None
+        e["telegram_attempted_at"] = None
+        if sev == "INFO" and not ATLAS_FREE_ALERT_SEND_INFO:
+            e["telegram_status"] = "SUPPRESSED_INFO"
+            e["sent"] = False
+            e["sent_at"] = None
+            info_events.append(e)
+        else:
+            eligible.append(e)
+
+    _ATLAS_FREE_ALERT_STATS["eligible"] += len(eligible)
+    _ATLAS_FREE_ALERT_STATS["info_suppressed"] += len(info_events)
+
+    # Persist every new event before Telegram. INFO is terminally suppressed;
+    # WATCH/STRONG stay PENDING so failed batches can retry next run.
+    _atlas_persist_alert_rows(pending)
+
+    errors = []
+    destinations = _opt_telegram_destinations()
+    batches = _atlas_build_alert_batches(eligible)
+    _ATLAS_FREE_ALERT_STATS["telegram_batches"] += len(batches)
+    sent_events = 0
+    final_rows = list(info_events)
+
+    for batch_no, batch in enumerate(batches, 1):
+        batch_id = hashlib.sha256(
+            ("|".join(e.get("alert_key", "") for e in batch) + f"|{batch_no}|{len(batches)}").encode("utf-8")
+        ).hexdigest()[:16]
+        msg = _atlas_format_alert_batch(batch, batch_no, len(batches), len(info_events))
         delivered = False
-        msg = format_free_alert(e)
+        attempted_at = now_utc().isoformat()
         for chat_id in destinations:
             try:
                 telegram_send_one(chat_id, msg)
                 delivered = True
             except Exception as exc:
-                errors.append(f"FREE_ALERT[{e.get('symbol')}:{e.get('timeframe')}:{e.get('event_type')}] {chat_id}: {exc}")
-        if delivered:
-            sent_count += 1
-            e["sent"] = True
-            e["sent_at"] = now_utc().isoformat()
-        final_rows.append(e)
+                errors.append(f"FREE_ALERT_BATCH[{batch_no}/{len(batches)}] {chat_id}: {exc}")
+        for e in batch:
+            e["telegram_batch_id"] = batch_id
+            e["telegram_attempted_at"] = attempted_at
+            if delivered:
+                e["telegram_status"] = "SENT"
+                e["sent"] = True
+                e["sent_at"] = now_utc().isoformat()
+                sent_events += 1
+            else:
+                e["telegram_status"] = "ERROR"
+                e["sent"] = False
+                e["sent_at"] = None
+            final_rows.append(e)
 
-    if STORE.enabled:
-        STORE.upsert_many("atlas_free_alert_events", final_rows, "alert_key")
-    else:
-        try:
-            conn = _atlas_free_alert_db()
-            for e in final_rows:
-                conn.execute(
-                    "insert into free_alert_dedupe(alert_key,sent,sent_at,payload_json,updated_at) values(?,?,?,?,?) "
-                    "on conflict(alert_key) do update set sent=excluded.sent,sent_at=excluded.sent_at,payload_json=excluded.payload_json,updated_at=excluded.updated_at",
-                    (e["alert_key"], 1 if e.get("sent") else 0, e.get("sent_at"), safe_json(e), now_utc().isoformat()),
-                )
-            conn.commit(); conn.close()
-        except Exception as exc:
-            errors.append(f"FREE_ALERT_SQLITE: {exc}")
-    return sent_count, errors, skipped, len(pending)
+    _ATLAS_FREE_ALERT_STATS["telegram_events"] += sent_events
+    _ATLAS_FREE_ALERT_STATS["telegram_errors"] += len(errors)
+    _atlas_persist_alert_rows(final_rows)
+    # Compatibility: first return value remains event count, not Telegram request count.
+    return sent_events, errors, skipped, len(eligible)
 
 import threading as _atlas_threading
 from concurrent.futures import ThreadPoolExecutor as _AtlasThreadPoolExecutor, as_completed as _atlas_as_completed
@@ -11245,6 +11396,19 @@ def build_performance_telemetry_report():
         f"- exchange max concurrency: {ATLAS_EXCHANGE_MAX_CONCURRENCY}",
         f"- OHLCV provider affinities learned: {len(_ATLAS_OHLCV_PROVIDER_AFFINITY)}",
         f"- OHLCV failed provider/timeframe routes skipped: {len(_ATLAS_OHLCV_PROVIDER_FAILURES)}",
+        "- ohlcv_shared = exact in-run dataset reuse (same symbol/timeframe, sufficient stored limit)",
+        "- ohlcv_wait_reuse = subset that reused only after waiting on the keyed concurrency lock",
+        "",
+        "Free Alert Engine delivery:",
+        f"- detected events: {_ATLAS_FREE_ALERT_STATS.get('detected', 0)}",
+        f"- dedup skipped: {_ATLAS_FREE_ALERT_STATS.get('dedup_skipped', 0)}",
+        f"- Telegram-eligible WATCH/STRONG: {_ATLAS_FREE_ALERT_STATS.get('eligible', 0)}",
+        f"- INFO suppressed (persisted only): {_ATLAS_FREE_ALERT_STATS.get('info_suppressed', 0)}",
+        f"- Telegram batches: {_ATLAS_FREE_ALERT_STATS.get('telegram_batches', 0)}",
+        f"- events delivered inside batches: {_ATLAS_FREE_ALERT_STATS.get('telegram_events', 0)}",
+        f"- Telegram batch errors: {_ATLAS_FREE_ALERT_STATS.get('telegram_errors', 0)}",
+        f"- configured batch size: {ATLAS_FREE_ALERT_BATCH_SIZE}",
+        f"- INFO Telegram enabled: {ATLAS_FREE_ALERT_SEND_INFO}",
         "",
         "Persistent Backtest Cache (dedicated atlas_backtest_gate_cache):",
         f"- SQLite hits: {_ATLAS_BT_CACHE_STATS.get('sqlite_hit', 0)}",
@@ -11422,7 +11586,9 @@ def main():
             total_sent += free_alert_sent
             all_errors.extend(free_alert_errors)
             print(
-                f"🚨 Free Alerts sent: {free_alert_sent}, pending={free_alert_pending}, "
+                f"🚨 Free Alert events delivered: {free_alert_sent}, telegram_eligible={free_alert_pending}, "
+                f"info_suppressed={_ATLAS_FREE_ALERT_STATS.get('info_suppressed', 0)}, "
+                f"batches={_ATLAS_FREE_ALERT_STATS.get('telegram_batches', 0)}, "
                 f"dedup_skipped={free_alert_skipped}, errors={len(free_alert_errors)}"
             )
             with _AtlasTimer("LIFECYCLE ALERT DELIVERY"):
