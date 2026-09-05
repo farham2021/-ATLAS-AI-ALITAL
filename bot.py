@@ -97,6 +97,14 @@
 # 12. Fixed a second, pre-existing VERSION reassignment later in the file
 #     that silently overrode the VERSION declared here — the same
 #     "two definitions, last one wins" pattern this whole pass targets.
+# ------------------------------------------------------------
+# PHASE 3 ADDITION — FREE ALERT ENGINE + QUALITY-SAFE SHARED OHLCV
+# ------------------------------------------------------------
+# - Per-key in-run OHLCV synchronization prevents duplicate concurrent fetches.
+# - Native RSI/MACD closed-candle alerts reuse tf_snapshot OHLCV only.
+# - Supabase-primary cross-run alert dedupe with SQLite fallback.
+# - Telegram advisory alerts; no order execution and no changes to canonical
+#   Signal/Entry/SL/TP, evidence, Decision Engine, Backtest Gate or Snapshot Arrow.
 # ============================================================
 
 import os
@@ -112,6 +120,7 @@ import xml.etree.ElementTree as ET
 import traceback
 import hashlib
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from statistics import mean, median, pstdev
@@ -1792,7 +1801,7 @@ def _atlas_sqlite_ohlcv_set(coin, timeframe, limit, rows, provider):
     except Exception:
         pass
 
-def best_ohlcv(coin, timeframe, limit=250):
+def _best_ohlcv_impl(coin, timeframe, limit=250):
     ensure_exchanges()
     coin_key = str(coin).upper()
     tf_key = str(timeframe)
@@ -1870,6 +1879,74 @@ def best_ohlcv(coin, timeframe, limit=250):
     raise RuntimeError(
         f"{timeframe} DATA UNAVAILABLE: {coin} | providers tried={detail or 'none'}"
     )
+
+
+# ============================================================
+# QUALITY-SAFE SHARED OHLCV CACHE COORDINATION
+# ============================================================
+# best_ohlcv() already caches exact (coin,timeframe) datasets and only serves a
+# cached slice when its stored limit is >= the caller's requested limit.  With
+# concurrent asset analysis, two consumers can still arrive at the same key at
+# the same time before the first network fetch has populated that cache.  The
+# keyed lock below removes only that duplicate in-run fetch. Different
+# coin/timeframe keys continue to run concurrently, and provider selection,
+# candle values, indicator math, Entry/SL/TP and all decision logic are
+# untouched.
+_ATLAS_OHLCV_KEY_LOCKS = {}
+_ATLAS_OHLCV_KEY_LOCKS_GUARD = threading.Lock()
+
+
+def _atlas_ohlcv_cache_satisfies(coin, timeframe, limit):
+    cache_key = (str(coin).upper(), str(timeframe))
+    cached = _ATLAS_DATA_CACHE.get("ohlcv", {}).get(cache_key)
+    if cached is None:
+        return False
+    try:
+        return int(cached.get("limit", 0)) >= int(limit) and len(cached.get("rows") or []) >= min(60, int(limit))
+    except Exception:
+        return False
+
+
+def _atlas_ohlcv_cache_read(coin, timeframe, limit):
+    cache_key = (str(coin).upper(), str(timeframe))
+    cached = _ATLAS_DATA_CACHE.get("ohlcv", {}).get(cache_key)
+    if not cached or not _atlas_ohlcv_cache_satisfies(coin, timeframe, limit):
+        return None
+    _atlas_cache_stat("ohlcv", True)
+    rows = cached.get("rows") or []
+    return _atlas_copy_rows(rows[-int(limit):]), cached.get("engine")
+
+
+def _atlas_ohlcv_key_lock(coin, timeframe):
+    key = (str(coin).upper(), str(timeframe))
+    with _ATLAS_OHLCV_KEY_LOCKS_GUARD:
+        lock = _ATLAS_OHLCV_KEY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _ATLAS_OHLCV_KEY_LOCKS[key] = lock
+        return lock
+
+
+def best_ohlcv(coin, timeframe, limit=250):
+    """Quality-safe, per-run shared OHLCV access.
+
+    The first consumer for an exact (coin,timeframe) key performs the unchanged
+    provider/cache path. Concurrent consumers of that same key wait, then reuse
+    the exact dataset if it satisfies their requested limit. There is no
+    cross-asset candle sharing and no synthetic timeframe derivation.
+    """
+    cached = _atlas_ohlcv_cache_read(coin, timeframe, limit)
+    if cached is not None:
+        return cached
+
+    lock = _atlas_ohlcv_key_lock(coin, timeframe)
+    with lock:
+        cached = _atlas_ohlcv_cache_read(coin, timeframe, limit)
+        if cached is not None:
+            _atlas_cache_stat("ohlcv_shared", True)
+            return cached
+        _atlas_cache_stat("ohlcv_shared", False)
+        return _best_ohlcv_impl(coin, timeframe, limit)
 
 
 # ============================================================
@@ -10602,6 +10679,302 @@ def send_optimization_documents(backtest_text):
 # ============================================================
 import time as _atlas_time
 import functools as _atlas_functools
+
+# ============================================================
+# ATLAS FREE ALERT ENGINE — RSI / MACD / REAL-MTF
+# ============================================================
+# Advisory technical-event alerts only. This layer consumes the exact closed
+# OHLCV rows already fetched by tf_snapshot() and stored in each result's
+# `snapshots` field. It performs ZERO extra best_ohlcv()/exchange fetches.
+# It does not modify signal, Entry/SL/TP, evidence weights, Decision Engine,
+# Backtest Gate, Lifecycle, Legacy CSV, PNG, Voice, or Snapshot Arrow logic.
+
+ATLAS_FREE_ALERTS_ENABLED = os.environ.get("ATLAS_FREE_ALERTS_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+ATLAS_FREE_ALERT_TIMEFRAMES = tuple(
+    x.strip() for x in os.environ.get("ATLAS_FREE_ALERT_TIMEFRAMES", "15m,1h,4h,1d").split(",") if x.strip()
+)
+ATLAS_FREE_ALERT_RSI_OVERSOLD = float(os.environ.get("ATLAS_FREE_ALERT_RSI_OVERSOLD", "30"))
+ATLAS_FREE_ALERT_RSI_OVERBOUGHT = float(os.environ.get("ATLAS_FREE_ALERT_RSI_OVERBOUGHT", "70"))
+ATLAS_FREE_ALERT_MAX_HISTORY = int(os.environ.get("ATLAS_FREE_ALERT_MAX_HISTORY", "5000"))
+
+
+def _atlas_free_alert_db():
+    conn = sqlite_conn()
+    conn.execute(
+        """create table if not exists free_alert_dedupe(
+            alert_key text primary key,
+            sent integer not null default 0,
+            sent_at text,
+            payload_json text,
+            updated_at text not null
+        )"""
+    )
+    conn.commit()
+    return conn
+
+
+def _atlas_macd_previous_current(values):
+    vals = [safe_float(x) for x in (values or [])]
+    vals = [x for x in vals if x is not None]
+    if len(vals) < 36:
+        return None
+    p_ml, p_ms, p_hist = macd(vals[:-1])
+    c_ml, c_ms, c_hist = macd(vals)
+    if None in (p_ml, p_ms, c_ml, c_ms):
+        return None
+    return {
+        "prev_line": p_ml, "prev_signal": p_ms, "prev_hist": p_hist,
+        "line": c_ml, "signal": c_ms, "hist": c_hist,
+    }
+
+
+def _atlas_rsi_previous_current(values, n=14):
+    vals = [safe_float(x) for x in (values or [])]
+    vals = [x for x in vals if x is not None]
+    if len(vals) <= n + 1:
+        return None
+    prev = rsi(vals[:-1], n)
+    curr = rsi(vals, n)
+    if prev is None or curr is None:
+        return None
+    return {"prev": float(prev), "value": float(curr)}
+
+
+def _atlas_alert_key(symbol, timeframe, event_type, candle_ts):
+    raw = f"{str(symbol).upper()}|{timeframe}|{event_type}|{int(candle_ts or 0)}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _atlas_alert_severity(direction, event_type, result):
+    agreement = _aio_num(result.get("mtf_agreement_pct"), 0.0)
+    trigger_aligned = bool(result.get("mtf_trigger_aligned"))
+    if event_type == "RSI_MACD_CONFIRMATION":
+        return "STRONG" if agreement >= 60 else "WATCH"
+    if event_type.startswith("MACD_") and agreement >= 75:
+        return "STRONG"
+    if event_type in ("RSI_OVERSOLD_RECOVERY", "RSI_OVERBOUGHT_EXIT", "MACD_BULLISH_CROSS", "MACD_BEARISH_CROSS"):
+        return "WATCH"
+    if trigger_aligned and direction in ("BULLISH", "BEARISH"):
+        return "WATCH"
+    return "INFO"
+
+
+def _atlas_build_tf_alerts(result, timeframe, snapshot):
+    rows = snapshot.get("rows") if isinstance(snapshot, dict) else None
+    if not rows or len(rows) < 40:
+        return []
+    c = closes(rows)
+    if len(c) < 40:
+        return []
+    candle_ts = (snapshot.get("event") or {}).get("closed_ts") or (rows[-1][0] if rows else None)
+    if candle_ts is None:
+        return []
+
+    rv = _atlas_rsi_previous_current(c, 14)
+    mv = _atlas_macd_previous_current(c)
+    raw_events = []
+
+    if rv:
+        p, v = rv["prev"], rv["value"]
+        lo, hi = ATLAS_FREE_ALERT_RSI_OVERSOLD, ATLAS_FREE_ALERT_RSI_OVERBOUGHT
+        if p > lo and v <= lo:
+            raw_events.append(("RSI_OVERSOLD_ENTER", "BEARISH"))
+        if p <= lo and v > lo:
+            raw_events.append(("RSI_OVERSOLD_RECOVERY", "BULLISH"))
+        if p < hi and v >= hi:
+            raw_events.append(("RSI_OVERBOUGHT_ENTER", "BULLISH"))
+        if p >= hi and v < hi:
+            raw_events.append(("RSI_OVERBOUGHT_EXIT", "BEARISH"))
+
+    if mv:
+        pl, ps, cl, cs = mv["prev_line"], mv["prev_signal"], mv["line"], mv["signal"]
+        if pl <= ps and cl > cs:
+            raw_events.append(("MACD_BULLISH_CROSS", "BULLISH"))
+        if pl >= ps and cl < cs:
+            raw_events.append(("MACD_BEARISH_CROSS", "BEARISH"))
+        if pl <= 0 < cl:
+            raw_events.append(("MACD_ZERO_UP", "BULLISH"))
+        if pl >= 0 > cl:
+            raw_events.append(("MACD_ZERO_DOWN", "BEARISH"))
+
+    dirs = {d for _, d in raw_events}
+    has_rsi_bull = any(t in ("RSI_OVERSOLD_RECOVERY", "RSI_OVERBOUGHT_ENTER") and d == "BULLISH" for t, d in raw_events)
+    has_rsi_bear = any(t in ("RSI_OVERBOUGHT_EXIT", "RSI_OVERSOLD_ENTER") and d == "BEARISH" for t, d in raw_events)
+    has_macd_bull = any(t == "MACD_BULLISH_CROSS" for t, _ in raw_events)
+    has_macd_bear = any(t == "MACD_BEARISH_CROSS" for t, _ in raw_events)
+    if has_rsi_bull and has_macd_bull:
+        raw_events.append(("RSI_MACD_CONFIRMATION", "BULLISH"))
+    if has_rsi_bear and has_macd_bear:
+        raw_events.append(("RSI_MACD_CONFIRMATION", "BEARISH"))
+
+    symbol = _aio_symbol(result)
+    out = []
+    for event_type, direction in raw_events:
+        key = _atlas_alert_key(symbol, timeframe, event_type, candle_ts)
+        out.append({
+            "alert_key": key,
+            "timestamp": now_utc().isoformat(),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "event_type": event_type,
+            "direction": direction,
+            "severity": _atlas_alert_severity(direction, event_type, result),
+            "candle_ts": int(candle_ts),
+            "rsi_prev": rv.get("prev") if rv else None,
+            "rsi_value": rv.get("value") if rv else None,
+            "macd_prev_line": mv.get("prev_line") if mv else None,
+            "macd_prev_signal": mv.get("prev_signal") if mv else None,
+            "macd_line": mv.get("line") if mv else None,
+            "macd_signal": mv.get("signal") if mv else None,
+            "macd_hist": mv.get("hist") if mv else None,
+            "mtf_agreement_pct": _aio_num(result.get("mtf_agreement_pct"), 0),
+            "mtf_confirmation": result.get("mtf_confirmation"),
+            "mtf_trigger_state": result.get("mtf_trigger_state"),
+            "decision_state": result.get("decision_state") or result.get("action") or "N/A",
+            "confidence": _aio_num(result.get("decision_confidence", result.get("confidence")), 0),
+            "model_version": VERSION,
+            "sent": False,
+            "sent_at": None,
+        })
+    return out
+
+
+def build_free_alert_events(results):
+    """Detect RSI/MACD closed-candle events without any new market-data fetch."""
+    if not ATLAS_FREE_ALERTS_ENABLED:
+        return []
+    events = []
+    for result in results or []:
+        snapshots = result.get("snapshots") or {}
+        for tf in ATLAS_FREE_ALERT_TIMEFRAMES:
+            snap = snapshots.get(tf) or {}
+            events.extend(_atlas_build_tf_alerts(result, tf, snap))
+    # Deterministic de-duplication inside the run.
+    unique = {}
+    for event in events:
+        unique[event["alert_key"]] = event
+    return list(unique.values())
+
+
+def _atlas_existing_alert_state():
+    state = {}
+    if STORE.enabled:
+        rows = STORE.select(
+            "atlas_free_alert_events",
+            {"select": "alert_key,sent,sent_at", "order": "timestamp.desc", "limit": str(ATLAS_FREE_ALERT_MAX_HISTORY)},
+        ) or []
+        for row in rows:
+            key = str(row.get("alert_key") or "")
+            if key:
+                state[key] = {"sent": bool(row.get("sent")), "sent_at": row.get("sent_at")}
+        if rows:
+            return state, "SUPABASE"
+    try:
+        conn = _atlas_free_alert_db()
+        rows = conn.execute("select alert_key,sent,sent_at from free_alert_dedupe").fetchall()
+        conn.close()
+        for key, sent, sent_at in rows:
+            state[str(key)] = {"sent": bool(sent), "sent_at": sent_at}
+    except Exception:
+        pass
+    return state, "SQLITE"
+
+
+def format_free_alert(event):
+    names = {
+        "RSI_OVERSOLD_ENTER": "RSI وارد اشباع فروش شد",
+        "RSI_OVERSOLD_RECOVERY": "RSI از اشباع فروش برگشت",
+        "RSI_OVERBOUGHT_ENTER": "RSI وارد اشباع خرید شد",
+        "RSI_OVERBOUGHT_EXIT": "RSI از اشباع خرید خارج شد",
+        "MACD_BULLISH_CROSS": "کراس صعودی MACD",
+        "MACD_BEARISH_CROSS": "کراس نزولی MACD",
+        "MACD_ZERO_UP": "عبور MACD به بالای خط صفر",
+        "MACD_ZERO_DOWN": "عبور MACD به زیر خط صفر",
+        "RSI_MACD_CONFIRMATION": "تأیید همزمان RSI + MACD",
+    }
+    icon = "🟢" if event.get("direction") == "BULLISH" else "🔴"
+    sev_icon = {"STRONG": "🔥", "WATCH": "👀", "INFO": "ℹ️"}.get(event.get("severity"), "ℹ️")
+    rsi_txt = "N/A"
+    if event.get("rsi_value") is not None:
+        rsi_txt = f"{_aio_num(event.get('rsi_prev')):.1f} → {_aio_num(event.get('rsi_value')):.1f}"
+    macd_txt = "N/A"
+    if event.get("macd_line") is not None and event.get("macd_signal") is not None:
+        macd_txt = f"{_aio_num(event.get('macd_line')):.6g} / {_aio_num(event.get('macd_signal')):.6g}"
+    return (
+        f"🚨 ATLAS FREE ALERT\n\n"
+        f"{icon} {event.get('symbol')} | {event.get('timeframe')}\n"
+        f"رویداد: {names.get(event.get('event_type'), event.get('event_type'))}\n"
+        f"شدت: {sev_icon} {event.get('severity')}\n\n"
+        f"RSI(14): {rsi_txt}\n"
+        f"MACD / Signal: {macd_txt}\n"
+        f"Real MTF: {_aio_num(event.get('mtf_agreement_pct')):.0f}% | {event.get('mtf_confirmation') or 'N/A'}\n"
+        f"ATLAS Decision: {event.get('decision_state') or 'N/A'}\n"
+        f"Confidence: {_aio_num(event.get('confidence')):.0f}%\n\n"
+        f"⚠️ هشدار تکنیکال است؛ دستور معامله خودکار نیست."
+    )
+
+
+def process_free_alert_events(events):
+    """Supabase-primary cross-run dedupe + Telegram delivery; SQLite fallback."""
+    if not ATLAS_FREE_ALERTS_ENABLED or not events:
+        return 0, [], 0, 0
+    existing, source = _atlas_existing_alert_state()
+    pending = [e for e in events if not existing.get(e["alert_key"], {}).get("sent", False)]
+    skipped = len(events) - len(pending)
+    if not pending:
+        return 0, [], skipped, 0
+
+    # Persist pending state before sending; a failed Telegram send is retried next run.
+    if STORE.enabled:
+        STORE.upsert_many("atlas_free_alert_events", pending, "alert_key")
+    else:
+        try:
+            conn = _atlas_free_alert_db()
+            for e in pending:
+                conn.execute(
+                    "insert into free_alert_dedupe(alert_key,sent,sent_at,payload_json,updated_at) values(?,?,?,?,?) "
+                    "on conflict(alert_key) do update set payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+                    (e["alert_key"], 0, None, safe_json(e), now_utc().isoformat()),
+                )
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+
+    sent_count = 0
+    errors = []
+    final_rows = []
+    destinations = _opt_telegram_destinations()
+    for e in pending:
+        delivered = False
+        msg = format_free_alert(e)
+        for chat_id in destinations:
+            try:
+                telegram_send_one(chat_id, msg)
+                delivered = True
+            except Exception as exc:
+                errors.append(f"FREE_ALERT[{e.get('symbol')}:{e.get('timeframe')}:{e.get('event_type')}] {chat_id}: {exc}")
+        if delivered:
+            sent_count += 1
+            e["sent"] = True
+            e["sent_at"] = now_utc().isoformat()
+        final_rows.append(e)
+
+    if STORE.enabled:
+        STORE.upsert_many("atlas_free_alert_events", final_rows, "alert_key")
+    else:
+        try:
+            conn = _atlas_free_alert_db()
+            for e in final_rows:
+                conn.execute(
+                    "insert into free_alert_dedupe(alert_key,sent,sent_at,payload_json,updated_at) values(?,?,?,?,?) "
+                    "on conflict(alert_key) do update set sent=excluded.sent,sent_at=excluded.sent_at,payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+                    (e["alert_key"], 1 if e.get("sent") else 0, e.get("sent_at"), safe_json(e), now_utc().isoformat()),
+                )
+            conn.commit(); conn.close()
+        except Exception as exc:
+            errors.append(f"FREE_ALERT_SQLITE: {exc}")
+    return sent_count, errors, skipped, len(pending)
+
 import threading as _atlas_threading
 from concurrent.futures import ThreadPoolExecutor as _AtlasThreadPoolExecutor, as_completed as _atlas_as_completed
 
@@ -10703,6 +11076,8 @@ _ATLAS_PROFILE_GROUPS = {
     "Lifecycle / Signal Alerts": [
         "notify_lifecycle_changes", "send_signal_change_notifications",
         "format_lifecycle_notification", "format_signal_notification",
+        "build_free_alert_events", "process_free_alert_events",
+        "format_free_alert", "_atlas_build_tf_alerts",
     ],
     "Report Generation": [
         "generate_analysis_documents", "build_market_context_txt",
@@ -11041,6 +11416,15 @@ def main():
                 portfolio_risk = build_portfolio_risk_intelligence(results, top10)
                 results = apply_portfolio_risk_context(results, portfolio_risk)
                 lifecycle_events = update_signal_lifecycle(results, top10)
+            with _AtlasTimer("FREE ALERT ENGINE"):
+                free_alert_events = build_free_alert_events(results)
+                free_alert_sent, free_alert_errors, free_alert_skipped, free_alert_pending = process_free_alert_events(free_alert_events)
+            total_sent += free_alert_sent
+            all_errors.extend(free_alert_errors)
+            print(
+                f"🚨 Free Alerts sent: {free_alert_sent}, pending={free_alert_pending}, "
+                f"dedup_skipped={free_alert_skipped}, errors={len(free_alert_errors)}"
+            )
             with _AtlasTimer("LIFECYCLE ALERT DELIVERY"):
                 lifecycle_alert_sent, lifecycle_alert_errors = notify_lifecycle_changes(lifecycle_events)
             total_sent += lifecycle_alert_sent
