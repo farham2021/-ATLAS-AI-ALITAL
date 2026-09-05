@@ -164,7 +164,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 PHASE 3.5 SMART HOURLY + TICKER OPTIMIZED"
+VERSION = "ATLAS v11.5 PHASE 3.5.2 NOTIFICATION AUDIT FIX"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -9721,6 +9721,7 @@ def _aio_notification_db():
 ATLAS_DECISION_BATCH_SIZE = max(5, min(15, int(os.environ.get("ATLAS_DECISION_BATCH_SIZE", "12"))))
 ATLAS_DECISION_SEND_WAIT = os.environ.get("ATLAS_DECISION_SEND_WAIT", "1").strip().lower() not in ("0","false","no","off")
 ATLAS_NOTIFICATION_MIN_SCORE = float(os.environ.get("ATLAS_NOTIFICATION_MIN_SCORE", "68"))
+ATLAS_SIGNAL_MENTIONS = os.environ.get("ATLAS_SIGNAL_MENTIONS", "").strip()
 
 
 def _atlas_decision_bucket(decision):
