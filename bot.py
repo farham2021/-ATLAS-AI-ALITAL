@@ -2067,6 +2067,94 @@ def build_universe():
 
 
 # ============================================================
+# PHASE 3.3 — BROAD MARKET OPPORTUNITY RADAR
+# Discovery-only prefilter. Every selected candidate is then passed through
+# the exact same full analyze_coin/Decision/MTF/Evidence/Backtest-gated path.
+# No shortcut signal is ever emitted from the radar score itself.
+# ============================================================
+
+ATLAS_BROAD_RADAR_SCAN_LIMIT = max(100, min(500, int(os.environ.get("ATLAS_BROAD_RADAR_SCAN_LIMIT", "250"))))
+ATLAS_BROAD_RADAR_DEEP_CANDIDATES = max(6, min(24, int(os.environ.get("ATLAS_BROAD_RADAR_DEEP_CANDIDATES", "12"))))
+_LAST_RADAR_CANDIDATES = []
+_LAST_RADAR_META = {}
+
+def _atlas_broad_market_rows(limit=None):
+    limit = int(limit or ATLAS_BROAD_RADAR_SCAN_LIMIT)
+    headers = {}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+    url = "https://api.coingecko.com/api/v3/coins/markets?" + urllib.parse.urlencode({
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": str(limit),
+        "page": "1",
+        "sparkline": "false",
+        "price_change_percentage": "24h",
+    })
+    rows = safe_http_get(url, headers=headers, default=[]) or []
+    out = []
+    for x in rows:
+        sym = str(x.get("symbol") or "").upper().strip()
+        if not sym or is_stable(sym):
+            continue
+        mc = f(x.get("market_cap")) or 0.0
+        vol = f(x.get("total_volume")) or 0.0
+        chg = f(x.get("price_change_percentage_24h"))
+        rank = x.get("market_cap_rank")
+        try: rank = int(rank) if rank is not None else 999999
+        except Exception: rank = 999999
+        vol_ratio = (vol / mc) if mc > 0 else 0.0
+        out.append({
+            "symbol": sym, "rank": rank, "change24": chg,
+            "market_cap": mc, "volume": vol, "volume_mcap": vol_ratio,
+        })
+    return out
+
+def atlas_broad_market_radar(core_universe):
+    """Return diversified outsiders for full-quality deep analysis.
+
+    The broad scan only discovers candidates. It cannot create BUY/SELL/WAIT.
+    Final signals are produced solely after the normal deep ATLAS pipeline.
+    """
+    core = {str(x).upper() for x in (core_universe or [])}
+    rows = [x for x in _atlas_broad_market_rows() if x["symbol"] not in core]
+    if not rows:
+        return [], {}
+
+    # Diversified discovery prevents a pure momentum-only radar:
+    # leaders, laggards/reversal candidates, unusual liquidity, and rank-quality.
+    valid_change = [x for x in rows if x.get("change24") is not None]
+    gainers = sorted(valid_change, key=lambda x: x["change24"], reverse=True)
+    losers = sorted(valid_change, key=lambda x: x["change24"])
+    liquid = sorted(rows, key=lambda x: (x.get("volume_mcap", 0), x.get("volume", 0)), reverse=True)
+    ranked = sorted(rows, key=lambda x: x.get("rank", 999999))
+
+    n = ATLAS_BROAD_RADAR_DEEP_CANDIDATES
+    quota = max(2, n // 4)
+    chosen = []
+    reason = {}
+    for label, seq in (("MOMENTUM", gainers), ("PULLBACK_REVERSAL", losers),
+                       ("LIQUIDITY", liquid), ("MARKET_QUALITY", ranked)):
+        added = 0
+        for x in seq:
+            sym = x["symbol"]
+            if sym in chosen:
+                continue
+            chosen.append(sym); reason[sym] = label; added += 1
+            if len(chosen) >= n or added >= quota:
+                break
+        if len(chosen) >= n:
+            break
+    if len(chosen) < n:
+        for x in ranked:
+            if x["symbol"] not in chosen:
+                chosen.append(x["symbol"]); reason[x["symbol"]] = "RADAR_FILL"
+            if len(chosen) >= n:
+                break
+    return chosen[:n], {"scan_count": len(rows), "reason": reason}
+
+
+# ============================================================
 # PORTFOLIO SYMBOLS — FIXED (USER-DEFINED, NEVER CHANGES)
 # ============================================================
 
@@ -6989,9 +7077,22 @@ def report():
     evaluate_open_outcomes()
     universe, top10, dynamic30 = build_universe()
     global _LAST_TOP10, _LAST_DYNAMIC30, _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS
+    global _LAST_RADAR_CANDIDATES, _LAST_RADAR_META
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
+    # Keep the mandatory backtest fingerprint/math tied to the canonical core
+    # universe. Broad-radar outsiders are discovery additions only and therefore
+    # cannot churn the 24h backtest cache or weaken the gate.
     backtest_ok, bt = mandatory_backtest_gate(universe)
+    try:
+        radar_candidates, radar_meta = atlas_broad_market_radar(universe)
+    except Exception as e:
+        radar_candidates, radar_meta = [], {"error": str(e), "scan_count": 0}
+        append_changelog("BROAD_MARKET_RADAR", None, None, str(e))
+    _LAST_RADAR_CANDIDATES = list(radar_candidates)
+    _LAST_RADAR_META = dict(radar_meta or {})
+    analysis_universe = list(dict.fromkeys(list(universe) + list(radar_candidates)))
+    print(f"📡 Broad Market Radar: scanned={_LAST_RADAR_META.get('scan_count', 0)}, deep_candidates={len(radar_candidates)} → {radar_candidates}")
     _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
         self_diagnostic()
@@ -7028,7 +7129,7 @@ def report():
     # - refresh again for each ~30-coin block, preventing the 45s cache from
     #   expiring before late-universe symbols are used;
     # - keep per-symbol fallback for unsupported batch exchanges.
-    active_universe = [c for c in universe if not is_stable(c)]
+    active_universe = [c for c in analysis_universe if not is_stable(c)]
     chunk_size = max(10, ATLAS_BATCH_TICKERS_CHUNK)
 
     def _analyze_one(index_coin):
@@ -9425,7 +9526,9 @@ def generate_best_watch_csv(results, top10):
 def generate_opportunity_ranking_csv(results):
     rows=[]
     for r in results or []:
-        rows.append({"Rank":0,"Symbol":_aio_symbol(r),"Direction":r.get("direction","NEUTRAL"),
+        sym = _aio_symbol(r)
+        source = "BROAD_RADAR" if sym in set(_LAST_RADAR_CANDIDATES) else ("PERSONAL" if sym in set(map(str.upper, ATLAS_PERSONAL_ASSETS)) else ("TOP10" if sym in set(map(str.upper, _LAST_TOP10 or [])) else "CORE_RADAR"))
+        rows.append({"Rank":0,"Symbol":sym,"Source":source,"Direction":r.get("direction","NEUTRAL"),
             "Decision":r.get("intel_decision") or r.get("decision_state") or "WAIT",
             "Opportunity":r.get("opportunity_score"),"SignalScore":r.get("signal_score"),
             "DecisionSupport":r.get("decision_support_score"),"Conviction":r.get("conviction_score"),
@@ -9434,7 +9537,7 @@ def generate_opportunity_ranking_csv(results):
             "DataQuality":r.get("data_quality"),"Executable":bool(r.get("executable"))})
     rows.sort(key=lambda x:(_aio_num(x["DecisionSupport"]),_aio_num(x["Opportunity"]),_aio_num(x["SignalScore"])),reverse=True)
     for i,x in enumerate(rows,1): x["Rank"]=i
-    cols=["Rank","Symbol","Direction","Decision","Opportunity","SignalScore","DecisionSupport",
+    cols=["Rank","Symbol","Source","Direction","Decision","Opportunity","SignalScore","DecisionSupport",
           "Conviction","EvidenceAgreement","RR","Regime","Derivatives","DataQuality","Executable"]
     return _aio_csv(rows,cols)
 
@@ -9464,11 +9567,64 @@ def _aio_notification_db():
         symbol text primary key,state text not null,direction text,trend text,notified_at text not null)""")
     conn.commit(); return conn
 
+# Phase 3.2 — Decision Command Center presentation controls.
+# Presentation/delivery only: canonical decision math remains untouched.
+ATLAS_DECISION_BATCH_SIZE = max(5, min(15, int(os.environ.get("ATLAS_DECISION_BATCH_SIZE", "12"))))
+ATLAS_DECISION_SEND_WAIT = os.environ.get("ATLAS_DECISION_SEND_WAIT", "1").strip().lower() not in ("0","false","no","off")
+
+
+def _atlas_decision_bucket(decision):
+    d = str(decision or "WAIT").upper().strip()
+    if "SELL" in d or d in ("EXIT", "SHORT"):
+        return "SELL"
+    if "BUY" in d or d == "LONG":
+        return "BUY"
+    return "WAIT"
+
+
+def _atlas_decision_change_line(item):
+    r=item["result"]; bucket=item["bucket"]
+    sym=_aio_symbol(r)
+    decision=str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
+    score=item["score"]
+    conf=_aio_num(r.get("decision_confidence", r.get("confidence", score)), score)
+    mtf=_aio_num(r.get("mtf_agreement_pct"), 0)
+    rr=r.get("rr", "N/A")
+    if bucket in ("BUY","SELL"):
+        icon="🟢" if bucket=="BUY" else "🔴"
+        return (f"{icon} {sym} | {decision} | C:{conf:.0f}% | MTF:{mtf:.0f}% | RR:{rr}\n"
+                f"   Entry {fmt(r.get('entry'))} | SL {fmt(r.get('sl'))} | TP1 {fmt(r.get('tp1'))}")
+    trigger=_aio_trigger(r)
+    direction=str(r.get("direction") or "NEUTRAL").upper()
+    return f"🟡 {sym} | {decision} | {direction} | Score:{score:.0f} | MTF:{mtf:.0f}% | Trigger: {trigger}"
+
+
+def _atlas_format_decision_batch(batch, batch_no, total_batches):
+    groups={"BUY":[],"SELL":[],"WAIT":[]}
+    for item in batch:
+        groups[item["bucket"]].append(item)
+    lines=[f"🧭 ATLAS DECISION COMMAND CENTER [{batch_no}/{total_batches}]",
+           "تغییرهای مهم تصمیم — BUY / SELL / WAIT", ""]
+    for bucket,title in (("BUY","🟢 BUY"),("SELL","🔴 SELL"),("WAIT","🟡 WAIT")):
+        if not groups[bucket]: continue
+        lines.append(title)
+        for item in groups[bucket]:
+            lines.append(_atlas_decision_change_line(item))
+        lines.append("")
+    lines.append("⚠️ تصمیم تحلیلی ATLAS است؛ اجرای معامله خودکار نیست.")
+    return "\n".join(lines)
+
+
 def send_signal_change_notifications(results, top10):
-    """Notify meaningful state/trend changes; first observation only seeds state."""
-    conn=_aio_notification_db(); sent=0; errors=[]; now=now_tehran()
+    """Batch meaningful decision changes; first observation only seeds state.
+
+    Phase 3.2 changes Telegram presentation only. The canonical decision,
+    confidence, Entry/SL/TP, evidence, MTF and portfolio-risk calculations are
+    read as-is and are never recomputed here.
+    """
+    conn=_aio_notification_db(); sent=0; errors=[]; now=now_tehran(); changes=[]
     try:
-        for r in _aio_selected_results(results,top10):
+        for r in (results or []):
             sym=_aio_symbol(r)
             decision=str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
             direction=str(r.get("direction") or "NEUTRAL").upper()
@@ -9483,18 +9639,105 @@ def send_signal_change_notifications(results, top10):
             meaningful=(decision in important or pd in important or
                         (ptrend!=trend and trend not in ("UNKNOWN","RANGE","NEUTRAL")))
             score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")))
-            if meaningful and score>=ATLAS_NOTIFICATION_MIN_SCORE:
-                msg=format_signal_notification(r,pd,pdir,ptrend)
-                if ATLAS_SIGNAL_MENTIONS: msg += "\\n\\n"+ATLAS_SIGNAL_MENTIONS
-                for c in dict.fromkeys([x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x]):
-                    try: telegram_send_one(c,msg); sent+=1
-                    except Exception as e: errors.append(f"SIGNAL_NOTIFY[{sym}] {c}: {e}")
+            bucket=_atlas_decision_bucket(decision)
+            if meaningful and score>=ATLAS_NOTIFICATION_MIN_SCORE and (bucket!="WAIT" or ATLAS_DECISION_SEND_WAIT):
+                changes.append({"result":r,"old_state":pd,"old_direction":pdir,"old_trend":ptrend,
+                                "score":score,"bucket":bucket})
+            # State tracking is intentionally independent from Telegram delivery.
             conn.execute("update signal_notifications set state=?,direction=?,trend=?,notified_at=? where symbol=?",
                          (decision,direction,trend,now.isoformat(),sym))
         conn.commit()
-    finally: conn.close()
+    finally:
+        conn.close()
+
+    # Priority: actionable BUY/SELL first, then WAIT; strongest score first.
+    priority={"BUY":0,"SELL":0,"WAIT":1}
+    changes.sort(key=lambda x:(priority.get(x["bucket"],2),-x["score"],_aio_symbol(x["result"])))
+    batches=[changes[i:i+ATLAS_DECISION_BATCH_SIZE] for i in range(0,len(changes),ATLAS_DECISION_BATCH_SIZE)]
+    destinations=list(dict.fromkeys([x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x]))
+    for idx,batch in enumerate(batches,1):
+        msg=_atlas_format_decision_batch(batch,idx,len(batches))
+        if ATLAS_SIGNAL_MENTIONS: msg += "\n\n"+ATLAS_SIGNAL_MENTIONS
+        for c in destinations:
+            try:
+                telegram_send_one(c,msg); sent+=1
+            except Exception as e:
+                errors.append(f"SIGNAL_BATCH[{idx}/{len(batches)}] {c}: {e}")
     return sent,errors
 
+
+# ============================================================
+# PHASE 3.3 — CURRENT MARKET DECISION BOARD
+# One compact current-state message per run. BUY/SELL are only canonical
+# confirmed decisions; every other state is exposed as WAIT, never upgraded.
+# ============================================================
+ATLAS_MARKET_BOARD_MAX_BUY = max(1, min(8, int(os.environ.get("ATLAS_MARKET_BOARD_MAX_BUY", "5"))))
+ATLAS_MARKET_BOARD_MAX_SELL = max(1, min(8, int(os.environ.get("ATLAS_MARKET_BOARD_MAX_SELL", "5"))))
+ATLAS_MARKET_BOARD_MAX_WAIT = max(1, min(8, int(os.environ.get("ATLAS_MARKET_BOARD_MAX_WAIT", "5"))))
+
+def _atlas_public_signal(r):
+    d = str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
+    state = str(r.get("decision_state") or "").upper()
+    if state == "BUY CONFIRMATION" or d in ("BUY", "BUY CONFIRMATION"):
+        return "BUY"
+    if state == "SELL CONFIRMATION" or d in ("SELL", "SELL CONFIRMATION"):
+        return "SELL"
+    return "WAIT"
+
+def _atlas_signal_strength(r):
+    score=max(_aio_num(r.get("decision_support_score")), _aio_num(r.get("opportunity_score")), _aio_num(r.get("confidence")))
+    evidence=str(r.get("evidence_agreement") or "").upper()
+    if score >= 80 and evidence not in ("LOW", "WEAK", "CONFLICTED"):
+        return "STRONG", score
+    if score >= 65:
+        return "GOOD", score
+    return "WATCH", score
+
+def _atlas_market_board_line(r):
+    sig=_atlas_public_signal(r); strength,score=_atlas_signal_strength(r)
+    sym=_aio_symbol(r); source="RADAR" if sym in set(_LAST_RADAR_CANDIDATES) else "CORE"
+    mtf=_aio_num(r.get("mtf_agreement_pct"),0); rr=r.get("rr")
+    if sig in ("BUY","SELL"):
+        icon="🟢" if sig=="BUY" else "🔴"
+        return f"{icon} {sym} [{source}] | {sig} {strength} | Score:{score:.0f} | MTF:{mtf:.0f}% | RR:{rr} | E:{fmt(r.get('entry'))} SL:{fmt(r.get('sl'))} TP1:{fmt(r.get('tp1'))}"
+    direction=str(r.get("direction") or "NEUTRAL").upper()
+    trigger=_aio_trigger(r)
+    return f"🟡 {sym} [{source}] | WAIT {strength} | {direction} | Score:{score:.0f} | MTF:{mtf:.0f}% | Trigger:{trigger}"
+
+def build_current_market_decision_board(results):
+    buckets={"BUY":[],"SELL":[],"WAIT":[]}
+    for r in results or []:
+        sig=_atlas_public_signal(r); _,score=_atlas_signal_strength(r)
+        buckets[sig].append((score,r))
+    for k in buckets:
+        buckets[k].sort(key=lambda x:x[0], reverse=True)
+    picks={
+        "BUY": buckets["BUY"][:ATLAS_MARKET_BOARD_MAX_BUY],
+        "SELL": buckets["SELL"][:ATLAS_MARKET_BOARD_MAX_SELL],
+        "WAIT": buckets["WAIT"][:ATLAS_MARKET_BOARD_MAX_WAIT],
+    }
+    dt=now_tehran()
+    lines=["🧭 ATLAS MARKET DECISION BOARD", dt.strftime("%Y-%m-%d %H:%M Tehran"),
+           f"📡 Broad radar outsiders deep-analyzed: {len(_LAST_RADAR_CANDIDATES)}", ""]
+    for key,title in (("BUY","🟢 BUY"),("SELL","🔴 SELL"),("WAIT","🟡 WAIT")):
+        lines.append(title)
+        if not picks[key]:
+            lines.append("— مورد تأییدشده‌ای نیست")
+        else:
+            lines.extend(_atlas_market_board_line(r) for _,r in picks[key])
+        lines.append("")
+    lines.append("BUY/SELL فقط از تصمیم تأییدشده موتور اصلی ATLAS است؛ Radar فقط کشف نامزد می‌کند و حق تولید سیگنال ندارد.")
+    return "\n".join(lines)
+
+def send_current_market_decision_board(results):
+    msg=build_current_market_decision_board(results)
+    sent=0; errors=[]
+    for c in dict.fromkeys([x for x in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID) if x]):
+        try:
+            telegram_send_one(c,msg); sent += 1
+        except Exception as e:
+            errors.append(f"MARKET_BOARD[{c}]: {e}")
+    return sent, errors
 
 
 # ============================================================
@@ -10299,29 +10542,40 @@ def format_lifecycle_notification(event):
         f"Time: {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran"
     )
 
+ATLAS_LIFECYCLE_BATCH_SIZE = max(5, min(15, int(os.environ.get("ATLAS_LIFECYCLE_BATCH_SIZE", "12"))))
+
+
 def notify_lifecycle_changes(events):
+    """Batch TP/SL lifecycle events without changing lifecycle detection/state."""
     if not ATLAS_LIFECYCLE_ALERTS:
         return 0,[]
-    sent,errors=0,[]
+    pending=[]; errors=[]
     for event in events or []:
         to_state=str(event.get("to") or "").upper()
         if to_state not in ATLAS_LIFECYCLE_ALERT_LEVELS:
             continue
         key=f"{event.get('symbol')}|{to_state}|{event.get('price')}"
-        if not _opt_should_send_alert(key):
-            continue
-        msg=format_lifecycle_notification(event)
-        ok=False
+        if _opt_should_send_alert(key):
+            pending.append((key,event))
+    batches=[pending[i:i+ATLAS_LIFECYCLE_BATCH_SIZE] for i in range(0,len(pending),ATLAS_LIFECYCLE_BATCH_SIZE)]
+    sent=0
+    for idx,batch in enumerate(batches,1):
+        lines=[f"🎯 ATLAS LIFECYCLE [{idx}/{len(batches)}]",""]
+        for _,e in batch:
+            st=str(e.get("to") or "").upper(); icon="🛑" if st=="SL" else "🎯"
+            lines.append(f"{icon} {e.get('symbol','?')} | {st} | Price {fmt(e.get('price'))} | From {e.get('from') or 'N/A'}")
+        msg="\n".join(lines)
+        delivered=False
         for c in _opt_telegram_destinations():
             try:
-                telegram_send_one(c,msg)
-                sent+=1
-                ok=True
+                telegram_send_one(c,msg); sent+=1; delivered=True
             except Exception as e:
-                errors.append(f"LIFECYCLE_ALERT[{event.get('symbol')}:{to_state}] {c}: {e}")
-        if ok:
-            _opt_mark_alert_sent(key)
+                errors.append(f"LIFECYCLE_BATCH[{idx}/{len(batches)}] {c}: {e}")
+        if delivered:
+            for key,_ in batch:
+                _opt_mark_alert_sent(key)
     return sent,errors
+
 
 def format_signal_notification(r, old_state, old_direction=None, old_trend=None):
     coin=_aio_symbol(r)
@@ -11225,7 +11479,7 @@ _ATLAS_PROFILE_GROUPS = {
         "decision_support_score", "build_decision_support",
     ],
     "Lifecycle / Signal Alerts": [
-        "notify_lifecycle_changes", "send_signal_change_notifications",
+        "notify_lifecycle_changes", "send_signal_change_notifications", "atlas_broad_market_radar", "send_current_market_decision_board",
         "format_lifecycle_notification", "format_signal_notification",
         "build_free_alert_events", "process_free_alert_events",
         "format_free_alert", "_atlas_build_tf_alerts",
@@ -11628,6 +11882,12 @@ def main():
             total_sent += aio_sent
             all_errors.extend(aio_errors)
             print(f"🧠 All-in-One documents sent: {aio_sent}, errors={len(aio_errors)}")
+
+            with _AtlasTimer("MARKET DECISION BOARD"):
+                board_sent, board_errors = send_current_market_decision_board(results)
+            total_sent += board_sent
+            all_errors.extend(board_errors)
+            print(f"🧭 Market decision board sent: {board_sent}, errors={len(board_errors)}")
 
             with _AtlasTimer("Signal Notifications"):
                 notify_sent, notify_errors = send_signal_change_notifications(results, top10)
