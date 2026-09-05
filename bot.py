@@ -164,7 +164,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 WORKFLOW + SUPABASE REDESIGN"
+VERSION = "ATLAS v11.5 PHASE 3.5 SMART HOURLY + TICKER OPTIMIZED"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -1432,6 +1432,9 @@ ATLAS_BATCH_TICKERS_CHUNK = max(10, int(os.environ.get("ATLAS_BATCH_TICKERS_CHUN
 ATLAS_PERSISTENT_BACKTEST_CACHE = os.environ.get("ATLAS_PERSISTENT_BACKTEST_CACHE", "1").strip() != "0"
 ATLAS_ANALYSIS_WORKERS = max(1, min(4, int(os.environ.get("ATLAS_ANALYSIS_WORKERS", "3"))))
 ATLAS_EXCHANGE_MAX_CONCURRENCY = max(1, min(3, int(os.environ.get("ATLAS_EXCHANGE_MAX_CONCURRENCY", "2"))))
+# Phase 3.5: batch ticker requests may run concurrently ACROSS exchanges only.
+# Per-exchange concurrency remains governed by ATLAS_EXCHANGE_MAX_CONCURRENCY.
+ATLAS_PREFETCH_EXCHANGE_WORKERS = max(1, min(6, int(os.environ.get("ATLAS_PREFETCH_EXCHANGE_WORKERS", "3"))))
 ATLAS_SQLITE_OHLCV_CACHE_ENABLED = os.environ.get("ATLAS_SQLITE_OHLCV_CACHE_ENABLED", "0").strip() == "1"
 
 _ATLAS_DATA_CACHE = {
@@ -1444,7 +1447,10 @@ _ATLAS_DATA_CACHE = {
 _ATLAS_CACHE_STATS = {}
 _ATLAS_OHLCV_PROVIDER_AFFINITY = {}
 _ATLAS_OHLCV_PROVIDER_FAILURES = set()
-_ATLAS_BATCH_TICKER_STATS = {"requests": 0, "symbols": 0, "failures": 0, "jit_batches": 0}
+_ATLAS_BATCH_TICKER_STATS = {"requests": 0, "symbols": 0, "failures": 0, "jit_batches": 0, "pinned_hits": 0}
+_ATLAS_TICKER_PIN = {}
+_ATLAS_TICKER_PIN_COINS = set()
+_ATLAS_TICKER_PIN_LOCK = threading.RLock()
 _ATLAS_BT_CACHE_STATS = {
     "sqlite_hit": 0,
     "supabase_hit": 0,
@@ -1468,7 +1474,10 @@ def _atlas_cache_reset():
     _ATLAS_CACHE_STATS.clear()
     _ATLAS_OHLCV_PROVIDER_AFFINITY.clear()
     _ATLAS_OHLCV_PROVIDER_FAILURES.clear()
-    _ATLAS_BATCH_TICKER_STATS.update({"requests": 0, "symbols": 0, "failures": 0, "jit_batches": 0})
+    _ATLAS_BATCH_TICKER_STATS.update({"requests": 0, "symbols": 0, "failures": 0, "jit_batches": 0, "pinned_hits": 0})
+    with _ATLAS_TICKER_PIN_LOCK:
+        _ATLAS_TICKER_PIN.clear()
+        _ATLAS_TICKER_PIN_COINS.clear()
     _ATLAS_BT_CACHE_STATS.update({
         "sqlite_hit": 0,
         "supabase_hit": 0,
@@ -1554,6 +1563,26 @@ def _atlas_exchange_guard(eid):
         _ATLAS_EXCHANGE_SEMAPHORES[key] = sem
     return sem
 
+def _atlas_pin_ticker_batch(coins):
+    """Pin only the CURRENT JIT analysis chunk.
+
+    This is not a cross-run or long-lived price cache. It guarantees that the
+    batch ticker snapshot fetched immediately before a chunk cannot expire in
+    the middle of analysing that same chunk. The pin is cleared as soon as the
+    chunk finishes, preserving price freshness for later stages/runs.
+    """
+    with _ATLAS_TICKER_PIN_LOCK:
+        _ATLAS_TICKER_PIN.clear()
+        _ATLAS_TICKER_PIN_COINS.clear()
+        _ATLAS_TICKER_PIN_COINS.update(str(x).upper() for x in (coins or []) if x)
+
+
+def _atlas_unpin_ticker_batch():
+    with _ATLAS_TICKER_PIN_LOCK:
+        _ATLAS_TICKER_PIN.clear()
+        _ATLAS_TICKER_PIN_COINS.clear()
+
+
 def _atlas_store_prefetched_ticker(eid, coin, ticker):
     if not isinstance(ticker, dict):
         return False
@@ -1565,14 +1594,72 @@ def _atlas_store_prefetched_ticker(eid, coin, ticker):
     }
     if result["price"] is None:
         return False
-    _atlas_ttl_set("ticker", (str(eid).lower(), str(coin).upper()), dict(result))
+    key = (str(eid).lower(), str(coin).upper())
+    _atlas_ttl_set("ticker", key, dict(result))
+    with _ATLAS_TICKER_PIN_LOCK:
+        if key[1] in _ATLAS_TICKER_PIN_COINS:
+            _ATLAS_TICKER_PIN[key] = dict(result)
     return True
 
-def _atlas_prefetch_tickers(universe):
-    """Prefetch all available ticker data per exchange using CCXT fetch_tickers.
 
-    Falls back safely to the existing per-symbol exchange_ticker path whenever
-    an exchange does not support batch ticker retrieval.
+def _atlas_prefetch_one_exchange(eid, ex, universe):
+    """Fetch ticker batches for one exchange; safe to run across exchanges."""
+    local = {"requests": 0, "symbols": 0, "failures": 0}
+    has_map = getattr(ex, "has", None) or {}
+    if isinstance(has_map, dict) and has_map.get("fetchTickers") is False:
+        return local
+    fn = getattr(ex, "fetch_tickers", None)
+    if not callable(fn):
+        return local
+
+    pairs = []
+    pair_to_coin = {}
+    for coin in universe:
+        sym = symbol_for(eid, coin)
+        if not sym:
+            continue
+        pairs.append(sym)
+        pair_to_coin[sym] = coin
+    if not pairs:
+        return local
+
+    for start in range(0, len(pairs), ATLAS_BATCH_TICKERS_CHUNK):
+        chunk = pairs[start:start + ATLAS_BATCH_TICKERS_CHUNK]
+        try:
+            local["requests"] += 1
+            try:
+                with _atlas_exchange_guard(eid):
+                    payload = fn(chunk)
+            except TypeError:
+                with _atlas_exchange_guard(eid):
+                    payload = fn()
+            if not isinstance(payload, dict):
+                continue
+            for pair, ticker in payload.items():
+                coin = pair_to_coin.get(pair)
+                if coin is None:
+                    base = str(pair).split("/")[0].upper()
+                    if base in universe:
+                        coin = base
+                if coin and _atlas_store_prefetched_ticker(eid, coin, ticker):
+                    local["symbols"] += 1
+        except Exception as e:
+            local["failures"] += 1
+            append_changelog(
+                "BATCH_TICKERS", None, None,
+                f"{eid}: batch prefetch failed; fallback to per-symbol ticker",
+                {"error": str(e)[:500], "symbols": len(chunk)},
+            )
+            break
+    return local
+
+
+def _atlas_prefetch_tickers(universe):
+    """Quality-safe ticker prefetch.
+
+    Exchanges are prefetched concurrently with independent per-exchange guards;
+    the source set and fallback behaviour are unchanged. The current JIT chunk
+    remains pinned until its analysis completes, avoiding TTL expiry mid-chunk.
     """
     if not ATLAS_BATCH_TICKERS_ENABLED:
         return {"requests": 0, "symbols": 0, "failures": 0}
@@ -1582,62 +1669,34 @@ def _atlas_prefetch_tickers(universe):
     if not universe:
         return dict(_ATLAS_BATCH_TICKER_STATS)
 
-    for eid, ex in list(EX.items()):
-        has_map = getattr(ex, "has", None) or {}
-        if isinstance(has_map, dict) and has_map.get("fetchTickers") is False:
-            continue
-        fn = getattr(ex, "fetch_tickers", None)
-        if not callable(fn):
-            continue
+    exchange_items = list(EX.items())
+    if ATLAS_PREFETCH_EXCHANGE_WORKERS <= 1 or len(exchange_items) <= 1:
+        rows = [_atlas_prefetch_one_exchange(eid, ex, universe) for eid, ex in exchange_items]
+    else:
+        rows = []
+        with _AtlasThreadPoolExecutor(
+            max_workers=min(ATLAS_PREFETCH_EXCHANGE_WORKERS, len(exchange_items)),
+            thread_name_prefix="atlas-ticker-prefetch",
+        ) as pool:
+            futures = [pool.submit(_atlas_prefetch_one_exchange, eid, ex, universe) for eid, ex in exchange_items]
+            for fut in _atlas_as_completed(futures):
+                rows.append(fut.result())
 
-        pairs = []
-        pair_to_coin = {}
-        for coin in universe:
-            sym = symbol_for(eid, coin)
-            if not sym:
-                continue
-            pairs.append(sym)
-            pair_to_coin[sym] = coin
-
-        if not pairs:
-            continue
-
-        for start in range(0, len(pairs), ATLAS_BATCH_TICKERS_CHUNK):
-            chunk = pairs[start:start + ATLAS_BATCH_TICKERS_CHUNK]
-            try:
-                _ATLAS_BATCH_TICKER_STATS["requests"] += 1
-                try:
-                    with _atlas_exchange_guard(eid):
-                        payload = fn(chunk)
-                except TypeError:
-                    # Some CCXT adapters only accept fetch_tickers() without symbols.
-                    with _atlas_exchange_guard(eid):
-                        payload = fn()
-                if not isinstance(payload, dict):
-                    continue
-
-                for pair, ticker in payload.items():
-                    coin = pair_to_coin.get(pair)
-                    if coin is None:
-                        # Normalize common "BTC/USDT:USDT" style contracts.
-                        base = str(pair).split("/")[0].upper()
-                        if base in universe:
-                            coin = base
-                    if coin and _atlas_store_prefetched_ticker(eid, coin, ticker):
-                        _ATLAS_BATCH_TICKER_STATS["symbols"] += 1
-            except Exception as e:
-                _ATLAS_BATCH_TICKER_STATS["failures"] += 1
-                append_changelog(
-                    "BATCH_TICKERS", None, None,
-                    f"{eid}: batch prefetch failed; fallback to per-symbol ticker",
-                    {"error": str(e)[:500], "symbols": len(chunk)},
-                )
-                break
-
+    for row in rows:
+        _ATLAS_BATCH_TICKER_STATS["requests"] += int(row.get("requests", 0))
+        _ATLAS_BATCH_TICKER_STATS["symbols"] += int(row.get("symbols", 0))
+        _ATLAS_BATCH_TICKER_STATS["failures"] += int(row.get("failures", 0))
     return dict(_ATLAS_BATCH_TICKER_STATS)
+
 
 def exchange_ticker(eid, coin):
     key = (str(eid).lower(), str(coin).upper())
+    with _ATLAS_TICKER_PIN_LOCK:
+        pinned = _ATLAS_TICKER_PIN.get(key)
+    if pinned is not None:
+        _ATLAS_BATCH_TICKER_STATS["pinned_hits"] += 1
+        return dict(pinned)
+
     cached = _atlas_ttl_get("ticker", key, ATLAS_TICKER_CACHE_TTL)
     if cached is not None:
         return dict(cached)
@@ -1657,6 +1716,9 @@ def exchange_ticker(eid, coin):
         "quoteVolume": f(t.get("quoteVolume")),
     }
     _atlas_ttl_set("ticker", key, dict(result))
+    with _ATLAS_TICKER_PIN_LOCK:
+        if key[1] in _ATLAS_TICKER_PIN_COINS:
+            _ATLAS_TICKER_PIN[key] = dict(result)
     return result
 
 def exchange_ohlcv(eid, coin, timeframe="4h", limit=250):
@@ -7239,25 +7301,29 @@ def report():
     for chunk_start in range(0, len(active_universe), chunk_size):
         chunk = active_universe[chunk_start:chunk_start + chunk_size]
         _ATLAS_BATCH_TICKER_STATS["jit_batches"] += 1
-        _atlas_prefetch_tickers(chunk)
+        _atlas_pin_ticker_batch(chunk)
+        try:
+            _atlas_prefetch_tickers(chunk)
 
-        if ATLAS_ANALYSIS_WORKERS <= 1 or len(chunk) <= 1:
-            chunk_outputs = [
-                _analyze_one((chunk_start + offset, coin))
-                for offset, coin in enumerate(chunk)
-            ]
-        else:
-            chunk_outputs = []
-            with _AtlasThreadPoolExecutor(
-                max_workers=min(ATLAS_ANALYSIS_WORKERS, len(chunk)),
-                thread_name_prefix="atlas-analysis",
-            ) as pool:
-                futures = [
-                    pool.submit(_analyze_one, (chunk_start + offset, coin))
+            if ATLAS_ANALYSIS_WORKERS <= 1 or len(chunk) <= 1:
+                chunk_outputs = [
+                    _analyze_one((chunk_start + offset, coin))
                     for offset, coin in enumerate(chunk)
                 ]
-                for fut in _atlas_as_completed(futures):
-                    chunk_outputs.append(fut.result())
+            else:
+                chunk_outputs = []
+                with _AtlasThreadPoolExecutor(
+                    max_workers=min(ATLAS_ANALYSIS_WORKERS, len(chunk)),
+                    thread_name_prefix="atlas-analysis",
+                ) as pool:
+                    futures = [
+                        pool.submit(_analyze_one, (chunk_start + offset, coin))
+                        for offset, coin in enumerate(chunk)
+                    ]
+                    for fut in _atlas_as_completed(futures):
+                        chunk_outputs.append(fut.result())
+        finally:
+            _atlas_unpin_ticker_batch()
 
         # Preserve original universe ordering in output/reporting.
         chunk_outputs.sort(key=lambda x: x[0])
@@ -7704,11 +7770,10 @@ def send_price_snapshot(results):
 def _automatic_run_plan(now=None):
     """Unified ATLAS scheduler.
 
-    Production scheduling is owned by GitHub Actions.  A real GitHub
-    ``schedule`` event always executes the complete ATLAS cycle
-    (ANALYSIS + SNAPSHOT), regardless of runner start delay.
-
-    ``workflow_dispatch`` continues to honor the selected ATLAS_RUN_MODE.
+    Production scheduling is owned by GitHub Actions. The workflow resolves
+    ATLAS_RUN_MODE explicitly: hourly surveillance uses ANALYSIS, while each
+    fourth-hour FULL cycle uses BOTH. Scheduled and manual events both honor
+    that resolved mode, so SNAPSHOT is not unnecessarily executed every hour.
     Legacy local AUTO scheduling remains available when GitHub does not
     own the cadence.
     """
@@ -7717,27 +7782,16 @@ def _automatic_run_plan(now=None):
     event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip().lower()
 
     if cadence == "workflow":
-        # ---------------------------------------------------------
-        # GitHub scheduled event: ALWAYS run the complete cycle.
-        # Do not inspect the local clock and do not depend on the
-        # exact cron minute. GitHub has already triggered the job.
-        # ---------------------------------------------------------
-        if event_name == "schedule":
-            return {"analysis": True, "snapshot": True}
-
-        # ---------------------------------------------------------
-        # Manual workflow_dispatch: honor the user's selection.
-        # ---------------------------------------------------------
+        # The workflow has already resolved the desired run mode. Honor it for
+        # BOTH scheduled and manual runs. This is delivery/scheduling only and
+        # does not modify any analytical engine or signal formula.
         if mode == "ANALYSIS":
             return {"analysis": True, "snapshot": False}
         if mode == "SNAPSHOT":
             return {"analysis": False, "snapshot": True}
         if mode == "BOTH":
             return {"analysis": True, "snapshot": True}
-
-        # If the workflow is configured for workflow cadence but the
-        # event metadata is unavailable, BOTH is the safest production
-        # fallback because the workflow itself is the scheduler.
+        # Safe fallback when metadata is missing/misconfigured.
         return {"analysis": True, "snapshot": True}
 
     # Legacy/manual AUTO scheduling remains available.
@@ -9711,41 +9765,84 @@ def _atlas_format_decision_batch(batch, batch_no, total_batches):
 
 
 def send_signal_change_notifications(results, top10):
-    """Batch meaningful decision changes; first observation only seeds state.
+    """Batch meaningful decision changes with persistent Supabase-first state.
 
-    Phase 3.2 changes Telegram presentation only. The canonical decision,
-    confidence, Entry/SL/TP, evidence, MTF and portfolio-risk calculations are
-    read as-is and are never recomputed here.
+    Hourly surveillance should WATCH every hour but notify only when the
+    canonical decision/direction/trend materially changes. Supabase keeps the
+    comparison state across ephemeral GitHub runners; SQLite remains fallback.
+    No decision, confidence, Entry/SL/TP, evidence, MTF or risk math is changed.
     """
-    conn=_aio_notification_db(); sent=0; errors=[]; now=now_tehran(); changes=[]
+    sent=0; errors=[]; now=now_tehran(); changes=[]
+    current_rows=[]
+
+    # Primary cross-run state for GitHub Actions.
+    remote_state={}
+    remote_ok=False
+    if STORE.enabled:
+        try:
+            rows=STORE.select(
+                "atlas_signal_notification_state",
+                {"select":"symbol,state,direction,trend,notified_at","limit":"500"},
+            ) or []
+            remote_state={str(x.get("symbol") or "").upper(): x for x in rows if x.get("symbol")}
+            remote_ok=True
+        except Exception as e:
+            append_changelog("SIGNAL_NOTIFY_STATE", None, None, f"Supabase read fallback to SQLite: {e}")
+
+    conn=None
+    if not remote_ok:
+        conn=_aio_notification_db()
+
     try:
         for r in (results or []):
             sym=_aio_symbol(r)
             decision=str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
             direction=str(r.get("direction") or "NEUTRAL").upper()
             trend=str(r.get("regime_trend") or "UNKNOWN").upper()
-            old=conn.execute("select state,direction,trend from signal_notifications where symbol=?",(sym,)).fetchone()
-            if not old:
-                conn.execute("insert or replace into signal_notifications values(?,?,?,?,?)",
-                             (sym,decision,direction,trend,now.isoformat())); continue
-            pd,pdir,ptrend=old
-            if (pd,pdir,ptrend)==(decision,direction,trend): continue
-            important={"BUY","SELL","EXIT","BUY CONFIRMATION","SELL CONFIRMATION","WATCH LONG","WATCH SHORT"}
-            meaningful=(decision in important or pd in important or
-                        (ptrend!=trend and trend not in ("UNKNOWN","RANGE","NEUTRAL")))
-            score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")))
-            bucket=_atlas_decision_bucket(decision)
-            if meaningful and score>=ATLAS_NOTIFICATION_MIN_SCORE and (bucket!="WAIT" or ATLAS_DECISION_SEND_WAIT):
-                changes.append({"result":r,"old_state":pd,"old_direction":pdir,"old_trend":ptrend,
-                                "score":score,"bucket":bucket})
-            # State tracking is intentionally independent from Telegram delivery.
-            conn.execute("update signal_notifications set state=?,direction=?,trend=?,notified_at=? where symbol=?",
-                         (decision,direction,trend,now.isoformat(),sym))
-        conn.commit()
-    finally:
-        conn.close()
 
-    # Priority: actionable BUY/SELL first, then WAIT; strongest score first.
+            if remote_ok:
+                oldrow=remote_state.get(sym)
+                old=(oldrow.get("state"), oldrow.get("direction"), oldrow.get("trend")) if oldrow else None
+            else:
+                row=conn.execute("select state,direction,trend from signal_notifications where symbol=?",(sym,)).fetchone()
+                old=tuple(row) if row else None
+
+            # First observation seeds state and intentionally sends nothing.
+            if old:
+                pd,pdir,ptrend=old
+                if (pd,pdir,ptrend)!=(decision,direction,trend):
+                    important={"BUY","SELL","EXIT","BUY CONFIRMATION","SELL CONFIRMATION","WATCH LONG","WATCH SHORT"}
+                    meaningful=(decision in important or pd in important or
+                                (ptrend!=trend and trend not in ("UNKNOWN","RANGE","NEUTRAL")))
+                    score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")))
+                    bucket=_atlas_decision_bucket(decision)
+                    if meaningful and score>=ATLAS_NOTIFICATION_MIN_SCORE and (bucket!="WAIT" or ATLAS_DECISION_SEND_WAIT):
+                        changes.append({"result":r,"old_state":pd,"old_direction":pdir,"old_trend":ptrend,
+                                        "score":score,"bucket":bucket})
+
+            current_rows.append({
+                "symbol":sym,"state":decision,"direction":direction,"trend":trend,
+                "notified_at":now.isoformat(),
+            })
+            if not remote_ok:
+                conn.execute("insert or replace into signal_notifications values(?,?,?,?,?)",
+                             (sym,decision,direction,trend,now.isoformat()))
+
+        if remote_ok and current_rows:
+            try:
+                ok=STORE.upsert_many("atlas_signal_notification_state", current_rows, "symbol")
+                if not ok:
+                    errors.append("SIGNAL_STATE_SUPABASE: upsert returned false; run Phase 3.5 migration/RLS check")
+                    append_changelog("SIGNAL_NOTIFY_STATE", None, None, "Supabase upsert returned false; migration/RLS may be missing")
+            except Exception as e:
+                errors.append(f"SIGNAL_STATE_SUPABASE: {e}")
+                append_changelog("SIGNAL_NOTIFY_STATE", None, None, f"Supabase upsert failed: {e}")
+        elif conn is not None:
+            conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+
     priority={"BUY":0,"SELL":0,"WAIT":1}
     changes.sort(key=lambda x:(priority.get(x["bucket"],2),-x["score"],_aio_symbol(x["result"])))
     batches=[changes[i:i+ATLAS_DECISION_BATCH_SIZE] for i in range(0,len(changes),ATLAS_DECISION_BATCH_SIZE)]
@@ -11846,6 +11943,8 @@ def build_performance_telemetry_report():
         f"- symbols cached: {_ATLAS_BATCH_TICKER_STATS.get('symbols', 0)}",
         f"- batch failures: {_ATLAS_BATCH_TICKER_STATS.get('failures', 0)}",
         f"- JIT ticker batches: {_ATLAS_BATCH_TICKER_STATS.get('jit_batches', 0)}",
+        f"- pinned ticker hits (current JIT chunk only): {_ATLAS_BATCH_TICKER_STATS.get('pinned_hits', 0)}",
+        f"- ticker prefetch exchange workers: {ATLAS_PREFETCH_EXCHANGE_WORKERS}",
         f"- analysis workers: {ATLAS_ANALYSIS_WORKERS}",
         f"- exchange max concurrency: {ATLAS_EXCHANGE_MAX_CONCURRENCY}",
         f"- OHLCV provider affinities learned: {len(_ATLAS_OHLCV_PROVIDER_AFFINITY)}",
@@ -11988,7 +12087,7 @@ def main():
         if scheduled_workflow:
             plan = _automatic_run_plan()
             do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
-            print("⏰ GitHub scheduled event detected → forcing ANALYSIS + SNAPSHOT")
+            print(f"⏰ GitHub scheduled event detected → honoring resolved ATLAS_RUN_MODE={run_mode}")
         elif run_mode == "AUTO":
             plan = _automatic_run_plan()
             do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
@@ -12088,14 +12187,25 @@ def main():
             all_errors.extend(aio_errors)
             print(f"🧠 All-in-One documents sent: {aio_sent}, errors={len(aio_errors)}")
 
-            with _AtlasTimer("MARKET DECISION BOARD"):
-                board_sent, board_errors = send_current_market_decision_board(results)
+            # Phase 3.5 smart hourly delivery: ALERTS_ONLY means surveillance is
+            # still complete, but recurring state boards are deferred to FULL.
+            # Hourly Telegram traffic therefore contains only event/state-change
+            # alerts (Free Alerts, Lifecycle, canonical Signal Changes).
+            if alerts_only:
+                board_sent, board_errors = 0, []
+                opp_board_sent, opp_board_errors = 0, []
+                print("ℹ️ Market Decision Board deferred to next FULL run (hourly smart-alert mode).")
+                print("ℹ️ Opportunity Board deferred to next FULL run (hourly smart-alert mode).")
+            else:
+                with _AtlasTimer("MARKET DECISION BOARD"):
+                    board_sent, board_errors = send_current_market_decision_board(results)
+                with _AtlasTimer("OPPORTUNITY BOARD"):
+                    opp_board_sent, opp_board_errors = send_phase34_opportunity_board(results)
             total_sent += board_sent
             all_errors.extend(board_errors)
+            total_sent += opp_board_sent
+            all_errors.extend(opp_board_errors)
             print(f"🧭 Market decision board sent: {board_sent}, errors={len(board_errors)}")
-            with _AtlasTimer("OPPORTUNITY BOARD"):
-                opp_board_sent, opp_board_errors = send_phase34_opportunity_board(results)
-            total_sent += opp_board_sent; all_errors.extend(opp_board_errors)
             print(f"🎯 Opportunity board sent: {opp_board_sent}, errors={len(opp_board_errors)}")
 
             with _AtlasTimer("Signal Notifications"):
