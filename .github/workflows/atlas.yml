@@ -1,14 +1,20 @@
 # ============================================================
-# ATLAS AI v11.5 / Phase 3.4 — Final Safe Merged Workflow
+# ATLAS AI v11.5 / Phase 3.5 — Smart Hourly Surveillance Workflow
 # ============================================================
-# Path: .github/workflows/atlas.yml
+# Path in repository: .github/workflows/atlas.yml
 #
-# Every hour at :30 UTC:
-# - Every 4th UTC hour => FULL
-# - Other hours         => ALERTS_ONLY
+# Schedule:
+# - Runs every hour at minute 30 UTC.
+# - Every 4th UTC hour => FULL delivery.
+# - Other scheduled runs => ALERTS_ONLY.
+# - Manual run lets you choose FULL / ALERTS_ONLY and run mode.
+#
+# Quality rule:
+# Hourly surveillance does NOT remove market/news/whale/risk inputs.
+# Heavy reports are only suppressed on ALERTS_ONLY runs by bot logic.
 # ============================================================
 
-name: ATLAS AI Hourly Surveillance
+name: ATLAS AI Smart Hourly Surveillance
 
 on:
   schedule:
@@ -56,7 +62,7 @@ jobs:
         uses: actions/checkout@v4
 
       # --------------------------------------------------------
-      # 2. Python
+      # 2. Python — preserve production version
       # --------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -87,20 +93,21 @@ jobs:
           else
             HOUR=$(date -u +%H)
 
-            # FULL reports:
+            # Keep full reporting aligned to the former 4-hour cadence:
             # 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
             if (( 10#$HOUR % 4 == 0 )); then
+              # Every 4h: complete analysis + snapshot + all reports.
               echo "ATLAS_DELIVERY_MODE=FULL" >> "$GITHUB_ENV"
+              echo "ATLAS_RUN_MODE_RESOLVED=BOTH" >> "$GITHUB_ENV"
             else
+              # Intermediate hours: full analytical surveillance, smart alerts only.
               echo "ATLAS_DELIVERY_MODE=ALERTS_ONLY" >> "$GITHUB_ENV"
+              echo "ATLAS_RUN_MODE_RESOLVED=ANALYSIS" >> "$GITHUB_ENV"
             fi
-
-            # Hourly surveillance always performs analysis.
-            echo "ATLAS_RUN_MODE_RESOLVED=ANALYSIS" >> "$GITHUB_ENV"
           fi
 
       # --------------------------------------------------------
-      # 5. Safe diagnostics
+      # 5. Safe diagnostics — never print secrets
       # --------------------------------------------------------
       - name: Show ATLAS configuration
         env:
@@ -109,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=================================================="
-          echo "ATLAS AI Phase 3.4"
+          echo "🚀 ATLAS AI Phase 3.5"
           echo "=================================================="
           echo "ATLAS_RUN_MODE=${ATLAS_RUN_MODE_RESOLVED}"
           echo "ATLAS_DELIVERY_MODE=${ATLAS_DELIVERY_MODE}"
@@ -125,155 +132,121 @@ jobs:
       # --------------------------------------------------------
       - name: Run ATLAS
         env:
-
-          # ==========================
-          # Core
-          # ==========================
+          # ----------------------------------------------------
+          # Core configuration
+          # ----------------------------------------------------
           PYTHONUNBUFFERED: "1"
           ATLAS_VERSION: "11.5"
           ATLAS_ENGINE: "BOTH"
           ATLAS_SCHEDULED_CADENCE: "workflow"
-
           ATLAS_RUN_MODE: ${{ env.ATLAS_RUN_MODE_RESOLVED }}
           ATLAS_DELIVERY_MODE: ${{ env.ATLAS_DELIVERY_MODE }}
-
           ATLAS_TIMEFRAME: "4H"
 
-          # ==========================
-          # Performance
-          # ==========================
+          # ----------------------------------------------------
+          # Performance / concurrency — quality-safe values
+          # ----------------------------------------------------
           ATLAS_ANALYSIS_WORKERS: "3"
           ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
-
+          ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
           ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
-
-          # Phase 3.4 persistent
-          # closed-candle cache
           ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
 
-          # ==========================
-          # TradingView
-          # ==========================
+          # ----------------------------------------------------
+          # TradingView / market configuration
+          # ----------------------------------------------------
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
           ATLAS_TRADINGVIEW_INTERVAL: "240"
-
           TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
-          # ==========================
+          # ----------------------------------------------------
           # Snapshot
-          # ==========================
+          # ----------------------------------------------------
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
-          # ==========================
-          # Risk Management
-          # ==========================
+          # ----------------------------------------------------
+          # Risk management — preserved
+          # ----------------------------------------------------
           RISK_PER_TRADE_PCT: "1.5"
-
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
-
           ATLAS_MAX_LEVERAGE: "10"
 
-          # ==========================
-          # Signal thresholds
-          # ==========================
+          # ----------------------------------------------------
+          # Signal thresholds — preserved
+          # ----------------------------------------------------
           ATLAS_MIN_CONFIDENCE: "55"
-
           ATLAS_MIN_WATCH_CONFIDENCE: "45"
-
           ATLAS_MIN_EXECUTABLE_RR: "1.5"
-
           ATLAS_MIN_VOLUME_RATIO: "0.60"
-
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
-
           ATLAS_H4_FALLBACK_MIN_SCORE: "60"
 
-          # ==========================
-          # Backtest
-          # ==========================
+          # ----------------------------------------------------
+          # Backtest — preserved
+          # ----------------------------------------------------
           ATLAS_BACKTEST_DAYS: "180"
-
           ATLAS_SIGNAL_HORIZON_BARS: "36"
-
           ATLAS_BACKTEST_IMPROVEMENT: "10"
-
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-          # ==========================
-          # Event / Alerts
-          # ==========================
+          # ----------------------------------------------------
+          # Event / alert behavior
+          # ----------------------------------------------------
           ATLAS_CANDLE_EVENT_DEDUP: "1"
-
           ATLAS_FREE_ALERTS_ENABLED: "1"
-
-          # INFO is persisted but
-          # not sent to Telegram.
           ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
-
-          # WATCH + STRONG batching
+          ATLAS_FREE_ALERT_SEND_INFO: "0"
           ATLAS_FREE_ALERT_BATCH_SIZE: "12"
 
-          # ==========================
+          # ----------------------------------------------------
           # Local storage
-          # ==========================
+          # ----------------------------------------------------
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
-
           ATLAS_CHANGELOG: "changelog.txt"
 
-          # ==========================
+          # ----------------------------------------------------
           # Telegram
-          # ==========================
+          # ----------------------------------------------------
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # ==========================
+          # ----------------------------------------------------
           # Supabase
-          # ==========================
-          # IMPORTANT:
-          # service-role key is NOT
-          # exposed to the bot.
+          # SECURITY: use anon key only; no service-role key.
+          # ----------------------------------------------------
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # ==========================
-          # Market Data APIs
-          # ==========================
+          # ----------------------------------------------------
+          # Market / data APIs
+          # ----------------------------------------------------
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
-
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # ==========================
-          # News / Sentiment
-          # ==========================
+          # ----------------------------------------------------
+          # News / sentiment
+          # ----------------------------------------------------
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
-
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-          # ==========================
+          # ----------------------------------------------------
           # Other APIs
-          # ==========================
+          # ----------------------------------------------------
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-          # ==========================
-          # Voice
-          # ==========================
+          # ----------------------------------------------------
+          # Voice report
+          # ----------------------------------------------------
           ATLAS_ENABLE_VOICE: "1"
-
           ATLAS_VOICE_TYPE: "female"
-
           ATLAS_VOICE_LANGUAGE: "fa"
-
           ATLAS_AUTO_SEND_VOICE: "1"
 
-          # ==========================
-          # PNG
-          # ==========================
+          # ----------------------------------------------------
+          # PNG report
+          # ----------------------------------------------------
           ATLAS_ENABLE_IMAGE_TABLE: "1"
 
         run: |
@@ -288,16 +261,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: atlas-failure-log-${{ github.run_id }}
-
           path: |
             *.log
             *.txt
             atlas_changelog.jsonl
             changelog.txt
             atlas_v11.sqlite3
-
           if-no-files-found: ignore
-
           retention-days: 7
 
       # --------------------------------------------------------
@@ -307,13 +277,13 @@ jobs:
         if: success()
         run: |
           echo "=================================================="
-          echo "ATLAS completed successfully"
-          echo "Event: ${{ github.event_name }}"
-          echo "Run mode: ${ATLAS_RUN_MODE_RESOLVED}"
-          echo "Delivery mode: ${ATLAS_DELIVERY_MODE}"
-          echo "Cadence: hourly surveillance / full every 4h"
-          echo "Timeframe: 4H + real MTF"
-          echo "Supabase: configured"
-          echo "Telegram: configured"
-          echo "Voice/PNG: preserved for FULL delivery"
+          echo "✅ ATLAS completed successfully"
+          echo "📅 Event: ${{ github.event_name }}"
+          echo "📌 Run mode: ${ATLAS_RUN_MODE_RESOLVED}"
+          echo "📌 Delivery mode: ${ATLAS_DELIVERY_MODE}"
+          echo "📌 Cadence: hourly ANALYSIS smart-alerts / BOTH+FULL every 4h"
+          echo "📌 Timeframe: 4H + real MTF"
+          echo "📌 Supabase: configured"
+          echo "📌 Telegram: configured"
+          echo "📌 Voice/PNG: preserved for FULL delivery"
           echo "=================================================="
