@@ -1867,6 +1867,7 @@ def _best_ohlcv_impl(coin, timeframe, limit=250):
                     _atlas_sqlite_ohlcv_set(
                         coin_key, tf_key, int(limit), stored_rows, eid.upper()
                     )
+                _atlas_persistent_ohlcv_stage(coin_key, tf_key, int(limit), stored_rows, eid.upper())
                 return _atlas_copy_rows(stored_rows), eid.upper()
         except Exception as e:
             kind = _classify_exchange_error(e)
@@ -1884,6 +1885,92 @@ def _best_ohlcv_impl(coin, timeframe, limit=250):
         f"{timeframe} DATA UNAVAILABLE: {coin} | providers tried={detail or 'none'}"
     )
 
+
+# ============================================================
+# PHASE 3.4 — QUALITY-SAFE PERSISTENT CLOSED-CANDLE CACHE
+# ============================================================
+# This cache never serves a stale closed-candle set. It is eligible only when
+# the cached last closed candle open timestamp equals the timestamp that should
+# be closed *now* for that exact timeframe. Because exchange_ohlcv() already
+# strips the incomplete/live candle, a matching closed-candle boundary means
+# the analytical OHLCV input is unchanged and a network refetch is redundant.
+# No synthetic candles, no cross-timeframe substitution, no cross-symbol reuse.
+ATLAS_PERSISTENT_CLOSED_OHLCV = os.environ.get("ATLAS_PERSISTENT_CLOSED_OHLCV", "1").strip().lower() not in ("0","false","no","off")
+_ATLAS_PERSISTENT_OHLCV = {}
+_ATLAS_PERSISTENT_OHLCV_DIRTY = {}
+_ATLAS_PERSISTENT_OHLCV_STATS = {"prefetched":0,"hits":0,"misses":0,"saved":0,"save_fail":0}
+
+def _atlas_expected_closed_ts_any(timeframe, now_ms=None):
+    now_ms=int(now_ms if now_ms is not None else time.time()*1000)
+    fixed={"15m":900000,"30m":1800000,"1h":3600000,"4h":14400000,"1d":86400000}
+    if timeframe in fixed:
+        cur=(now_ms//fixed[timeframe])*fixed[timeframe]
+        return cur-fixed[timeframe]
+    dt=datetime.fromtimestamp(now_ms/1000,tz=timezone.utc)
+    if timeframe=="1w":
+        cur=(dt-timedelta(days=dt.weekday())).replace(hour=0,minute=0,second=0,microsecond=0)
+        return int((cur-timedelta(days=7)).timestamp()*1000)
+    if timeframe=="1M":
+        cur=dt.replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+        prev=(cur.replace(year=cur.year-1,month=12) if cur.month==1 else cur.replace(month=cur.month-1))
+        return int(prev.timestamp()*1000)
+    return None
+
+def atlas_prefetch_persistent_ohlcv(symbols):
+    if not (ATLAS_PERSISTENT_CLOSED_OHLCV and STORE.enabled): return 0
+    syms=sorted({str(x).upper() for x in symbols if x})
+    if not syms: return 0
+    total=0
+    # PostgREST URL length stays bounded by chunking symbols.
+    for i in range(0,len(syms),25):
+        chunk=syms[i:i+25]
+        quoted=','.join(chunk)
+        rows=STORE.select("atlas_ohlcv_closed_cache", {
+            "select":"symbol,timeframe,provider,limit_n,last_closed_ts,rows_json,updated_at",
+            "symbol":f"in.({quoted})"
+        })
+        for row in rows or []:
+            try:
+                key=(str(row.get("symbol")).upper(),str(row.get("timeframe")))
+                data=json.loads(row.get("rows_json") or "[]")
+                if isinstance(data,list) and data:
+                    _ATLAS_PERSISTENT_OHLCV[key]={"provider":row.get("provider"),"limit":int(row.get("limit_n") or len(data)),"last_closed_ts":int(row.get("last_closed_ts")),"rows":data}
+                    total+=1
+            except Exception: pass
+    _ATLAS_PERSISTENT_OHLCV_STATS["prefetched"]+=total
+    return total
+
+def _atlas_persistent_ohlcv_get(coin,timeframe,limit):
+    if not ATLAS_PERSISTENT_CLOSED_OHLCV: return None
+    key=(str(coin).upper(),str(timeframe)); x=_ATLAS_PERSISTENT_OHLCV.get(key)
+    expected=_atlas_expected_closed_ts_any(str(timeframe))
+    if not x or expected is None or int(x.get("last_closed_ts",-1))!=int(expected) or int(x.get("limit",0))<int(limit):
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1; return None
+    rows=x.get("rows") or []
+    if len(rows)<min(60,int(limit)):
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1; return None
+    _ATLAS_PERSISTENT_OHLCV_STATS["hits"]+=1
+    return _atlas_copy_rows(rows[-int(limit):]), str(x.get("provider") or "PERSISTENT")
+
+def _atlas_persistent_ohlcv_stage(coin,timeframe,limit,rows,provider):
+    if not ATLAS_PERSISTENT_CLOSED_OHLCV or not rows: return
+    expected=_atlas_expected_closed_ts_any(str(timeframe))
+    try: last=int(rows[-1][0])
+    except Exception: return
+    if expected is None or last!=int(expected): return
+    key=(str(coin).upper(),str(timeframe))
+    payload={"symbol":key[0],"timeframe":key[1],"provider":str(provider),"limit_n":int(limit),"last_closed_ts":last,"rows_json":json.dumps(rows,separators=(",",":")),"updated_at":now_utc().isoformat()}
+    _ATLAS_PERSISTENT_OHLCV[key]={"provider":str(provider),"limit":int(limit),"last_closed_ts":last,"rows":_atlas_copy_rows(rows)}
+    _ATLAS_PERSISTENT_OHLCV_DIRTY[key]=payload
+
+def atlas_flush_persistent_ohlcv():
+    rows=list(_ATLAS_PERSISTENT_OHLCV_DIRTY.values())
+    if not rows or not STORE.enabled: return False
+    ok=STORE.upsert_many("atlas_ohlcv_closed_cache",rows,"symbol,timeframe")
+    if ok:
+        _ATLAS_PERSISTENT_OHLCV_STATS["saved"]+=len(rows); _ATLAS_PERSISTENT_OHLCV_DIRTY.clear()
+    else: _ATLAS_PERSISTENT_OHLCV_STATS["save_fail"]+=len(rows)
+    return ok
 
 # ============================================================
 # QUALITY-SAFE SHARED OHLCV CACHE COORDINATION
@@ -1949,6 +2036,12 @@ def best_ohlcv(coin, timeframe, limit=250):
     cached = _atlas_ohlcv_cache_read(coin, timeframe, limit, shared_telemetry=True)
     if cached is not None:
         return cached
+    persistent = _atlas_persistent_ohlcv_get(coin, timeframe, limit)
+    if persistent is not None:
+        rows, engine = persistent
+        _ATLAS_DATA_CACHE["ohlcv"][(str(coin).upper(), str(timeframe))] = {"limit":int(limit),"rows":_atlas_copy_rows(rows),"engine":engine}
+        _atlas_cache_stat("ohlcv", True); _atlas_cache_stat("ohlcv_shared", True)
+        return _atlas_copy_rows(rows), engine
 
     lock = _atlas_ohlcv_key_lock(coin, timeframe)
     with lock:
@@ -7092,6 +7185,8 @@ def report():
     _LAST_RADAR_CANDIDATES = list(radar_candidates)
     _LAST_RADAR_META = dict(radar_meta or {})
     analysis_universe = list(dict.fromkeys(list(universe) + list(radar_candidates)))
+    persistent_prefetched = atlas_prefetch_persistent_ohlcv(analysis_universe)
+    print(f"🧊 Persistent closed-OHLCV prefetched: {persistent_prefetched}")
     print(f"📡 Broad Market Radar: scanned={_LAST_RADAR_META.get('scan_count', 0)}, deep_candidates={len(radar_candidates)} → {radar_candidates}")
     _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
@@ -9667,6 +9762,111 @@ def send_signal_change_notifications(results, top10):
 
 
 # ============================================================
+# PHASE 3.4 — OPPORTUNITY BOARD + RESEARCH LAB (ADVISORY/SHADOW ONLY)
+# Canonical BUY/SELL/WAIT remains exclusively owned by the existing Decision Engine.
+ATLAS_PRETRIGGER_MIN_SCORE=float(os.environ.get("ATLAS_PRETRIGGER_MIN_SCORE","68"))
+ATLAS_PRETRIGGER_MIN_MTF=float(os.environ.get("ATLAS_PRETRIGGER_MIN_MTF","60"))
+
+def atlas_opportunity_tier(r):
+    sig=_atlas_public_signal(r) if '_atlas_public_signal' in globals() else "WAIT"
+    if sig in ("BUY","SELL"): return "ACTION_NOW"
+    score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")),_aio_num(r.get("confidence")))
+    mtf=_aio_num(r.get("mtf_agreement_pct"),0)
+    direction=str(r.get("direction") or "NEUTRAL").upper()
+    if score>=ATLAS_PRETRIGGER_MIN_SCORE and mtf>=ATLAS_PRETRIGGER_MIN_MTF and direction in ("LONG","SHORT"):
+        return "PRE_TRIGGER"
+    return "NO_EDGE"
+
+def _atlas_bayesian_shadow(r):
+    # Beta posterior around the already-existing calibrated historical win rate.
+    # It is deliberately NOT fed back into canonical decisions until validated.
+    p=r.get("win_probability"); n=int(r.get("win_probability_samples") or 0)
+    if p is None or n<30: return {"available":False}
+    p=max(0.001,min(0.999,float(p)/100.0 if float(p)>1 else float(p)))
+    alpha=1+p*n; beta=1+(1-p)*n; mean=alpha/(alpha+beta)
+    var=(alpha*beta)/(((alpha+beta)**2)*(alpha+beta+1)); sd=math.sqrt(max(0,var))
+    lo=max(0,mean-1.96*sd); hi=min(1,mean+1.96*sd)
+    return {"available":True,"mean_pct":round(mean*100,1),"lo95_pct":round(lo*100,1),"hi95_pct":round(hi*100,1),"samples":n}
+
+def _atlas_fractional_kelly_shadow(r):
+    b=_aio_num(r.get("rr"),0); bay=_atlas_bayesian_shadow(r)
+    if not bay.get("available") or b<=0: return None
+    p=bay["mean_pct"]/100; q=1-p; full=(b*p-q)/b
+    # Quarter-Kelly + hard 2% capital cap: advisory only, never position execution.
+    return round(max(0,min(0.02,0.25*full))*100,2)
+
+def _atlas_symbol_profile(r):
+    sym=_aio_symbol(r); atr=_aio_num(r.get("atr_pct"),0); liq=_aio_num(r.get("liquidity_score"),0)
+    if sym in ("BTC","ETH"): group="MAJOR"
+    elif sym in ("DOGE","SHIB","PEPE","BONK","WIF","FLOKI"): group="MEME"
+    elif atr>=6: group="HIGH_VOL_ALT"
+    else: group="ALT"
+    return {"group":group,"atr_pct":atr,"liquidity":liq}
+
+def _atlas_dynamic_exit_shadow(r):
+    # Advisory lifecycle policy only. Existing Entry/SL/TP values are untouched.
+    sig=_atlas_public_signal(r) if '_atlas_public_signal' in globals() else "WAIT"
+    if sig not in ("BUY","SELL"): return "NO_POSITION"
+    mtf=_aio_num(r.get("mtf_agreement_pct"),0); strength=max(_aio_num(r.get("confidence")),_aio_num(r.get("decision_support_score")))
+    if mtf>=80 and strength>=80: return "TP1→BREAKEVEN; TP2+→ATR_TRAIL"
+    if mtf>=65: return "TP1→BREAKEVEN"
+    return "KEEP_ORIGINAL_SL_TP"
+
+def apply_phase34_research_shadow(results):
+    for r in results or []:
+        r["opportunity_tier"]=atlas_opportunity_tier(r)
+        r["bayesian_shadow"]=_atlas_bayesian_shadow(r)
+        r["fractional_kelly_pct_shadow"]=_atlas_fractional_kelly_shadow(r)
+        r["symbol_profile_shadow"]=_atlas_symbol_profile(r)
+        r["dynamic_exit_shadow"]=_atlas_dynamic_exit_shadow(r)
+    return results
+
+def persist_phase34_research_features(results):
+    """Append-only feature store for future walk-forward ML research. No model output is used live."""
+    rows=[]
+    for r in results or []:
+        snap=(r.get("snapshots") or {}).get("4h",{})
+        rows.append({
+            "timestamp":now_utc().isoformat(),"symbol":_aio_symbol(r),
+            "signal_candle_ts":r.get("signal_candle_ts"),"decision_state":r.get("decision_state"),
+            "direction":r.get("direction"),"signal_score":r.get("signal_score"),
+            "opportunity_score":r.get("opportunity_score"),"decision_support_score":r.get("decision_support_score"),
+            "confidence":r.get("confidence"),"win_probability":r.get("win_probability"),
+            "mtf_agreement_pct":r.get("mtf_agreement_pct"),"rsi_4h":snap.get("rsi"),
+            "macd_state_4h":snap.get("macd_state"),"atr_pct":r.get("atr_pct"),
+            "liquidity_score":r.get("liquidity_score"),"regime_trend":r.get("regime_trend"),
+            "regime_volatility":r.get("regime_volatility"),"opportunity_tier":r.get("opportunity_tier"),
+            "model_version":VERSION
+        })
+    return STORE.insert_many("atlas_ml_feature_store",rows) if rows else False
+
+def build_phase34_opportunity_board(results,max_each=7):
+    groups={"ACTION_NOW":[],"PRE_TRIGGER":[],"NO_EDGE":[]}
+    for r in results or []:
+        t=r.get("opportunity_tier") or atlas_opportunity_tier(r)
+        score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")),_aio_num(r.get("confidence")))
+        groups[t].append((score,r))
+    for k in groups: groups[k].sort(key=lambda x:x[0],reverse=True)
+    lines=["🎯 ATLAS MARKET OPPORTUNITY BOARD",now_tehran().strftime("%Y-%m-%d %H:%M Tehran"),""]
+    for k,title in (("ACTION_NOW","🔥 ACTION NOW"),("PRE_TRIGGER","👀 PRE-TRIGGER"),("NO_EDGE","🧊 NO EDGE")):
+        lines.append(title)
+        picks=groups[k][:(max_each if k!="NO_EDGE" else 3)]
+        if not picks: lines.append("— none")
+        for score,r in picks:
+            sym=_aio_symbol(r); sig=_atlas_public_signal(r) if '_atlas_public_signal' in globals() else "WAIT"; mtf=_aio_num(r.get("mtf_agreement_pct"),0)
+            src="RADAR" if sym in set(_LAST_RADAR_CANDIDATES) else "CORE"
+            lines.append(f"{sym} [{src}] | {sig} | Score:{score:.0f} | MTF:{mtf:.0f}% | {str(r.get('direction') or 'NEUTRAL').upper()}")
+        lines.append("")
+    lines.append("PRE-TRIGGER هرگز BUY/SELL نیست؛ فقط نزدیک‌ترین WAITها به فعال‌شدن را نشان می‌دهد.")
+    return "\n".join(lines)
+
+def send_phase34_opportunity_board(results):
+    msg=build_phase34_opportunity_board(results); sent=0; errors=[]
+    for c in dict.fromkeys([x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x]):
+        try: telegram_send_one(c,msg); sent+=1
+        except Exception as e: errors.append(f"OPPORTUNITY_BOARD[{c}]: {e}")
+    return sent,errors
+
 # PHASE 3.3 — CURRENT MARKET DECISION BOARD
 # One compact current-state message per run. BUY/SELL are only canonical
 # confirmed decisions; every other state is exposed as WAIT, never upgraded.
@@ -11805,6 +12005,7 @@ def main():
         total_sent = 0
         all_errors = []
         analysis_results = []
+        alerts_only = os.environ.get("ATLAS_DELIVERY_MODE", "FULL").strip().upper() == "ALERTS_ONLY"
         
         # متغیرهای پیش‌فرض برای همه حالت‌ها
         news = None
@@ -11834,6 +12035,8 @@ def main():
                 portfolio_risk = build_portfolio_risk_intelligence(results, top10)
                 results = apply_portfolio_risk_context(results, portfolio_risk)
                 lifecycle_events = update_signal_lifecycle(results, top10)
+                results = apply_phase34_research_shadow(results)
+                persist_phase34_research_features(results)
             with _AtlasTimer("FREE ALERT ENGINE"):
                 free_alert_events = build_free_alert_events(results)
                 free_alert_sent, free_alert_errors, free_alert_skipped, free_alert_pending = process_free_alert_events(free_alert_events)
@@ -11862,10 +12065,11 @@ def main():
 
             print("📊 Generating 2 separate analysis documents...")
 
-            with _AtlasTimer("Analysis CSV Reports"):
-                analysis_doc_sent, analysis_doc_errors = send_analysis_documents(
-                    results, top10, dynamic30
-                )
+            if alerts_only:
+                analysis_doc_sent, analysis_doc_errors = 0, []
+            else:
+                with _AtlasTimer("Analysis CSV Reports"):
+                    analysis_doc_sent, analysis_doc_errors = send_analysis_documents(results, top10, dynamic30)
 
             total_sent += analysis_doc_sent
             all_errors.extend(analysis_doc_errors)
@@ -11875,10 +12079,11 @@ def main():
                 f"errors={len(analysis_doc_errors)}"
             )
 
-            with _AtlasTimer("ALL-IN-ONE REPORT DELIVERY"):
-                aio_sent, aio_errors = send_all_in_one_documents(
-                    results, top10, macro, news, btc_regime
-                )
+            if alerts_only:
+                aio_sent, aio_errors = 0, []
+            else:
+                with _AtlasTimer("ALL-IN-ONE REPORT DELIVERY"):
+                    aio_sent, aio_errors = send_all_in_one_documents(results, top10, macro, news, btc_regime)
             total_sent += aio_sent
             all_errors.extend(aio_errors)
             print(f"🧠 All-in-One documents sent: {aio_sent}, errors={len(aio_errors)}")
@@ -11888,6 +12093,10 @@ def main():
             total_sent += board_sent
             all_errors.extend(board_errors)
             print(f"🧭 Market decision board sent: {board_sent}, errors={len(board_errors)}")
+            with _AtlasTimer("OPPORTUNITY BOARD"):
+                opp_board_sent, opp_board_errors = send_phase34_opportunity_board(results)
+            total_sent += opp_board_sent; all_errors.extend(opp_board_errors)
+            print(f"🎯 Opportunity board sent: {opp_board_sent}, errors={len(opp_board_errors)}")
 
             with _AtlasTimer("Signal Notifications"):
                 notify_sent, notify_errors = send_signal_change_notifications(results, top10)
@@ -11895,19 +12104,23 @@ def main():
             all_errors.extend(notify_errors)
             print(f"🚨 Signal-change notifications sent: {notify_sent}, errors={len(notify_errors)}")
 
-            with _AtlasTimer("PHASE-1 REPORT DELIVERY"):
-                phase1_sent, phase1_errors = send_phase1_documents(
-                    results, top10, portfolio_risk
-                )
+            if alerts_only:
+                phase1_sent, phase1_errors = 0, []
+            else:
+                with _AtlasTimer("PHASE-1 REPORT DELIVERY"):
+                    phase1_sent, phase1_errors = send_phase1_documents(results, top10, portfolio_risk)
             total_sent += phase1_sent
             all_errors.extend(phase1_errors)
             print(
                 f"🧩 Phase-1 documents sent: {phase1_sent}, "
                 f"lifecycle_events={len(lifecycle_events)}, errors={len(phase1_errors)}"
             )
-            with _AtlasTimer("Backtest Dashboard"):
-                backtest_dashboard = build_backtest_report()
-                opt_sent, opt_errors = send_optimization_documents(backtest_dashboard)
+            if alerts_only:
+                opt_sent, opt_errors = 0, []
+            else:
+                with _AtlasTimer("Backtest Dashboard"):
+                    backtest_dashboard = build_backtest_report()
+                    opt_sent, opt_errors = send_optimization_documents(backtest_dashboard)
             total_sent += opt_sent
             all_errors.extend(opt_errors)
             print(f"📈 Backtest dashboard sent: {opt_sent}, errors={len(opt_errors)}")
@@ -11916,7 +12129,7 @@ def main():
             outputs = []
 
             # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
-            if ENABLE_IMAGE_TABLE:
+            if ENABLE_IMAGE_TABLE and not alerts_only:
                 print("📸 Generating image table...")
                 with _AtlasTimer("PNG / IMAGE"):
                     image_sent = send_image_table(results, top10, dynamic30)
@@ -11933,18 +12146,22 @@ def main():
             # accuracy of the 4H/24H direction lookups in build_price_snapshot.
             with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
                 _save_snapshot_history(results, now_tehran().isoformat())
+            atlas_flush_persistent_ohlcv()
             
             # Keep the existing legacy CSV delivery active exactly as before.
             # The three requested analysis documents are additional outputs;
             # personal / metals / dynamic_top30 remain enabled.
-            print("📊 Generating legacy split CSV reports...")
-            with _AtlasTimer("LEGACY CSV DELIVERY"):
-                csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
+            print("📊 Generating legacy split CSV reports..." if not alerts_only else "ℹ️ Legacy CSV delivery deferred to next FULL run (generation logic unchanged).")
+            if alerts_only:
+                csv_sent, csv_errors = 0, []
+            else:
+                with _AtlasTimer("LEGACY CSV DELIVERY"):
+                    csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
             total_sent += csv_sent
             all_errors.extend(csv_errors)
             print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
 
-            perf_sent, perf_errors = send_performance_telemetry_report()
+            perf_sent, perf_errors = (0, []) if alerts_only else send_performance_telemetry_report()
             total_sent += perf_sent
             all_errors.extend(perf_errors)
             print(f"⏱ Performance telemetry sent: {perf_sent}, errors={len(perf_errors)}")
@@ -11967,7 +12184,7 @@ def main():
         # ============================================================
         # VOICE REPORT - با بررسی وجود داده
         # ============================================================
-        if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
+        if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE and not alerts_only:
             try:
                 print("\n🎤 Generating audio report...")
                 
