@@ -9720,6 +9720,7 @@ def _aio_notification_db():
 # Presentation/delivery only: canonical decision math remains untouched.
 ATLAS_DECISION_BATCH_SIZE = max(5, min(15, int(os.environ.get("ATLAS_DECISION_BATCH_SIZE", "12"))))
 ATLAS_DECISION_SEND_WAIT = os.environ.get("ATLAS_DECISION_SEND_WAIT", "1").strip().lower() not in ("0","false","no","off")
+ATLAS_NOTIFICATION_MIN_SCORE = float(os.environ.get("ATLAS_NOTIFICATION_MIN_SCORE", "68"))
 
 
 def _atlas_decision_bucket(decision):
