@@ -1,471 +1,181 @@
 # ============================================================
-# ATLAS AI v11.5 — GitHub Actions
+# ATLAS AI v11.5 / Phase 3.4 — Final Safe Merged Workflow
 # ============================================================
+# Path: .github/workflows/atlas.yml
 #
-# File:
-# .github/workflows/atlas.yml
-#
-# Automatic execution:
-# Every 4 hours
-#
-# UTC cron:
-# 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
-#
-# Iran (UTC+3:30):
-# 04:00 / 08:00 / 12:00 / 16:00 / 20:00 / 00:00 Tehran
-#
-# Correct Supabase project:
-# Project Ref:
-# onnyytvtfcvlzkagijzz
-#
-# Project URL:
-# https://onnyytvtfcvlzkagijzz.supabase.co
-#
-# SECURITY:
-# - No API keys are hard-coded in this workflow.
-# - SUPABASE_ANON_KEY is loaded from GitHub Secrets.
-# - SUPABASE_SERVICE_ROLE_KEY is intentionally NOT passed.
+# Every hour at :30 UTC:
+# - Every 4th UTC hour => FULL
+# - Other hours         => ALERTS_ONLY
 # ============================================================
 
-
-name: ATLAS AI Bot
-
+name: ATLAS AI Hourly Surveillance
 
 on:
-
   schedule:
-    - cron: "30 */4 * * *"
+    - cron: "30 * * * *"
 
   workflow_dispatch:
     inputs:
-
       run_mode:
         description: "ATLAS execution mode"
         required: true
-        default: "BOTH"
+        default: "ANALYSIS"
         type: choice
-
         options:
           - ANALYSIS
           - SNAPSHOT
           - BOTH
 
-
-# ============================================================
-# Permissions
-# ============================================================
+      delivery_mode:
+        description: "Telegram/report delivery mode"
+        required: true
+        default: "FULL"
+        type: choice
+        options:
+          - FULL
+          - ALERTS_ONLY
 
 permissions:
   contents: read
-
-
-# ============================================================
-# Concurrency
-# ============================================================
-#
-# Prevent two ATLAS jobs from running at the same time.
-#
-# cancel-in-progress=false:
-# A running ATLAS cycle will not be killed when another
-# scheduled/manual execution is triggered.
-# ============================================================
 
 concurrency:
   group: atlas-bot
   cancel-in-progress: false
 
-
-# ============================================================
-# JOBS
-# ============================================================
-
 jobs:
-
   run-atlas:
-
     name: Run ATLAS AI
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 35
 
-
     steps:
-
-      # ========================================================
-      # 1. CHECKOUT
-      # ========================================================
-
+      # --------------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
-      # ========================================================
-      # 2. PYTHON
-      # ========================================================
-
+      # --------------------------------------------------------
+      # 2. Python
+      # --------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
-
         with:
           python-version: "3.11"
           cache: "pip"
 
-
-      # ========================================================
-      # 3. DEPENDENCIES
-      # ========================================================
-
+      # --------------------------------------------------------
+      # 3. Dependencies
+      # --------------------------------------------------------
       - name: Install dependencies
-
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # --------------------------------------------------------
+      # 4. Select scheduled delivery mode
+      # --------------------------------------------------------
+      - name: Select delivery mode
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # ========================================================
-      # 4. ATLAS CONFIGURATION
-      # ========================================================
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ATLAS_DELIVERY_MODE=${{ inputs.delivery_mode }}" >> "$GITHUB_ENV"
+            echo "ATLAS_RUN_MODE_RESOLVED=${{ inputs.run_mode }}" >> "$GITHUB_ENV"
+          else
+            HOUR=$(date -u +%H)
 
+            # FULL reports:
+            # 00:30 / 04:30 / 08:30 / 12:30 / 16:30 / 20:30 UTC
+            if (( 10#$HOUR % 4 == 0 )); then
+              echo "ATLAS_DELIVERY_MODE=FULL" >> "$GITHUB_ENV"
+            else
+              echo "ATLAS_DELIVERY_MODE=ALERTS_ONLY" >> "$GITHUB_ENV"
+            fi
+
+            # Hourly surveillance always performs analysis.
+            echo "ATLAS_RUN_MODE_RESOLVED=ANALYSIS" >> "$GITHUB_ENV"
+          fi
+
+      # --------------------------------------------------------
+      # 5. Safe diagnostics
+      # --------------------------------------------------------
       - name: Show ATLAS configuration
-
         env:
-
-          ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
-
-          ATLAS_SCHEDULED_CADENCE: "workflow"
-
           ATLAS_ENGINE: "BOTH"
-
+          ATLAS_SCHEDULED_CADENCE: "workflow"
         run: |
-
+          set -euo pipefail
           echo "=================================================="
-          echo "🚀 ATLAS AI v11.5"
+          echo "ATLAS AI Phase 3.4"
           echo "=================================================="
-
-          echo "ATLAS_RUN_MODE=${ATLAS_RUN_MODE}"
-
+          echo "ATLAS_RUN_MODE=${ATLAS_RUN_MODE_RESOLVED}"
+          echo "ATLAS_DELIVERY_MODE=${ATLAS_DELIVERY_MODE}"
           echo "ATLAS_SCHEDULED_CADENCE=${ATLAS_SCHEDULED_CADENCE}"
-
           echo "ATLAS_ENGINE=${ATLAS_ENGINE}"
-
           echo "GitHub event: ${{ github.event_name }}"
-
           echo "GitHub ref: ${{ github.ref }}"
-
+          echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
           echo "=================================================="
 
-
-      # ========================================================
-      # 5. VERIFY TELEGRAM SECRETS
-      # ========================================================
-
-      - name: Verify Telegram secrets
-
-        env:
-
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
-
-        run: |
-
-          missing=0
-
-          if [ -z "$TELEGRAM_TOKEN" ]; then
-
-            echo "❌ Secret TELEGRAM_TOKEN is missing"
-
-            missing=1
-
-          fi
-
-
-          if [ -z "$TELEGRAM_CHAT_ID" ] && [ -z "$TELEGRAM_GROUP_CHAT_ID" ]; then
-
-            echo "❌ Neither TELEGRAM_CHAT_ID nor TELEGRAM_GROUP_CHAT_ID is set"
-
-            missing=1
-
-          fi
-
-
-          if [ "$missing" = "1" ]; then
-
-            echo "⛔ Required Telegram secrets are missing."
-
-            exit 1
-
-          fi
-
-
-          echo "✅ Telegram secrets present"
-
-
-      # ========================================================
-      # 6. VERIFY SUPABASE CONFIGURATION
-      # ========================================================
-      #
-      # This validation does NOT print the API key.
-      #
-      # It verifies:
-      #
-      # 1. SUPABASE_URL exists
-      # 2. SUPABASE_ANON_KEY exists
-      # 3. URL is HTTPS
-      # 4. Project Ref is the correct ATLAS project
-      #
-      # Correct project:
-      #
-      # onnyytvtfcvlzkagijzz
-      #
-      # ========================================================
-
-      - name: Verify Supabase configuration
-
-        env:
-
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-
-        run: |
-
-          python - <<'PY'
-
-          import os
-          from urllib.parse import urlparse
-
-
-          EXPECTED_PROJECT_REF = "onnyytvtfcvlzkagijzz"
-
-
-          url = os.environ.get(
-              "SUPABASE_URL",
-              ""
-          ).strip()
-
-
-          anon_key = os.environ.get(
-              "SUPABASE_ANON_KEY",
-              ""
-          ).strip()
-
-
-          errors = []
-
-
-          # ----------------------------------------------------
-          # URL existence
-          # ----------------------------------------------------
-
-          if not url:
-
-              errors.append(
-                  "SUPABASE_URL is missing"
-              )
-
-
-          # ----------------------------------------------------
-          # ANON KEY existence
-          # ----------------------------------------------------
-
-          if not anon_key:
-
-              errors.append(
-                  "SUPABASE_ANON_KEY is missing"
-              )
-
-
-          # ----------------------------------------------------
-          # Parse project URL
-          # ----------------------------------------------------
-
-          project_ref = "UNKNOWN"
-
-
-          if url:
-
-              try:
-
-                  parsed = urlparse(url)
-
-                  host = parsed.hostname or ""
-
-                  if parsed.scheme != "https":
-
-                      errors.append(
-                          "SUPABASE_URL must use HTTPS"
-                      )
-
-
-                  if host:
-
-                      project_ref = host.split(".")[0]
-
-                  else:
-
-                      errors.append(
-                          "SUPABASE_URL hostname is invalid"
-                      )
-
-
-              except Exception:
-
-                  errors.append(
-                      "SUPABASE_URL could not be parsed"
-                  )
-
-
-          # ----------------------------------------------------
-          # Safe diagnostics
-          # ----------------------------------------------------
-
-          print(
-              "=================================================="
-          )
-
-          print(
-              "🗄️ ATLAS Supabase configuration"
-          )
-
-          print(
-              "=================================================="
-          )
-
-          print(
-              f"Supabase Project Ref: {project_ref}"
-          )
-
-          print(
-              "SUPABASE_ANON_KEY:",
-              "PRESENT" if anon_key else "MISSING"
-          )
-
-
-          # ----------------------------------------------------
-          # Verify project
-          # ----------------------------------------------------
-
-          if project_ref != EXPECTED_PROJECT_REF:
-
-              errors.append(
-
-                  f"Wrong Supabase project: "
-                  f"{project_ref} "
-                  f"(expected {EXPECTED_PROJECT_REF})"
-
-              )
-
-
-          # ----------------------------------------------------
-          # Fail fast
-          # ----------------------------------------------------
-
-          if errors:
-
-              print("")
-
-              for error in errors:
-
-                  print(
-                      f"❌ {error}"
-                  )
-
-
-              print("")
-
-              print(
-                  "⛔ Supabase configuration is invalid."
-              )
-
-              raise SystemExit(1)
-
-
-          print("")
-
-          print(
-              "✅ Correct ATLAS Supabase project"
-          )
-
-          print(
-              "✅ SUPABASE_ANON_KEY is present"
-          )
-
-          print(
-              "=================================================="
-          )
-
-          PY
-
-
-      # ========================================================
-      # 7. RUN ATLAS
-      # ========================================================
-
+      # --------------------------------------------------------
+      # 6. Run ATLAS
+      # --------------------------------------------------------
       - name: Run ATLAS
-
         env:
 
-
-          # ----------------------------------------------------
-          # CORE
-          # ----------------------------------------------------
-
+          # ==========================
+          # Core
+          # ==========================
           PYTHONUNBUFFERED: "1"
-
           ATLAS_VERSION: "11.5"
-
           ATLAS_ENGINE: "BOTH"
-
-
-          # GitHub Actions controls scheduling.
-          #
-          # Internal bot clock does not determine whether
-          # scheduled workflow analysis/snapshot should run.
-
           ATLAS_SCHEDULED_CADENCE: "workflow"
 
-
-          ATLAS_RUN_MODE: ${{ github.event.inputs.run_mode || 'BOTH' }}
-
+          ATLAS_RUN_MODE: ${{ env.ATLAS_RUN_MODE_RESOLVED }}
+          ATLAS_DELIVERY_MODE: ${{ env.ATLAS_DELIVERY_MODE }}
 
           ATLAS_TIMEFRAME: "4H"
 
+          # ==========================
+          # Performance
+          # ==========================
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
 
-          # ----------------------------------------------------
-          # TRADINGVIEW / MARKET CONFIGURATION
-          # ----------------------------------------------------
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
 
+          # Phase 3.4 persistent
+          # closed-candle cache
+          ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
+
+          # ==========================
+          # TradingView
+          # ==========================
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
-
           ATLAS_TRADINGVIEW_INTERVAL: "240"
 
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
-          # ----------------------------------------------------
-          # SNAPSHOT
-          # ----------------------------------------------------
-
+          # ==========================
+          # Snapshot
+          # ==========================
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
-
-          # ----------------------------------------------------
-          # RISK MANAGEMENT
-          # ----------------------------------------------------
-
+          # ==========================
+          # Risk Management
+          # ==========================
           RISK_PER_TRADE_PCT: "1.5"
 
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
 
           ATLAS_MAX_LEVERAGE: "10"
 
-
-          # ----------------------------------------------------
-          # SIGNAL THRESHOLDS
-          # ----------------------------------------------------
-
+          # ==========================
+          # Signal thresholds
+          # ==========================
           ATLAS_MIN_CONFIDENCE: "55"
 
           ATLAS_MIN_WATCH_CONFIDENCE: "45"
@@ -476,168 +186,83 @@ jobs:
 
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
 
+          ATLAS_H4_FALLBACK_MIN_SCORE: "60"
 
-          # ----------------------------------------------------
-          # BACKTEST
-          # ----------------------------------------------------
-
+          # ==========================
+          # Backtest
+          # ==========================
           ATLAS_BACKTEST_DAYS: "180"
 
           ATLAS_SIGNAL_HORIZON_BARS: "36"
 
           ATLAS_BACKTEST_IMPROVEMENT: "10"
 
-
-          # Persistent Backtest Gate cache:
-          #
-          # A successful backtest gate result may be reused
-          # for up to 24 hours when its fingerprint matches.
-
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-
-          # ----------------------------------------------------
-          # PERFORMANCE / CONCURRENCY
-          # ----------------------------------------------------
-          #
-          # These are the tested values used by the current
-          # optimized ATLAS architecture.
-          #
-          # Analytical output ordering is restored after
-          # concurrent analysis.
-          # ----------------------------------------------------
-
-          ATLAS_ANALYSIS_WORKERS: "3"
-
-          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
-
-
-          # ----------------------------------------------------
-          # SQLITE OHLCV CACHE
-          # ----------------------------------------------------
-          #
-          # GitHub hosted runners are ephemeral.
-          #
-          # Therefore the SQLite OHLCV hot path is disabled.
-          #
-          # In-run memory caching remains active.
-          # ----------------------------------------------------
-
-          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
-
-
-          # ----------------------------------------------------
-          # EVENT DEDUPLICATION
-          # ----------------------------------------------------
-
+          # ==========================
+          # Event / Alerts
+          # ==========================
           ATLAS_CANDLE_EVENT_DEDUP: "1"
 
+          ATLAS_FREE_ALERTS_ENABLED: "1"
 
-          # ----------------------------------------------------
-          # LOCAL STORAGE / FALLBACK / AUDIT
-          # ----------------------------------------------------
+          # INFO is persisted but
+          # not sent to Telegram.
+          ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
 
+          # WATCH + STRONG batching
+          ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+
+          # ==========================
+          # Local storage
+          # ==========================
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
 
           ATLAS_CHANGELOG: "changelog.txt"
 
-
-          # ----------------------------------------------------
-          # TELEGRAM
-          # ----------------------------------------------------
-
+          # ==========================
+          # Telegram
+          # ==========================
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
 
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-
-          # ----------------------------------------------------
-          # SUPABASE
-          # ----------------------------------------------------
-          #
-          # Correct ATLAS project:
-          #
-          # Project Ref:
-          # onnyytvtfcvlzkagijzz
-          #
-          # URL:
-          # https://onnyytvtfcvlzkagijzz.supabase.co
-          #
+          # ==========================
+          # Supabase
+          # ==========================
           # IMPORTANT:
-          #
-          # SUPABASE_SERVICE_ROLE_KEY is intentionally NOT
-          # passed to bot.py.
-          #
-          # bot.py therefore falls back to SUPABASE_ANON_KEY.
-          #
-          # Actual credentials remain in GitHub Secrets.
-          # ----------------------------------------------------
-
+          # service-role key is NOT
+          # exposed to the bot.
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
 
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-
-          # ----------------------------------------------------
-          # MARKET / DATA APIs
-          # ----------------------------------------------------
-
+          # ==========================
+          # Market Data APIs
+          # ==========================
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
 
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
 
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-
-          # ----------------------------------------------------
-          # NEWS
-          # ----------------------------------------------------
-
+          # ==========================
+          # News / Sentiment
+          # ==========================
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
 
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-
-          # ----------------------------------------------------
-          # OTHER APIs
-          # ----------------------------------------------------
-
+          # ==========================
+          # Other APIs
+          # ==========================
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-
-          # ----------------------------------------------------
-          # MARKET INTELLIGENCE
-          # ----------------------------------------------------
-
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-
-          WHALE_ALERT_API_KEY: ${{ secrets.WHALE_ALERT_API_KEY }}
-
-          ATLAS_WHALE_MIN_USD: "3000000"
-
-          ATLAS_ENABLE_INTEL_BRIEFING: "1"
-
-
-          # ----------------------------------------------------
-          # TRADINGVIEW CONFIRMATION
-          # ----------------------------------------------------
-
-          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
-
-
-          # ----------------------------------------------------
-          # H4 FALLBACK
-          # ----------------------------------------------------
-
-          ATLAS_H4_FALLBACK_MIN_SCORE: "60"
-
-
-          # ----------------------------------------------------
-          # VOICE REPORT
-          # ----------------------------------------------------
-
+          # ==========================
+          # Voice
+          # ==========================
           ATLAS_ENABLE_VOICE: "1"
 
           ATLAS_VOICE_TYPE: "female"
@@ -646,84 +271,49 @@ jobs:
 
           ATLAS_AUTO_SEND_VOICE: "1"
 
-
-          # ----------------------------------------------------
-          # PNG REPORT
-          # ----------------------------------------------------
-
+          # ==========================
+          # PNG
+          # ==========================
           ATLAS_ENABLE_IMAGE_TABLE: "1"
 
-
         run: |
-
+          set -euo pipefail
           python bot.py
 
-
-      # ========================================================
-      # 8. UPLOAD LOGS ON FAILURE
-      # ========================================================
-
+      # --------------------------------------------------------
+      # 7. Failure diagnostics
+      # --------------------------------------------------------
       - name: Upload ATLAS logs on failure
-
         if: failure()
-
         uses: actions/upload-artifact@v4
-
         with:
-
           name: atlas-failure-log-${{ github.run_id }}
 
           path: |
-
             *.log
-
             *.txt
-
             atlas_changelog.jsonl
-
+            changelog.txt
             atlas_v11.sqlite3
 
           if-no-files-found: ignore
 
+          retention-days: 7
 
-      # ========================================================
-      # 9. SUCCESS MARKER
-      # ========================================================
-
+      # --------------------------------------------------------
+      # 8. Success marker
+      # --------------------------------------------------------
       - name: ATLAS completed
-
         if: success()
-
         run: |
-
           echo "=================================================="
-
-          echo "✅ ATLAS completed successfully"
-
-          echo "📅 Event: ${{ github.event_name }}"
-
-          echo "📌 Mode: ${{ github.event.inputs.run_mode || 'BOTH' }}"
-
-          echo "📌 Cadence: workflow"
-
-          echo "📌 Timeframe: 4H"
-
-          echo "📌 Supabase Project: onnyytvtfcvlzkagijzz"
-
-          echo "📌 Supabase authentication: ANON KEY"
-
-          echo "📌 Backtest cache TTL: 24 hours"
-
-          echo "📌 Analysis workers: 3"
-
-          echo "📌 Exchange max concurrency: 2"
-
-          echo "📌 SQLite OHLCV hot-path: disabled"
-
-          echo "📌 Telegram: configured"
-
-          echo "📌 Voice: enabled"
-
-          echo "📌 PNG: enabled"
-
+          echo "ATLAS completed successfully"
+          echo "Event: ${{ github.event_name }}"
+          echo "Run mode: ${ATLAS_RUN_MODE_RESOLVED}"
+          echo "Delivery mode: ${ATLAS_DELIVERY_MODE}"
+          echo "Cadence: hourly surveillance / full every 4h"
+          echo "Timeframe: 4H + real MTF"
+          echo "Supabase: configured"
+          echo "Telegram: configured"
+          echo "Voice/PNG: preserved for FULL delivery"
           echo "=================================================="
