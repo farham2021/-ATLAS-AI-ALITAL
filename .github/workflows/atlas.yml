@@ -1,5 +1,5 @@
 # ============================================================
-# ATLAS AI v11.5 / Phase 3.10.1 — Storage-First + Market Guard + Daily16 + Nightly23 Tehran
+# ATLAS AI v11.5 / Phase 3.10.2 — Storage-First + Market Guard + Daily16 + Nightly23 Tehran
 # Repository path: .github/workflows/atlas.yml
 #
 # Scheduled policy:
@@ -10,7 +10,7 @@
 # - Operational failure alerts remain enabled in bot.py.
 # ============================================================
 
-name: ATLAS AI Exact Scope Full Daily16 Nightly23
+name: ATLAS AI Phase 3.11 Advisory Intelligence
 
 on:
   schedule:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       cycle_mode:
-        description: "Manual Phase 3.10.1 cycle"
+        description: "Manual Phase 3.10.2 cycle"
         required: true
         default: "HOURLY"
         type: choice
@@ -149,54 +149,59 @@ jobs:
           ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
           ATLAS_SIGNAL_STABILITY_ENABLED: "1"
           ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
+          ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
+          ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
+          ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
           ATLAS_PHASE37_HISTORY_HOURS: "24"
           ATLAS_TIMEFRAME: "4H"
 
           # Exact analysis universe is hard-enforced in bot.py:
           # Top10 + Personal crypto only, plus GOLD/SILVER/COPPER.
 
-          # Rare severe-market guard — notification only, no recommendation
+          # Rare severe-market guard
           ATLAS_RARE_ALERT_ENABLED: "1"
-          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP"
+          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
           ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
           ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
           ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
           ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
 
-          # Phase 3.8 rare complementary guards — notification layer only
+          # Market Guard
           ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
           ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
           ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+
           ATLAS_PULLBACK_ALERT_ENABLED: "1"
-          ATLAS_PULLBACK_RETRACE_PCT: "40"
+          ATLAS_PULLBACK_RETRACE_PCT: "30"
+
           ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
-          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.50"
+          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
           ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
           ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
           ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
           ATLAS_WEEKLY_HISTORY_HOURS: "168"
 
-          # Performance / concurrency — preserved
+          # Performance / concurrency
           ATLAS_ANALYSIS_WORKERS: "3"
           ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
           ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
           ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
           ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
 
-          # TradingView / market configuration — preserved
+          # TradingView / market configuration
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
           ATLAS_TRADINGVIEW_INTERVAL: "240"
           TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
-          # Snapshot logic remains available internally; Telegram snapshot is not scheduled
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
-          # Risk management — preserved
+          # Risk management
           RISK_PER_TRADE_PCT: "1.5"
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
           ATLAS_MAX_LEVERAGE: "10"
 
-          # Signal thresholds — preserved
+          # Signal thresholds
           ATLAS_MIN_CONFIDENCE: "55"
           ATLAS_MIN_WATCH_CONFIDENCE: "45"
           ATLAS_MIN_EXECUTABLE_RR: "1.5"
@@ -204,13 +209,13 @@ jobs:
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
           ATLAS_H4_FALLBACK_MIN_SCORE: "60"
 
-          # Backtest — preserved
+          # Backtest
           ATLAS_BACKTEST_DAYS: "180"
           ATLAS_SIGNAL_HORIZON_BARS: "36"
           ATLAS_BACKTEST_IMPROVEMENT: "10"
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-          # Alert calculations remain enabled; Phase 3.7 stores them silently
+          # Alert calculations
           ATLAS_CANDLE_EVENT_DEDUP: "1"
           ATLAS_FREE_ALERTS_ENABLED: "1"
           ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
@@ -225,28 +230,28 @@ jobs:
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
 
-          # Telegram — Daily16 + Nightly23 + rare guarded alerts + operational failures
+          # Telegram
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # Supabase — anon only, no service-role key
+          # Supabase
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # Market / data APIs — preserved
+          # Market / data APIs
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # News / sentiment — preserved
+          # News / sentiment
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-          # Macro / other APIs — preserved
+          # Macro
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-          # Existing capabilities remain configured, but Phase 3.7 does not send them
+          # Daily16 media
           ATLAS_ENABLE_VOICE: "1"
           ATLAS_VOICE_TYPE: "female"
           ATLAS_VOICE_LANGUAGE: "fa"
@@ -275,7 +280,7 @@ jobs:
         if: success()
         run: |
           echo "=================================================="
-          echo "✅ ATLAS Phase 3.10.1 completed"
+          echo "✅ ATLAS Phase 3.10.2 completed"
           echo "Cycle: ${ATLAS_PHASE37_CYCLE}"
           echo "Hourly scope: Top10 + Personal + Metals"
           echo "Deep4H persisted: ${ATLAS_PHASE37_DEEP_4H}"
