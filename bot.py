@@ -686,7 +686,7 @@ ATLAS_PRIORITY_TOP10 = [
 ATLAS_PERSONAL_ASSETS = [
     "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ADA", "LINK",
     "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
-    "NEAR", "ONDO", "TAO",
+    "NEAR", "ONDO", "TAO", "ZEC",
 ]
 
 ATLAS_STATIC = [
@@ -7342,9 +7342,9 @@ ATLAS_STRUCTURAL_SHOCK_SYMBOLS = ("BTC", "ETH")
 ATLAS_STRUCTURAL_SHOCK_MOVE_PCT = max(1.0, float(os.environ.get("ATLAS_STRUCTURAL_SHOCK_MOVE_PCT", "4.5")))
 ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO = max(1.0, float(os.environ.get("ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO", "2.0")))
 ATLAS_PULLBACK_ALERT_ENABLED = _parse_bool(os.environ.get("ATLAS_PULLBACK_ALERT_ENABLED", "1"))
-ATLAS_PULLBACK_RETRACE_PCT = max(10.0, min(90.0, float(os.environ.get("ATLAS_PULLBACK_RETRACE_PCT", "40"))))
+ATLAS_PULLBACK_RETRACE_PCT = max(10.0, min(90.0, float(os.environ.get("ATLAS_PULLBACK_RETRACE_PCT", "30"))))
 ATLAS_KEY_LEVEL_ALERT_ENABLED = _parse_bool(os.environ.get("ATLAS_KEY_LEVEL_ALERT_ENABLED", "1"))
-ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT = max(0.05, float(os.environ.get("ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT", "0.50")))
+ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT = max(0.05, float(os.environ.get("ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT", "0.30")))
 ATLAS_KEY_LEVEL_MIN_SR_SCORE = max(0.0, float(os.environ.get("ATLAS_KEY_LEVEL_MIN_SR_SCORE", "60")))
 ATLAS_WEEKLY_SUMMARY_ENABLED = _parse_bool(os.environ.get("ATLAS_WEEKLY_SUMMARY_ENABLED", "1"))
 ATLAS_WEEKLY_SUMMARY_WEEKDAY = max(0, min(6, int(os.environ.get("ATLAS_WEEKLY_SUMMARY_WEEKDAY", "4"))))  # Friday
@@ -7354,6 +7354,9 @@ ATLAS_DAILY_DELTA_ENABLED = _parse_bool(os.environ.get("ATLAS_DAILY_DELTA_ENABLE
 ATLAS_EXPIRED_SIGNALS_ENABLED = _parse_bool(os.environ.get("ATLAS_EXPIRED_SIGNALS_ENABLED", "1"))
 ATLAS_SIGNAL_STABILITY_ENABLED = _parse_bool(os.environ.get("ATLAS_SIGNAL_STABILITY_ENABLED", "1"))
 ATLAS_REVERSAL_MOMENTUM_CONFIRM = _parse_bool(os.environ.get("ATLAS_REVERSAL_MOMENTUM_CONFIRM", "1"))
+ATLAS_REVERSAL_SYMBOLS = tuple(x.strip().upper() for x in os.environ.get("ATLAS_REVERSAL_SYMBOLS", "BTC,ETH").split(",") if x.strip().upper() in set(ATLAS_SCOPED_CRYPTO))
+ATLAS_REVERSAL_MIN_RECOVERY_PCT = max(0.1, float(os.environ.get("ATLAS_REVERSAL_MIN_RECOVERY_PCT", "0.5")))
+ATLAS_REVERSAL_SHOCK_MIN_PCT = max(1.0, float(os.environ.get("ATLAS_REVERSAL_SHOCK_MIN_PCT", "5.0")))
 
 
 def _p371_result_price_map(results):
@@ -7512,7 +7515,7 @@ def _p38_key_level_candidates(result_map, prev_rows, now_dt, events):
     return out
 
 
-def _p38_pullback_candidates(result_map, events, now_dt):
+def _p38_pullback_candidates(result_map, events, now_dt, prev_rows):
     out=[]
     if not ATLAS_PULLBACK_ALERT_ENABLED: return out
     # Look for a previously SENT severe/structural shock that has not already produced a pullback alert.
@@ -7524,7 +7527,7 @@ def _p38_pullback_candidates(result_map, events, now_dt):
         ts=_p38_event_ts(e)
         if not ts or (now_dt-ts).total_seconds()>12*3600: continue
         sym=str(e.get("symbol") or "").upper(); r=result_map.get(sym)
-        if not r: continue
+        if sym not in ATLAS_REVERSAL_SYMBOLS or not r: continue
         start=f(e.get("reference_price")); end=f(e.get("price")); cur=f(r.get("price"))
         if None in (start,end,cur) or start<=0 or end<=0: continue
         shock=end-start
@@ -7533,6 +7536,8 @@ def _p38_pullback_candidates(result_map, events, now_dt):
         # Positive retrace means price moved back toward the pre-shock price.
         if retrace>=ATLAS_PULLBACK_RETRACE_PCT and retrace<=120:
             shock_pct=f(e.get("pct_1h")) or 0.0
+            if abs(shock_pct) < ATLAS_REVERSAL_SHOCK_MIN_PCT:
+                continue
             momentum=f(r.get("momentum_score"))
             # Confirmed reversal: price retracement PLUS short-term momentum turning
             # against the original shock. Notification-only; canonical signal untouched.
@@ -7544,8 +7549,11 @@ def _p38_pullback_candidates(result_map, events, now_dt):
                     momentum_ok = momentum >= 55.0
                 elif shock_pct > 0:
                     momentum_ok = momentum <= 45.0
-            if momentum_ok:
-                out.append((retrace,"PULLBACK",sym,0.0,end,cur,{"retrace_pct":retrace,"source_event_key":key,"shock_start":start,"shock_end":end,"momentum_score":momentum,"confirmed_reversal":True}))
+            prev_now = _p371_previous_price(prev_rows, sym, now_dt)
+            recovery_1h = ((cur / prev_now[0]) - 1.0) * 100.0 if prev_now and prev_now[0] else 0.0
+            direction_ok = (shock_pct < 0 and recovery_1h >= ATLAS_REVERSAL_MIN_RECOVERY_PCT) or (shock_pct > 0 and recovery_1h <= -ATLAS_REVERSAL_MIN_RECOVERY_PCT)
+            if momentum_ok and direction_ok:
+                out.append((retrace,"PULLBACK",sym,recovery_1h,end,cur,{"retrace_pct":retrace,"source_event_key":key,"shock_start":start,"shock_end":end,"momentum_score":momentum,"recovery_1h_pct":recovery_1h,"confirmed_reversal":True}))
                 break
     return out
 
@@ -7559,7 +7567,7 @@ def _p38_guard_message(c):
         verb="صعودی" if pct>0 else "نزولی"
         return f"🚨 شوک ساختاری بازار: {sym} حرکت {verb} {abs(pct):.1f}% در یک ساعت با جهش حجم/نوسان ثبت کرد — گزارش کامل ساعت ۱۶ به‌روزرسانی می‌شود."
     if typ=="PULLBACK":
-        return f"↩️ برگشت تأییدشده بعد از شوک: {sym} حدود {meta.get('retrace_pct',0):.0f}% از حرکت شدید قبلی را پس گرفته است — تصمیم‌گیری در گزارش ساعت ۱۶."
+        return f"↩️ برگشت بازار: {sym} حدود {meta.get('retrace_pct',0):.0f}% از حرکت شدید قبلی را پس گرفته و حرکت 1H معکوس {abs(meta.get('recovery_1h_pct',0)):.1f}% تأیید شده است — گزارش کامل ساعت ۱۶ به‌روزرسانی می‌شود."
     side="حمایت" if meta.get("side")=="SUPPORT" else "مقاومت"
     return f"⚠️ سطح کلیدی: {sym} به {side} مهم {_p371_format_price(meta.get('level'))} نزدیک شده است — تصمیم‌گیری در گزارش ساعت ۱۶."
 
@@ -7584,7 +7592,7 @@ def process_phase38_market_guard(results):
         if prev and pct is not None and abs(pct)>=ATLAS_RARE_ALERT_THRESHOLD_PCT:
             candidates.append((100+abs(pct),"SEVERE_MOVE",sym,pct,prev[0],px,{}))
     candidates += _p38_structural_candidates(result_map,prev_rows,now_dt)
-    candidates += _p38_pullback_candidates(result_map,events,now_dt)
+    candidates += _p38_pullback_candidates(result_map,events,now_dt,prev_rows)
     candidates += _p38_key_level_candidates(result_map,prev_rows,now_dt,events)
     priority={"SEVERE_MOVE":4,"STRUCTURAL_SHOCK":3,"PULLBACK":2,"KEY_LEVEL":1}
     chosen=max(candidates,default=None,key=lambda c:(priority.get(c[1],0),c[0]))
@@ -12970,7 +12978,32 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     except Exception as ex:
         errors.append(f"BACKTEST_FULL_DAILY16: {ex}")
 
-    # 5) New storage-first daily intelligence is additive, not a replacement.
+    # 5) Restore FULL visual + voice outputs at Daily16 only.
+    try:
+        if ENABLE_IMAGE_TABLE:
+            image_ok = send_image_table(results, top10, [])
+            if not image_ok:
+                errors.append("PNG_FULL_DAILY16: image not sent")
+    except Exception as ex:
+        errors.append(f"PNG_FULL_DAILY16: {ex}")
+
+    try:
+        if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE:
+            audio_file = generate_audio_report(scoped_results, news, btc_regime)
+            if audio_file:
+                audio_ok = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس — Daily16")
+                if not audio_ok:
+                    errors.append("VOICE_FULL_DAILY16: audio not sent")
+                try:
+                    os.unlink(audio_file)
+                except Exception:
+                    pass
+            else:
+                errors.append("VOICE_FULL_DAILY16: audio generation returned no file")
+    except Exception as ex:
+        errors.append(f"VOICE_FULL_DAILY16: {ex}")
+
+    # 6) New storage-first daily intelligence is additive, not a replacement.
     daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
     parts, s, e = send_report(daily_text)
     sent_total += s; errors.extend(e)
