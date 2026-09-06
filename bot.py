@@ -164,7 +164,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 PHASE 3.8 STORAGE-FIRST + MARKET GUARD + DAILY16 + WEEKLY"
+VERSION = "ATLAS v11.5 PHASE 3.10.1 EXACT-SCOPE + FULL DAILY16 + NIGHTLY23"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -698,6 +698,14 @@ ATLAS_STATIC = [
 ]
 
 ATLAS_METALS = ("GOLD", "SILVER", "COPPER")
+
+# Phase 3.10.1 hard scope: no crypto outside Top10 + Personal may enter
+# the live analysis/reporting universe. Metals are handled separately.
+ATLAS_SCOPED_CRYPTO = tuple(dict.fromkeys(
+    [str(x).upper() for x in ATLAS_PRIORITY_TOP10] +
+    [str(x).upper() for x in ATLAS_PERSONAL_ASSETS]
+))
+ATLAS_SCOPED_ASSETS = tuple(list(ATLAS_SCOPED_CRYPTO) + list(ATLAS_METALS))
 METAL_YAHOO = {"GOLD": "GC=F", "SILVER": "SI=F", "COPPER": "HG=F"}
 METAL_TV = {"GOLD": "OANDA:XAUUSD", "SILVER": "OANDA:XAGUSD", "COPPER": "COMEX:HG1!"}
 
@@ -2227,6 +2235,19 @@ def binance_top(limit=40):
     result.sort(key=lambda x: x["quote_volume"], reverse=True)
     return result[:limit]
 
+def _atlas_exact_scope_crypto(symbols):
+    allowed = set(ATLAS_SCOPED_CRYPTO)
+    return [str(s).upper() for s in symbols if str(s).upper() in allowed]
+
+def _atlas_exact_scope_results(results, include_metals=False):
+    allowed = set(ATLAS_SCOPED_ASSETS if include_metals else ATLAS_SCOPED_CRYPTO)
+    out = []
+    for r in results or []:
+        sym = str(r.get("coin") or r.get("symbol") or "").upper()
+        if sym in allowed:
+            out.append(r)
+    return out
+
 def build_universe():
     """Phase 3.7 scoped universe: Top10 + Personal only.
 
@@ -2236,7 +2257,11 @@ def build_universe():
     """
     top10 = list(dict.fromkeys(str(x).upper() for x in ATLAS_PRIORITY_TOP10 if not is_stable(x)))
     personal = [str(x).upper() for x in ATLAS_PERSONAL_ASSETS if not is_stable(x)]
-    universe = list(dict.fromkeys(top10 + personal))
+    universe = _atlas_exact_scope_crypto(list(dict.fromkeys(top10 + personal)))
+    # Exact-scope invariant: union must equal configured Top10 + Personal.
+    expected = list(ATLAS_SCOPED_CRYPTO)
+    if set(universe) != set(expected):
+        raise RuntimeError(f"Exact scope mismatch: got={sorted(universe)} expected={sorted(expected)}")
     dynamic30 = []
     now_iso = now_utc().isoformat()
     top10_set = set(top10)
@@ -7302,8 +7327,8 @@ ATLAS_PHASE37_HISTORY_HOURS = max(12, min(48, int(os.environ.get("ATLAS_PHASE37_
 ATLAS_RARE_ALERT_ENABLED = _parse_bool(os.environ.get("ATLAS_RARE_ALERT_ENABLED", "1"))
 ATLAS_RARE_ALERT_SYMBOLS = tuple(dict.fromkeys(
     x.strip().upper() for x in os.environ.get(
-        "ATLAS_RARE_ALERT_SYMBOLS", "BTC,ETH,SOL,ADA,ZEC,XRP"
-    ).split(",") if x.strip()
+        "ATLAS_RARE_ALERT_SYMBOLS", "BTC,ETH,SOL,ADA,XRP"
+    ).split(",") if x.strip() and x.strip().upper() in set(ATLAS_SCOPED_CRYPTO)
 ))
 ATLAS_RARE_ALERT_THRESHOLD_PCT = max(0.1, float(os.environ.get("ATLAS_RARE_ALERT_THRESHOLD_PCT", "7.5")))
 ATLAS_RARE_ALERT_COOLDOWN_HOURS = max(1.0, float(os.environ.get("ATLAS_RARE_ALERT_COOLDOWN_HOURS", "4")))
@@ -8028,7 +8053,7 @@ def report():
     global _LAST_RADAR_CANDIDATES, _LAST_RADAR_META
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
-    # Phase 3.7 user policy: no outsider discovery. The mandatory backtest gate
+    # Phase 3.10.1 exact-scope policy: no outsider discovery. The mandatory backtest gate
     # remains fully active, but is evaluated only on the scoped Top10+Personal universe.
     backtest_ok, bt = mandatory_backtest_gate(universe)
     _LAST_RADAR_CANDIDATES = []
@@ -8036,7 +8061,7 @@ def report():
     analysis_universe = list(universe)
     persistent_prefetched = atlas_prefetch_persistent_ohlcv(analysis_universe)
     print(f"🧊 Persistent closed-OHLCV prefetched: {persistent_prefetched}")
-    print(f"🎯 Phase 3.7 scope: Top10 + Personal only ({len(analysis_universe)} crypto assets); broad radar disabled")
+    print(f"🎯 Phase 3.10.1 exact scope: Top10 + Personal only ({len(analysis_universe)} crypto assets); broad radar disabled")
     _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
         self_diagnostic()
@@ -10804,7 +10829,7 @@ def build_current_market_decision_board(results):
     }
     dt=now_tehran()
     lines=["🧭 ATLAS MARKET DECISION BOARD", dt.strftime("%Y-%m-%d %H:%M Tehran"),
-           f"📡 Broad radar outsiders deep-analyzed: {len(_LAST_RADAR_CANDIDATES)}", ""]
+           "📡 Broad Radar: OFF | Scope locked to Top10 + Personal", ""]
     for key,title in (("BUY","🟢 BUY"),("SELL","🔴 SELL"),("WAIT","🟡 WAIT")):
         lines.append(title)
         if not picks[key]:
@@ -10812,7 +10837,7 @@ def build_current_market_decision_board(results):
         else:
             lines.extend(_atlas_market_board_line(r) for _,r in picks[key])
         lines.append("")
-    lines.append("BUY/SELL فقط از تصمیم تأییدشده موتور اصلی ATLAS است؛ Radar فقط کشف نامزد می‌کند و حق تولید سیگنال ندارد.")
+    lines.append("BUY/SELL فقط از تصمیم تأییدشده موتور اصلی ATLAS است؛ هیچ دارایی خارج از Top10 + Personal در این گزارش تحلیل نشده است.")
     return "\n".join(lines)
 
 def send_current_market_decision_board(results):
@@ -12899,6 +12924,60 @@ _atlas_install_full_profiler()
 # MAIN EXECUTION
 # ============================================================
 
+def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc_regime, portfolio_risk):
+    """Daily 16:00 FULL reporting layer, scoped strictly to Top10 + Personal + Metals.
+
+    Re-enables the proven Phase 3.6 reporting surfaces without re-enabling
+    Broad Radar or expanding the analyzed crypto universe. Canonical analysis,
+    Decision Engine, MTF, Evidence, Backtest, Entry/SL/TP and data-source logic
+    are untouched.
+    """
+    # Defensive exact-scope filter at the delivery boundary.
+    results = _atlas_exact_scope_results(results, include_metals=False)
+    scoped_results = _atlas_exact_scope_results(scoped_results, include_metals=True)
+    sent_total = 0
+    errors = []
+
+    # 1) The same two comprehensive 4H CSVs the user explicitly requested.
+    s, e = send_analysis_documents(results, top10, [])
+    sent_total += s; errors.extend(e)
+
+    # 2) Market Context + Deep Analysis + Best Watch + Opportunity Ranking.
+    s, e = send_all_in_one_documents(results, top10, macro, news, btc_regime)
+    sent_total += s; errors.extend(e)
+
+    # 3) Current Decision Board + Opportunity Board, scoped CORE-only.
+    global _LAST_RADAR_CANDIDATES
+    _LAST_RADAR_CANDIDATES = []
+    s, e = send_current_market_decision_board(results)
+    sent_total += s; errors.extend(e)
+    s, e = send_phase34_opportunity_board(results)
+    sent_total += s; errors.extend(e)
+
+    # 4) Preserve the additional Phase-1 and backtest/optimization documents
+    # from the last stable FULL reporting path. These consume only current
+    # scoped results/history and do not discover outside assets.
+    try:
+        s, e = send_phase1_documents(results, top10, portfolio_risk)
+        sent_total += s; errors.extend(e)
+    except Exception as ex:
+        errors.append(f"PHASE1_FULL_DAILY16: {ex}")
+
+    try:
+        backtest_dashboard = build_backtest_report()
+        s, e = send_optimization_documents(backtest_dashboard)
+        sent_total += s; errors.extend(e)
+    except Exception as ex:
+        errors.append(f"BACKTEST_FULL_DAILY16: {ex}")
+
+    # 5) New storage-first daily intelligence is additive, not a replacement.
+    daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
+    parts, s, e = send_report(daily_text)
+    sent_total += s; errors.extend(e)
+
+    return sent_total, errors, parts
+
+
 def main():
     _atlas_perf_reset()
     _atlas_cache_reset()
@@ -12916,7 +12995,8 @@ def main():
         print(f"📌 Phase3.7 Deep4H: {deep_cycle}")
         print(f"📌 Phase3.7 Daily16: {daily_cycle}")
         print(f"📌 Phase3.9 Nightly23: {nightly_cycle}")
-        print("📌 Telegram policy: Daily16 + Nightly23 + rare guarded market alerts only")
+        print("📌 Telegram policy: FULL Daily16 + Nightly23 + rare guarded market alerts; hourly/deep storage-only")
+        print(f"📌 Exact assets: {len(ATLAS_SCOPED_CRYPTO)} crypto + {len(ATLAS_METALS)} metals = {len(ATLAS_SCOPED_ASSETS)} total")
 
         # Scheduled production is analysis-only. Snapshot collection remains
         # internal via _save_snapshot_history; no snapshot Telegram delivery.
@@ -12933,7 +13013,10 @@ def main():
         print("🔍 Starting scoped ANALYSIS (Top10 + Personal)...")
         with _AtlasTimer("FULL CORE REPORT()"):
             text, results, macro, news, market_info, unavailable = report()
-        print(f"✅ Crypto analysis complete: {len(results)} results, {unavailable} unavailable")
+        # Hard safety barrier: even if a dormant legacy path ever returns an
+        # outsider, it is removed before intelligence, persistence or delivery.
+        results = _atlas_exact_scope_results(results, include_metals=False)
+        print(f"✅ Crypto analysis complete: {len(results)} exact-scope results, {unavailable} unavailable")
 
         with _AtlasTimer("POST-REPORT INTELLIGENCE"):
             results = [v11_apply_intelligence(r) for r in results]
@@ -12964,7 +13047,7 @@ def main():
                     append_changelog("PHASE37_METAL_INTEL", metal, None, str(e))
                 metal_results.append(mr)
 
-        scoped_results = list(results) + metal_results
+        scoped_results = _atlas_exact_scope_results(list(results) + metal_results, include_metals=True)
 
         # Keep Free Alert detection/persistence for observability, but never send
         # it to Telegram under Phase 3.7 policy.
@@ -13002,14 +13085,15 @@ def main():
                 telegram_preflight()
             except Exception as e:
                 print(f"⚠️ Telegram preflight failed; daily send will still retry: {e}")
-            with _AtlasTimer("PHASE37 DAILY16 REPORT"):
-                daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
-                parts, sent, errors = send_report(daily_text)
+            with _AtlasTimer("PHASE310 FULL DAILY16 DELIVERY"):
+                sent, errors, parts = _phase310_send_full_daily16(
+                    results, scoped_results, top10, macro, news, btc_regime, portfolio_risk
+                )
             total_sent += sent
             all_errors.extend(errors)
-            print(f"📨 Daily16 comprehensive report: parts={parts}, sent={sent}, errors={len(errors)}")
+            print(f"📨 FULL Daily16: summary_parts={parts}, total_sent={sent}, errors={len(errors)}")
             if sent == 0:
-                raise RuntimeError("Daily16 Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
+                raise RuntimeError("Daily16 FULL Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
         elif nightly_cycle and ATLAS_NIGHTLY_BRIEF_ENABLED:
             try:
                 telegram_preflight()
@@ -13027,7 +13111,7 @@ def main():
             print("🔕 Storage-only cycle complete; no Telegram message by design.")
 
         print(f"\n{'='*50}")
-        print("📊 PHASE 3.7 SUMMARY")
+        print("📊 PHASE 3.10.1 SUMMARY")
         print(f"  Scoped assets: {len(scoped_results)}")
         print(f"  Hourly persisted: {hourly_count}")
         print(f"  Deep4H cycle: {deep_cycle}")
