@@ -8,7 +8,7 @@
 # Stage 5: Reporting (Telegram / PNG / split CSV / voice) + Decision Supportit CSV / Voice)
 #
 # Design principles:
-#   - ATLAS static radar is NEVER removed.
+#   - Phase 3.7 runtime scope is intentionally limited to Top10 + Personal + Metals; broad discovery is disabled by user policy.
 #   - Stablecoins are excluded from trading analysis.
 #   - Crypto: 1H / 4H / 1D via CCXT exchange data.
 #   - Signals require multi-factor confirmation.
@@ -164,7 +164,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 PHASE 3.6 OHLCV DIAGNOSTICS + SMART ALERT DELIVERY"
+VERSION = "ATLAS v11.5 PHASE 3.8 STORAGE-FIRST + MARKET GUARD + DAILY16 + WEEKLY"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -2227,45 +2227,35 @@ def binance_top(limit=40):
     return result[:limit]
 
 def build_universe():
-    cg = gecko_top(60)
-    cg_symbols = []
-    for x in cg:
-        s = (x.get("symbol") or "").upper()
-        if s and not is_stable(s) and s not in cg_symbols:
-            cg_symbols.append(s)
-    top10 = list(ATLAS_PRIORITY_TOP10)
-    dynamic30 = [s for s in cg_symbols if s not in top10][:30]
-    if len(dynamic30) < 30:
-        for x in binance_top(80):
-            s = (x.get("symbol") or "").upper()
-            if s and not is_stable(s) and s not in top10 and s not in dynamic30:
-                dynamic30.append(s)
-            if len(dynamic30) >= 30:
-                break
-    dynamic30 = dynamic30[:30]
-    static = [
-        x for x in ATLAS_STATIC
-        if not is_stable(x) and x not in top10 and x not in dynamic30
-    ]
-    universe = list(dict.fromkeys(top10 + dynamic30 + static))
-    universe = [x for x in universe if not is_stable(x)]
+    """Phase 3.7 scoped universe: Top10 + Personal only.
+
+    Broad/dynamic outsider discovery is intentionally disabled by user policy.
+    Metals are analyzed separately through the existing Yahoo/metal pipeline.
+    Signal formulas and per-asset technical logic are unchanged.
+    """
+    top10 = list(dict.fromkeys(str(x).upper() for x in ATLAS_PRIORITY_TOP10 if not is_stable(x)))
+    personal = [str(x).upper() for x in ATLAS_PERSONAL_ASSETS if not is_stable(x)]
+    universe = list(dict.fromkeys(top10 + personal))
+    dynamic30 = []
+    now_iso = now_utc().isoformat()
+    top10_set = set(top10)
+    personal_set = set(personal)
     for symbol in universe:
-        source = (
-            "TOP10_PRIORITY" if symbol in top10
-            else "DYNAMIC30" if symbol in dynamic30
-            else "ATLAS_STATIC"
-        )
+        if symbol in top10_set and symbol in personal_set:
+            source = "TOP10+PERSONAL"
+        elif symbol in top10_set:
+            source = "TOP10_PRIORITY"
+        else:
+            source = "PERSONAL"
         STORE.insert(
             "atlas_assets",
             {
                 "symbol": symbol,
-                "rank": next(
-                    (x["rank"] for x in cg if x["symbol"] == symbol), None
-                ),
+                "rank": None,
                 "source": source,
                 "is_stablecoin": False,
                 "active": True,
-                "last_seen_at": now_utc().isoformat(),
+                "last_seen_at": now_iso,
             },
         )
     return universe, top10, dynamic30
@@ -7291,6 +7281,729 @@ def save_run(results, parts, macro, news, unavailable=0):
 
 
 # ============================================================
+# PHASE 3.7 — STORAGE-FIRST HOURLY SURVEILLANCE + DAILY 16:00 REPORT
+# ============================================================
+# User policy:
+#   * Hourly: analyze Top10 + Personal + Metals and persist all BUY/SELL/WAIT.
+#   * Every 4h: persist a deep snapshot of the same scoped universe.
+#   * No outsider/broad-radar opportunity discovery.
+#   * Telegram is silent except one comprehensive report at 16:00 Tehran.
+#   * The 16:00 report uses the current run + persisted hourly/deep history.
+# Analytical engines and canonical signal formulas are not modified here.
+# ============================================================
+
+ATLAS_PHASE37_DEEP_4H = _parse_bool(os.environ.get("ATLAS_PHASE37_DEEP_4H", "0"))
+ATLAS_PHASE37_DAILY_REPORT = _parse_bool(os.environ.get("ATLAS_PHASE37_DAILY_REPORT", "0"))
+ATLAS_PHASE37_HISTORY_HOURS = max(12, min(48, int(os.environ.get("ATLAS_PHASE37_HISTORY_HOURS", "24"))))
+
+# Phase 3.7.1 rare market-move guard. Uses prices already produced by the
+# hourly scoped analysis: no extra exchange/API fetch is introduced.
+ATLAS_RARE_ALERT_ENABLED = _parse_bool(os.environ.get("ATLAS_RARE_ALERT_ENABLED", "1"))
+ATLAS_RARE_ALERT_SYMBOLS = tuple(dict.fromkeys(
+    x.strip().upper() for x in os.environ.get(
+        "ATLAS_RARE_ALERT_SYMBOLS", "BTC,ETH,SOL,ADA,ZEC,XRP"
+    ).split(",") if x.strip()
+))
+ATLAS_RARE_ALERT_THRESHOLD_PCT = max(0.1, float(os.environ.get("ATLAS_RARE_ALERT_THRESHOLD_PCT", "7.5")))
+ATLAS_RARE_ALERT_COOLDOWN_HOURS = max(1.0, float(os.environ.get("ATLAS_RARE_ALERT_COOLDOWN_HOURS", "4")))
+ATLAS_RARE_ALERT_MAX_PER_DAY = max(1, int(os.environ.get("ATLAS_RARE_ALERT_MAX_PER_DAY", "6")))
+ATLAS_RARE_ALERT_LOOKBACK_MINUTES = max(45, int(os.environ.get("ATLAS_RARE_ALERT_LOOKBACK_MINUTES", "90")))
+
+# Phase 3.8 complementary guards. These are notification/storage overlays only;
+# they do not alter canonical BUY/SELL/WAIT or Entry/SL/TP.
+ATLAS_STRUCTURAL_SHOCK_ENABLED = _parse_bool(os.environ.get("ATLAS_STRUCTURAL_SHOCK_ENABLED", "1"))
+ATLAS_STRUCTURAL_SHOCK_SYMBOLS = ("BTC", "ETH")
+ATLAS_STRUCTURAL_SHOCK_MOVE_PCT = max(1.0, float(os.environ.get("ATLAS_STRUCTURAL_SHOCK_MOVE_PCT", "4.5")))
+ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO = max(1.0, float(os.environ.get("ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO", "2.0")))
+ATLAS_PULLBACK_ALERT_ENABLED = _parse_bool(os.environ.get("ATLAS_PULLBACK_ALERT_ENABLED", "1"))
+ATLAS_PULLBACK_RETRACE_PCT = max(10.0, min(90.0, float(os.environ.get("ATLAS_PULLBACK_RETRACE_PCT", "40"))))
+ATLAS_KEY_LEVEL_ALERT_ENABLED = _parse_bool(os.environ.get("ATLAS_KEY_LEVEL_ALERT_ENABLED", "1"))
+ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT = max(0.05, float(os.environ.get("ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT", "0.50")))
+ATLAS_KEY_LEVEL_MIN_SR_SCORE = max(0.0, float(os.environ.get("ATLAS_KEY_LEVEL_MIN_SR_SCORE", "60")))
+ATLAS_WEEKLY_SUMMARY_ENABLED = _parse_bool(os.environ.get("ATLAS_WEEKLY_SUMMARY_ENABLED", "1"))
+ATLAS_WEEKLY_SUMMARY_WEEKDAY = max(0, min(6, int(os.environ.get("ATLAS_WEEKLY_SUMMARY_WEEKDAY", "4"))))  # Friday
+ATLAS_WEEKLY_HISTORY_HOURS = max(120, min(240, int(os.environ.get("ATLAS_WEEKLY_HISTORY_HOURS", "168"))))
+ATLAS_NIGHTLY_BRIEF_ENABLED = _parse_bool(os.environ.get("ATLAS_NIGHTLY_BRIEF_ENABLED", "1"))
+ATLAS_DAILY_DELTA_ENABLED = _parse_bool(os.environ.get("ATLAS_DAILY_DELTA_ENABLED", "1"))
+ATLAS_EXPIRED_SIGNALS_ENABLED = _parse_bool(os.environ.get("ATLAS_EXPIRED_SIGNALS_ENABLED", "1"))
+ATLAS_SIGNAL_STABILITY_ENABLED = _parse_bool(os.environ.get("ATLAS_SIGNAL_STABILITY_ENABLED", "1"))
+ATLAS_REVERSAL_MOMENTUM_CONFIRM = _parse_bool(os.environ.get("ATLAS_REVERSAL_MOMENTUM_CONFIRM", "1"))
+
+
+def _p371_result_price_map(results):
+    out = {}
+    for r in results or []:
+        sym = str(r.get("coin") or r.get("symbol") or "").upper()
+        px = f(r.get("price"))
+        if sym and px is not None and px > 0:
+            out[sym] = float(px)
+    return out
+
+
+def _p371_load_watch_rows(since_iso):
+    if not STORE.enabled:
+        return []
+    try:
+        return STORE.select("atlas_rare_market_prices", {
+            "select": "captured_at,symbol,price,pct_1h,alert_sent",
+            "captured_at": f"gte.{since_iso}",
+            "order": "captured_at.asc",
+            "limit": "1000",
+        }) or []
+    except Exception as e:
+        append_changelog("RARE_MARKET_ALERT_READ", None, None, str(e))
+        return []
+
+
+def _p371_previous_price(rows, symbol, now_dt):
+    """Choose the stored observation closest to one hour ago, never a future row."""
+    target = now_dt - timedelta(hours=1)
+    best = None
+    best_delta = None
+    for row in rows or []:
+        if str(row.get("symbol") or "").upper() != symbol:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(row.get("captured_at")).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.astimezone(timezone.utc)
+        except Exception:
+            continue
+        # Accept only a bounded observation around t-1h. This prevents an old
+        # price from being mislabeled as a one-hour move after workflow gaps.
+        delta_min = abs((ts - target).total_seconds()) / 60.0
+        if delta_min <= ATLAS_RARE_ALERT_LOOKBACK_MINUTES and (best_delta is None or delta_min < best_delta):
+            px = f(row.get("price"))
+            if px is not None and px > 0:
+                best = (float(px), ts)
+                best_delta = delta_min
+    return best
+
+
+def _p371_alert_history(rows, now_dt):
+    tehran_now = now_dt.astimezone(TEHRAN_TZ)
+    day = tehran_now.date()
+    sent = []
+    for row in rows or []:
+        if not row.get("alert_sent"):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(row.get("captured_at")).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.astimezone(timezone.utc)
+        except Exception:
+            continue
+        if ts.astimezone(TEHRAN_TZ).date() == day:
+            sent.append(ts)
+    return sent
+
+
+def _p371_format_price(x):
+    x = float(x)
+    if x >= 1000:
+        return f"${x:,.0f}"
+    if x >= 1:
+        return f"${x:,.2f}"
+    return f"${x:,.6f}".rstrip("0").rstrip(".")
+
+
+def _p38_result_map(results):
+    return {str(r.get("coin") or r.get("symbol") or "").upper(): r for r in (results or []) if (r.get("coin") or r.get("symbol"))}
+
+
+def _p38_load_guard_events(since_iso):
+    if not STORE.enabled:
+        return []
+    try:
+        return STORE.select("atlas_market_guard_events", {
+            "select": "captured_at,event_type,symbol,price,pct_1h,reference_price,reference_level,telegram_sent,event_key,source_event_key,details",
+            "captured_at": f"gte.{since_iso}", "order": "captured_at.asc", "limit": "1000",
+        }) or []
+    except Exception as e:
+        append_changelog("MARKET_GUARD_READ", None, None, str(e))
+        return []
+
+
+def _p38_event_ts(row):
+    try:
+        ts=datetime.fromisoformat(str(row.get("captured_at")).replace("Z","+00:00"))
+        if ts.tzinfo is None: ts=ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _p38_guard_limits(events, now_dt):
+    today=now_dt.astimezone(TEHRAN_TZ).date()
+    sent=[_p38_event_ts(x) for x in events if x.get("telegram_sent")]
+    sent=[x for x in sent if x]
+    sent_today=[x for x in sent if x.astimezone(TEHRAN_TZ).date()==today]
+    last=max(sent) if sent else None
+    cooldown=(last is None or (now_dt-last).total_seconds() >= ATLAS_RARE_ALERT_COOLDOWN_HOURS*3600)
+    return cooldown, len(sent_today)<ATLAS_RARE_ALERT_MAX_PER_DAY, len(sent_today)
+
+
+def _p38_structural_candidates(result_map, prev_rows, now_dt):
+    out=[]
+    if not ATLAS_STRUCTURAL_SHOCK_ENABLED: return out
+    for sym in ATLAS_STRUCTURAL_SHOCK_SYMBOLS:
+        r=result_map.get(sym)
+        if not r: continue
+        px=f(r.get("price")); prev=_p371_previous_price(prev_rows,sym,now_dt)
+        if px is None or px<=0 or not prev: continue
+        prev_px=prev[0]; pct=(px/prev_px-1)*100
+        vr=f(r.get("volume_ratio")) or 0.0
+        reg=r.get("regime") or {}
+        extreme=str(reg.get("volatility") or "").upper()=="EXTREME" or (f(r.get("atr_pct")) or 0)>=6.0
+        # Requires a large 1h move PLUS independent participation/volatility confirmation.
+        if abs(pct)>=ATLAS_STRUCTURAL_SHOCK_MOVE_PCT and (vr>=ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO or extreme):
+            score=abs(pct)+(min(vr,5)*0.6)+(2 if extreme else 0)
+            out.append((score,"STRUCTURAL_SHOCK",sym,pct,prev_px,px,{"volume_ratio":vr,"extreme_volatility":extreme}))
+    return out
+
+
+def _p38_key_level_candidates(result_map, prev_rows, now_dt, events):
+    out=[]
+    if not ATLAS_KEY_LEVEL_ALERT_ENABLED: return out
+    # Prevent repeated level alerts for the same symbol/side for 24h.
+    recent_keys={(str(e.get("symbol") or "").upper(), str((e.get("details") or {}).get("side") if isinstance(e.get("details"),dict) else ""))
+                 for e in events if e.get("event_type")=="KEY_LEVEL" and _p38_event_ts(e) and (now_dt-_p38_event_ts(e)).total_seconds()<86400}
+    for sym in ATLAS_RARE_ALERT_SYMBOLS:
+        r=result_map.get(sym)
+        if not r: continue
+        px=f(r.get("price")); prev=_p371_previous_price(prev_rows,sym,now_dt)
+        if px is None or px<=0 or not prev: continue
+        prev_px=prev[0]
+        for side,field,score_field in (("SUPPORT","support","support_score"),("RESISTANCE","resistance","resistance_score")):
+            level=f(r.get(field)); score=f(r.get(score_field)) or 0
+            if level is None or level<=0 or score<ATLAS_KEY_LEVEL_MIN_SR_SCORE: continue
+            dist=abs(px-level)/px*100; prev_dist=abs(prev_px-level)/prev_px*100
+            # Alert only on a fresh approach/cross into the near-level zone.
+            if dist<=ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT and prev_dist>ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT and (sym,side) not in recent_keys:
+                out.append((ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT-dist,"KEY_LEVEL",sym,0.0,prev_px,px,{"side":side,"level":level,"distance_pct":dist,"sr_score":score}))
+    return out
+
+
+def _p38_pullback_candidates(result_map, events, now_dt):
+    out=[]
+    if not ATLAS_PULLBACK_ALERT_ENABLED: return out
+    # Look for a previously SENT severe/structural shock that has not already produced a pullback alert.
+    pullback_sources={str(e.get("source_event_key") or "") for e in events if e.get("event_type")=="PULLBACK"}
+    shocks=[e for e in events if e.get("telegram_sent") and e.get("event_type") in ("SEVERE_MOVE","STRUCTURAL_SHOCK")]
+    for e in reversed(shocks):
+        key=str(e.get("event_key") or "")
+        if not key or key in pullback_sources: continue
+        ts=_p38_event_ts(e)
+        if not ts or (now_dt-ts).total_seconds()>12*3600: continue
+        sym=str(e.get("symbol") or "").upper(); r=result_map.get(sym)
+        if not r: continue
+        start=f(e.get("reference_price")); end=f(e.get("price")); cur=f(r.get("price"))
+        if None in (start,end,cur) or start<=0 or end<=0: continue
+        shock=end-start
+        if shock==0: continue
+        retrace=((end-cur)/shock)*100.0
+        # Positive retrace means price moved back toward the pre-shock price.
+        if retrace>=ATLAS_PULLBACK_RETRACE_PCT and retrace<=120:
+            shock_pct=f(e.get("pct_1h")) or 0.0
+            momentum=f(r.get("momentum_score"))
+            # Confirmed reversal: price retracement PLUS short-term momentum turning
+            # against the original shock. Notification-only; canonical signal untouched.
+            momentum_ok = True
+            if ATLAS_REVERSAL_MOMENTUM_CONFIRM:
+                if momentum is None:
+                    momentum_ok = False
+                elif shock_pct < 0:
+                    momentum_ok = momentum >= 55.0
+                elif shock_pct > 0:
+                    momentum_ok = momentum <= 45.0
+            if momentum_ok:
+                out.append((retrace,"PULLBACK",sym,0.0,end,cur,{"retrace_pct":retrace,"source_event_key":key,"shock_start":start,"shock_end":end,"momentum_score":momentum,"confirmed_reversal":True}))
+                break
+    return out
+
+
+def _p38_guard_message(c):
+    _,typ,sym,pct,ref,px,meta=c
+    if typ=="SEVERE_MOVE":
+        verb="رشد کرد" if pct>0 else "ریخت"
+        return f"🚨 حرکت شدید بازار: {sym} در یک ساعت اخیر {abs(pct):.1f}% {verb} ({_p371_format_price(ref)} → {_p371_format_price(px)}) — گزارش کامل ساعت ۱۶ به‌روزرسانی می‌شود."
+    if typ=="STRUCTURAL_SHOCK":
+        verb="صعودی" if pct>0 else "نزولی"
+        return f"🚨 شوک ساختاری بازار: {sym} حرکت {verb} {abs(pct):.1f}% در یک ساعت با جهش حجم/نوسان ثبت کرد — گزارش کامل ساعت ۱۶ به‌روزرسانی می‌شود."
+    if typ=="PULLBACK":
+        return f"↩️ برگشت تأییدشده بعد از شوک: {sym} حدود {meta.get('retrace_pct',0):.0f}% از حرکت شدید قبلی را پس گرفته است — تصمیم‌گیری در گزارش ساعت ۱۶."
+    side="حمایت" if meta.get("side")=="SUPPORT" else "مقاومت"
+    return f"⚠️ سطح کلیدی: {sym} به {side} مهم {_p371_format_price(meta.get('level'))} نزدیک شده است — تصمیم‌گیری در گزارش ساعت ۱۶."
+
+
+def process_phase38_market_guard(results):
+    """Rare notification overlay: severe move, structural shock, pullback, key-level.
+    One Telegram event max per hourly run; global 4h cooldown and Tehran daily cap.
+    All candidates/state are persisted; canonical analysis is untouched.
+    """
+    if not ATLAS_RARE_ALERT_ENABLED or not STORE.enabled:
+        return {"stored_prices":0,"alerts":0,"reason":"disabled_or_supabase"}
+    now_dt=now_utc().astimezone(timezone.utc); result_map=_p38_result_map(results)
+    prices={s:f(result_map.get(s,{}).get("price")) for s in ATLAS_RARE_ALERT_SYMBOLS}
+    prices={s:p for s,p in prices.items() if p is not None and p>0}
+    since=min(now_dt-timedelta(hours=26),now_dt.astimezone(TEHRAN_TZ).replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc))
+    prev_rows=_p371_load_watch_rows(since.isoformat()); events=_p38_load_guard_events((now_dt-timedelta(hours=26)).isoformat())
+    cooldown_ok,daily_ok,daily_before=_p38_guard_limits(events,now_dt)
+    candidates=[]; staged_prices=[]
+    for sym,px in prices.items():
+        prev=_p371_previous_price(prev_rows,sym,now_dt); pct=((px/prev[0]-1)*100) if prev else None
+        staged_prices.append({"captured_at":now_dt.isoformat(),"symbol":sym,"price":px,"pct_1h":pct,"alert_sent":False,"model_version":VERSION})
+        if prev and pct is not None and abs(pct)>=ATLAS_RARE_ALERT_THRESHOLD_PCT:
+            candidates.append((100+abs(pct),"SEVERE_MOVE",sym,pct,prev[0],px,{}))
+    candidates += _p38_structural_candidates(result_map,prev_rows,now_dt)
+    candidates += _p38_pullback_candidates(result_map,events,now_dt)
+    candidates += _p38_key_level_candidates(result_map,prev_rows,now_dt,events)
+    priority={"SEVERE_MOVE":4,"STRUCTURAL_SHOCK":3,"PULLBACK":2,"KEY_LEVEL":1}
+    chosen=max(candidates,default=None,key=lambda c:(priority.get(c[1],0),c[0]))
+    sent=0; event_row=None
+    if chosen:
+        _,typ,sym,pct,ref,px,meta=chosen
+        event_key=f"{typ}:{sym}:{now_dt.strftime('%Y%m%d%H')}"
+        source_key=str(meta.get("source_event_key") or "")
+        event_row={"captured_at":now_dt.isoformat(),"event_type":typ,"symbol":sym,"price":px,"pct_1h":pct,
+                   "reference_price":ref,"reference_level":meta.get("level"),"telegram_sent":False,
+                   "event_key":event_key,"source_event_key":source_key or None,"details":meta,"model_version":VERSION}
+        if cooldown_ok and daily_ok:
+            msg=_p38_guard_message(chosen); errors=[]
+            for dest in list(dict.fromkeys(str(x) for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x)):
+                try: telegram_send_one(dest,msg); sent+=1
+                except Exception as e: errors.append(f"{dest}: {e}")
+            event_row["telegram_sent"]=sent>0
+            if sent>0:
+                for row in staged_prices:
+                    if row["symbol"]==sym: row["alert_sent"]=True; break
+            if errors: append_changelog("MARKET_GUARD_SEND",sym,None,"; ".join(errors))
+        STORE.insert("atlas_market_guard_events",event_row)
+    ok=bool(STORE.insert_many("atlas_rare_market_prices",staged_prices)) if staged_prices else True
+    return {"stored_prices":len(staged_prices) if ok else 0,"alerts":sent,"candidate_type":chosen[1] if chosen else None,
+            "candidate":chosen[2] if chosen else None,"cooldown_ok":cooldown_ok,"daily_ok":daily_ok,"daily_alerts_before":daily_before}
+
+
+def process_phase371_rare_market_alert(results):
+    """Persist hourly watch prices and emit only a rare, one-line market alert.
+
+    Rules: configured symbols only; absolute 1h move >= threshold; global
+    cooldown; max alerts per Tehran calendar day. The first observation only
+    seeds Supabase. No analysis/recommendation is included in the message.
+    """
+    if not ATLAS_RARE_ALERT_ENABLED:
+        return {"stored": 0, "alerts": 0, "reason": "disabled"}
+    if not STORE.enabled:
+        append_changelog("RARE_MARKET_ALERT", None, None, "Supabase unavailable; alert skipped safely")
+        return {"stored": 0, "alerts": 0, "reason": "supabase_unavailable"}
+
+    now_dt = now_utc().astimezone(timezone.utc)
+    prices = _p371_result_price_map(results)
+    watch = {s: prices[s] for s in ATLAS_RARE_ALERT_SYMBOLS if s in prices}
+    # Need enough history for both t-1h comparison and today's global cap/cooldown.
+    since = min(now_dt - timedelta(hours=26), now_dt.astimezone(TEHRAN_TZ).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc))
+    rows = _p371_load_watch_rows(since.isoformat())
+    sent_today = _p371_alert_history(rows, now_dt)
+    last_alert = max(sent_today) if sent_today else None
+    cooldown_ok = last_alert is None or (now_dt - last_alert).total_seconds() >= ATLAS_RARE_ALERT_COOLDOWN_HOURS * 3600
+    daily_ok = len(sent_today) < ATLAS_RARE_ALERT_MAX_PER_DAY
+
+    candidates = []
+    staged = []
+    for sym, px in watch.items():
+        prev = _p371_previous_price(rows, sym, now_dt)
+        pct = None
+        prev_px = None
+        if prev:
+            prev_px = prev[0]
+            pct = ((px / prev_px) - 1.0) * 100.0 if prev_px > 0 else None
+            if pct is not None and abs(pct) >= ATLAS_RARE_ALERT_THRESHOLD_PCT:
+                candidates.append((abs(pct), sym, pct, prev_px, px))
+        staged.append({
+            "captured_at": now_dt.isoformat(), "symbol": sym, "price": px,
+            "pct_1h": pct, "alert_sent": False, "model_version": VERSION,
+        })
+
+    chosen = max(candidates, default=None, key=lambda x: x[0])
+    sent_count = 0
+    if chosen and cooldown_ok and daily_ok:
+        _, sym, pct, prev_px, px = chosen
+        verb = "رشد کرد" if pct > 0 else "ریخت"
+        msg = f"🚨 حرکت شدید بازار: {sym} در یک ساعت اخیر {abs(pct):.1f}% {verb} ({_p371_format_price(prev_px)} → {_p371_format_price(px)}) — گزارش کامل ساعت ۱۶ به‌روزرسانی می‌شود."
+        errors = []
+        destinations = list(dict.fromkeys(str(x) for x in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID) if x))
+        for dest in destinations:
+            try:
+                telegram_send_one(dest, msg)
+                sent_count += 1
+            except Exception as e:
+                errors.append(f"{dest}: {e}")
+        # Mark alert_sent only if at least one destination received it. The row
+        # itself is the persistent cooldown/day-cap state for ephemeral runners.
+        if sent_count > 0:
+            for row in staged:
+                if row["symbol"] == sym:
+                    row["alert_sent"] = True
+                    break
+        if errors:
+            append_changelog("RARE_MARKET_ALERT_SEND", sym, None, "; ".join(errors))
+
+    ok = bool(STORE.insert_many("atlas_rare_market_prices", staged)) if staged else True
+    if not ok:
+        # Avoid claiming durable cooldown state when persistence failed.
+        append_changelog("RARE_MARKET_ALERT_PERSIST", None, None, "Supabase batch insert failed", {"rows": len(staged)})
+    return {"stored": len(staged) if ok else 0, "alerts": sent_count, "candidate": chosen[1] if chosen else None,
+            "cooldown_ok": cooldown_ok, "daily_ok": daily_ok, "daily_alerts_before": len(sent_today)}
+
+
+def _p37_asset_group(symbol, top10=None):
+    s = str(symbol or "").upper()
+    if s in {str(x).upper() for x in ATLAS_METALS}:
+        return "METAL"
+    if s in {str(x).upper() for x in (top10 or ATLAS_PRIORITY_TOP10)}:
+        return "TOP10"
+    if s in {str(x).upper() for x in ATLAS_PERSONAL_ASSETS}:
+        return "PERSONAL"
+    return "SCOPED"
+
+
+def _p37_jsonable(value):
+    try:
+        return json.loads(safe_json(value))
+    except Exception:
+        return value if isinstance(value, (dict, list, str, int, float, bool)) or value is None else str(value)
+
+
+def _p37_snapshot_row(r, top10, depth):
+    symbol = str(r.get("coin") or r.get("symbol") or "").upper()
+    public_signal = _atlas_public_signal(r)
+    return {
+        "captured_at": now_utc().isoformat(),
+        "symbol": symbol,
+        "asset_group": _p37_asset_group(symbol, top10),
+        "public_signal": public_signal,
+        "decision_state": str(r.get("decision_state") or r.get("action") or "WAIT"),
+        "direction": str(r.get("direction") or "NEUTRAL"),
+        "confidence": f(r.get("decision_confidence")) if f(r.get("decision_confidence")) is not None else f(r.get("confidence")),
+        "opportunity_score": f(r.get("opportunity_score")),
+        "price": f(r.get("price")),
+        "depth": depth,
+        "model_version": VERSION,
+        "payload": _p37_jsonable(r),
+    }
+
+
+def persist_phase37_snapshots(results, top10, deep=False):
+    """Persist every scoped BUY/SELL/WAIT result to Supabase.
+
+    Hourly snapshots are append-only. Deep snapshots are written only on the
+    workflow's 4-hour cycle. No Telegram operation occurs here.
+    """
+    table = "atlas_deep_4h_snapshots" if deep else "atlas_hourly_signal_snapshots"
+    rows = [_p37_snapshot_row(r, top10, "DEEP_4H" if deep else "HOURLY") for r in (results or []) if (r.get("coin") or r.get("symbol"))]
+    if not rows:
+        return 0, False
+    ok = False
+    if STORE.enabled:
+        if hasattr(STORE, "insert_many"):
+            ok = bool(STORE.insert_many(table, rows))
+        if not ok:
+            ok = all(bool(STORE.insert(table, row)) for row in rows)
+    if not ok:
+        append_changelog("PHASE37_PERSIST", None, None, f"Supabase write failed for {table}", {"rows": len(rows)})
+    return len(rows), ok
+
+
+def _p37_load_history(table, hours):
+    if not STORE.enabled:
+        return []
+    since = (now_utc() - timedelta(hours=int(hours))).isoformat()
+    try:
+        return STORE.select(table, {
+            "select": "captured_at,symbol,asset_group,public_signal,decision_state,direction,confidence,opportunity_score,price,depth,payload",
+            "captured_at": f"gte.{since}",
+            "order": "captured_at.asc",
+            "limit": "5000",
+        }) or []
+    except Exception as e:
+        append_changelog("PHASE37_HISTORY", None, None, f"{table}: {e}")
+        return []
+
+
+def _p37_history_summary(rows):
+    out = {}
+    for row in rows or []:
+        sym = str(row.get("symbol") or "").upper()
+        if not sym:
+            continue
+        rec = out.setdefault(sym, {"BUY": 0, "SELL": 0, "WAIT": 0, "n": 0, "conf": [], "latest": None, "rows": []})
+        sig = str(row.get("public_signal") or "WAIT").upper()
+        if sig not in ("BUY", "SELL", "WAIT"):
+            sig = "WAIT"
+        rec[sig] += 1
+        rec["n"] += 1
+        cv = f(row.get("confidence"))
+        if cv is not None:
+            rec["conf"].append(cv)
+        rec["latest"] = row
+        rec["rows"].append(row)
+    for rec in out.values():
+        rec["avg_conf"] = (sum(rec["conf"]) / len(rec["conf"])) if rec["conf"] else None
+    return out
+
+
+def _p37_latest_deep(rows):
+    latest = {}
+    for row in rows or []:
+        sym = str(row.get("symbol") or "").upper()
+        if sym:
+            latest[sym] = row
+    return latest
+
+
+def _p37_report_line(r, hist):
+    sym = str(r.get("coin") or r.get("symbol") or "?").upper()
+    sig = _atlas_public_signal(r)
+    conf = f(r.get("decision_confidence")) if f(r.get("decision_confidence")) is not None else f(r.get("confidence"))
+    opp = f(r.get("opportunity_score"))
+    h = hist.get(sym) or {"BUY": 0, "SELL": 0, "WAIT": 0, "n": 0}
+    history = f"24h B{h.get('BUY',0)}/S{h.get('SELL',0)}/W{h.get('WAIT',0)}"
+    stability = _p39_signal_stability(sym, sig, h.get("rows",[])) if ATLAS_SIGNAL_STABILITY_ENABLED else ""
+    stab = f" | {stability}" if stability else ""
+    if sig in ("BUY", "SELL"):
+        return f"{sym}: {sig} C{(conf or 0):.0f} O{(opp or 0):.0f} | {history}{stab} | E {fmt(r.get('entry'))} SL {fmt(r.get('sl'))} TP1 {fmt(r.get('tp1'))}"
+    trigger = _aio_trigger(r)
+    return f"{sym}: WAIT C{(conf or 0):.0f} O{(opp or 0):.0f} | {history}{stab} | {trigger}"
+
+
+def _p39_parse_ts(v):
+    try:
+        dt=datetime.fromisoformat(str(v).replace("Z","+00:00"))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _p39_nearest_row_ago(rows, sym, hours=24):
+    target=now_utc()-timedelta(hours=hours); best=None; delta=None
+    for row in rows or []:
+        if str(row.get("symbol") or "").upper()!=sym: continue
+        ts=_p39_parse_ts(row.get("captured_at"))
+        if not ts: continue
+        d=abs((ts-target).total_seconds())
+        if delta is None or d<delta: best=row; delta=d
+    return best if delta is not None and delta <= 3*3600 else None
+
+
+def _p39_signal_stability(sym, current_sig, rows):
+    seq=[r for r in rows or [] if str(r.get("symbol") or "").upper()==sym]
+    seq=sorted(seq,key=lambda x:str(x.get("captured_at") or ""))
+    if not seq: return "NEW"
+    same=[]
+    for row in reversed(seq):
+        sig=str(row.get("public_signal") or "WAIT").upper()
+        if sig!=current_sig: break
+        same.append(row)
+    if not same: return "NEW"
+    oldest=_p39_parse_ts(same[-1].get("captured_at")); latest=_p39_parse_ts(same[0].get("captured_at"))
+    hours=max(1,int(round(((latest-oldest).total_seconds()/3600)+1))) if oldest and latest else len(same)
+    confs=[f(x.get("confidence")) for x in same[:6] if f(x.get("confidence")) is not None]
+    weakening=len(confs)>=2 and confs[0] <= confs[-1]-10
+    if weakening: return f"WEAKENING {hours}H"
+    if hours>=6: return f"STABLE {hours}H"
+    return f"NEW {hours}H"
+
+
+def _p39_daily_delta_lines(current_results, rows):
+    if not ATLAS_DAILY_DELTA_ENABLED: return []
+    changes=[]
+    for r in current_results or []:
+        sym=str(r.get("coin") or r.get("symbol") or "").upper(); cur=_atlas_public_signal(r)
+        prev=_p39_nearest_row_ago(rows,sym,24)
+        if not prev: continue
+        old=str(prev.get("public_signal") or "WAIT").upper()
+        if old!=cur: changes.append(f"{sym} {old}→{cur}")
+    return ["🔄 تغییر نسبت به دیروز: "+(" | ".join(changes[:12]) if changes else "تغییر سیگنال مهمی ثبت نشده")]
+
+
+def _p39_expired_lines(current_results, rows):
+    if not ATLAS_EXPIRED_SIGNALS_ENABLED: return []
+    expired=[]
+    for r in current_results or []:
+        sym=str(r.get("coin") or r.get("symbol") or "").upper(); cur=_atlas_public_signal(r)
+        prev=_p39_nearest_row_ago(rows,sym,24)
+        if not prev: continue
+        old=str(prev.get("public_signal") or "WAIT").upper()
+        if old in ("BUY","SELL") and cur!=old:
+            expired.append(f"{sym} {old}→{cur}")
+    return ["⏱ سیگنال‌های منقضی‌شده: "+(" | ".join(expired[:10]) if expired else "موردی نیست")]
+
+
+def build_phase39_nightly_brief(results, btc_regime=None):
+    rows=_p37_load_history("atlas_hourly_signal_snapshots",27)
+    scoped=[r for r in (results or []) if (r.get("coin") or r.get("symbol"))]
+    moves=[]; changes=[]
+    for r in scoped:
+        sym=str(r.get("coin") or r.get("symbol") or "").upper(); px=f(r.get("price")); prev=_p39_nearest_row_ago(rows,sym,24)
+        if px and prev and f(prev.get("price")):
+            pct=(px/f(prev.get("price"))-1)*100; moves.append((abs(pct),sym,pct))
+        if prev:
+            old=str(prev.get("public_signal") or "WAIT").upper(); cur=_atlas_public_signal(r)
+            if old!=cur: changes.append(f"{sym} {old}→{cur}")
+    moves.sort(reverse=True)
+    buy=sum(_atlas_public_signal(r)=="BUY" for r in scoped); sell=sum(_atlas_public_signal(r)=="SELL" for r in scoped); wait=len(scoped)-buy-sell
+    top=" | ".join(f"{sym} {pct:+.1f}%" for _,sym,pct in moves[:4]) if moves else "داده کافی نیست"
+    delta=" | ".join(changes[:6]) if changes else "تغییر سیگنال مهمی ثبت نشده"
+    # Simple next-day outlook: descriptive, based on current signal breadth/regime; not a recommendation.
+    if buy>sell*1.5 and buy>=3: outlook="تمایل بازار مثبت است؛ فردا تأیید تداوم مومنتوم و BTC Regime مهم است."
+    elif sell>buy*1.5 and sell>=3: outlook="تمایل بازار دفاعی/منفی است؛ فردا تثبیت یا برگشت مومنتوم و BTC Regime مهم است."
+    else: outlook="بازار ترکیبی/نامطمئن است؛ فردا شکست سطوح کلیدی و تغییر breadth اهمیت بیشتری دارد."
+    return "\n".join(["🌙 ATLAS — خلاصه شبانه 23:00",f"📊 وضعیت: BUY {buy} / SELL {sell} / WAIT {wait}",f"📈 حرکت‌های مهم امروز: {top}",f"🔄 تغییرات مهم: {delta}",f"₿ Regime: {btc_regime or 'N/A'}",f"🔭 نگاه ساده به فردا: {outlook}","🧠 تحلیل هوشمند • نه توصیه سرمایه‌گذاری"])
+
+
+def _p38_weekly_summary(current_results):
+    if not ATLAS_WEEKLY_SUMMARY_ENABLED:
+        return []
+    rows=_p37_load_history("atlas_hourly_signal_snapshots",ATLAS_WEEKLY_HISTORY_HOURS)
+    if not rows: return ["📊 خلاصه هفتگی: داده کافی در Supabase موجود نیست."]
+    cur={str(r.get("coin") or r.get("symbol") or "").upper():f(r.get("price")) for r in (current_results or [])}
+    by={}
+    for row in rows:
+        sym=str(row.get("symbol") or "").upper()
+        if sym: by.setdefault(sym,[]).append(row)
+    episodes=[]; counts={"BUY":0,"SELL":0,"WAIT":0}
+    for sym,seq in by.items():
+        seq=sorted(seq,key=lambda x:str(x.get("captured_at") or "")); prev_sig=None
+        for row in seq:
+            sig=str(row.get("public_signal") or "WAIT").upper()
+            if sig not in counts: sig="WAIT"
+            counts[sig]+=1
+            if sig in ("BUY","SELL") and sig!=prev_sig:
+                entry=f(row.get("price")); end=cur.get(sym)
+                if entry and end and entry>0:
+                    raw=(end/entry-1)*100; directional=raw if sig=="BUY" else -raw
+                    episodes.append((directional,sym,sig,entry,end,str(row.get("captured_at") or "")))
+            prev_sig=sig
+    lines=[f"📊 خلاصه هفتگی | 7 روز | snapshots: {len(rows)} | BUY {counts['BUY']} / SELL {counts['SELL']} / WAIT {counts['WAIT']}"]
+    if episodes:
+        episodes.sort(reverse=True,key=lambda x:x[0]); best=episodes[:3]; worst=sorted(episodes,key=lambda x:x[0])[:3]
+        lines.append("🏆 بهترین سیگنال‌های مشاهده‌ای: "+" | ".join(f"{s} {sig} {ret:+.1f}%" for ret,s,sig,_,_,_ in best))
+        lines.append("⚠️ ضعیف‌ترین سیگنال‌های مشاهده‌ای: "+" | ".join(f"{s} {sig} {ret:+.1f}%" for ret,s,sig,_,_,_ in worst))
+        avg=sum(x[0] for x in episodes)/len(episodes)
+        pos=sum(1 for x in episodes if x[0]>0)
+        lines.append(f"📈 اپیزودهای BUY/SELL: {len(episodes)} | مثبت: {pos}/{len(episodes)} | میانگین بازده جهت‌دار تا قیمت فعلی: {avg:+.1f}%")
+        lines.append("ℹ️ عملکرد هفتگی بالا mark-to-market و مشاهده‌ای است، نه سود/زیان تحقق‌یافته معامله.")
+    else:
+        lines.append("— در این هفته اپیزود BUY/SELL قابل ارزیابی ثبت نشده است.")
+    # Regime-change proxy from persisted BTC deep/hourly payloads. Uses stored
+    # analytical states only and does not modify the Decision Engine.
+    btc_rows=sorted(by.get("BTC",[]),key=lambda x:str(x.get("captured_at") or ""))
+    regimes=[]
+    for row in btc_rows:
+        payload=row.get("payload") if isinstance(row.get("payload"),dict) else {}
+        reg=str(payload.get("btc_regime") or payload.get("market_regime") or payload.get("regime") or "").strip()
+        if reg and (not regimes or reg!=regimes[-1]): regimes.append(reg)
+    if regimes:
+        lines.append("🧭 تغییرات رژیم بازار: "+" → ".join(regimes[-6:]))
+    buys=counts.get("BUY",0); sells=counts.get("SELL",0)
+    if buys>sells*1.5: nxt="برای هفته آینده، پایداری breadth مثبت و تأیید BTC/ETH در 4H محور اصلی رصد است."
+    elif sells>buys*1.5: nxt="برای هفته آینده، کنترل ریسک رژیم و نشانه‌های برگشت BTC/ETH محور اصلی رصد است."
+    else: nxt="برای هفته آینده، شکست سطوح کلیدی و خروج بازار از وضعیت ترکیبی محور اصلی رصد است."
+    lines.append("🔭 تحلیل هفته آینده: "+nxt)
+    lines.append("🧠 تحلیل هوشمند • نه توصیه سرمایه‌گذاری")
+    return lines
+
+
+def build_phase37_daily_report(results, top10, macro=None, news=None, btc_regime=None):
+    hourly_rows = _p37_load_history("atlas_hourly_signal_snapshots", ATLAS_PHASE37_HISTORY_HOURS)
+    delta_rows = _p37_load_history("atlas_hourly_signal_snapshots", max(27, ATLAS_PHASE37_HISTORY_HOURS))
+    deep_rows = _p37_load_history("atlas_deep_4h_snapshots", ATLAS_PHASE37_HISTORY_HOURS)
+    hist = _p37_history_summary(hourly_rows)
+    deep = _p37_latest_deep(deep_rows)
+
+    scoped = [r for r in (results or []) if (r.get("coin") or r.get("symbol"))]
+    buckets = {"BUY": [], "SELL": [], "WAIT": []}
+    for r in scoped:
+        sig = _atlas_public_signal(r)
+        score = max(_aio_num(r.get("opportunity_score")), _aio_num(r.get("decision_support_score")), _aio_num(r.get("confidence")))
+        buckets[sig].append((score, r))
+    for key in buckets:
+        buckets[key].sort(key=lambda x: x[0], reverse=True)
+
+    dt = now_tehran()
+    lines = [
+        "🧠 ATLAS — گزارش جامع روزانه 16:00",
+        f"📅 {shamsi(dt)} | {dt.strftime('%H:%M')} تهران",
+        f"🎯 دامنه: Top10 + Personal + Metals | {len(scoped)} دارایی | Broad Radar: OFF",
+        f"🗃 داده مبنا: {len(hourly_rows)} snapshot ساعتی + {len(deep_rows)} snapshot عمیق 4H",
+    ]
+    if btc_regime:
+        lines.append(f"₿ BTC Regime: {btc_regime}")
+    if news:
+        lines.append(f"📰 News: {news.get('bias','N/A')} | Impact: {news.get('impact','N/A')}")
+    lines.extend(_p39_daily_delta_lines(scoped, delta_rows))
+    lines.extend(_p39_expired_lines(scoped, delta_rows))
+    lines.append("")
+
+    for key, title in (("BUY", "🟢 BUY"), ("SELL", "🔴 SELL"), ("WAIT", "🟡 WAIT")):
+        lines.append(title)
+        if not buckets[key]:
+            lines.append("— موردی نیست")
+        else:
+            for _, r in buckets[key]:
+                lines.append(_p37_report_line(r, hist))
+        lines.append("")
+
+    # Opportunities are ranked only inside the requested scoped universe.
+    opp_rows = sorted(scoped, key=lambda r: max(_aio_num(r.get("opportunity_score")), _aio_num(r.get("decision_support_score"))), reverse=True)[:5]
+    lines.append("🎯 فرصت‌های برتر داخل همین دامنه")
+    for i, r in enumerate(opp_rows, 1):
+        sym = str(r.get("coin") or "?").upper()
+        sig = _atlas_public_signal(r)
+        opp = max(_aio_num(r.get("opportunity_score")), _aio_num(r.get("decision_support_score")))
+        d = deep.get(sym) or {}
+        deep_state = str(d.get("decision_state") or "N/A")
+        lines.append(f"{i}) {sym} | {sig} | O{opp:.0f} | آخرین Deep4H: {deep_state}")
+
+    # Friday 16:00 Tehran: append the weekly summary to the SAME daily message,
+    # preserving the one-report delivery policy.
+    if ATLAS_WEEKLY_SUMMARY_ENABLED and dt.weekday() == ATLAS_WEEKLY_SUMMARY_WEEKDAY:
+        lines.append("")
+        lines.extend(_p38_weekly_summary(scoped))
+
+    lines += [
+        "",
+        "BUY/SELL فقط تصمیم تأییدشده موتور اصلی ATLAS است؛ سایر وضعیت‌ها WAIT هستند.",
+        "گزارش از تاریخچه ساعتی و تحلیل‌های عمیق 4H ذخیره‌شده در Supabase استفاده می‌کند؛ هیچ فرصت خارج از Top10/Personal/Metals جستجو نشده است.",
+    ]
+    # Keep one logical Telegram message whenever possible.
+    report = "\n".join(lines)
+    if len(report) > 3850:
+        # Preserve every asset signal; trim only explanatory footer/details.
+        report = report[:3800] + "\n…"
+    return report
+
+
+def _p37_store_free_alerts_silently(events):
+    """Preserve alert-event observability without any Telegram delivery."""
+    if not events:
+        return 0
+    rows = []
+    for e in events:
+        x = dict(e)
+        x["telegram_status"] = "STORAGE_ONLY"
+        x["telegram_batch_id"] = None
+        x["telegram_attempted_at"] = None
+        x["sent"] = False
+        x["sent_at"] = None
+        rows.append(x)
+    _atlas_persist_alert_rows(rows)
+    return len(rows)
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -7314,21 +8027,15 @@ def report():
     global _LAST_RADAR_CANDIDATES, _LAST_RADAR_META
     _LAST_TOP10, _LAST_DYNAMIC30 = list(top10), list(dynamic30)
 
-    # Keep the mandatory backtest fingerprint/math tied to the canonical core
-    # universe. Broad-radar outsiders are discovery additions only and therefore
-    # cannot churn the 24h backtest cache or weaken the gate.
+    # Phase 3.7 user policy: no outsider discovery. The mandatory backtest gate
+    # remains fully active, but is evaluated only on the scoped Top10+Personal universe.
     backtest_ok, bt = mandatory_backtest_gate(universe)
-    try:
-        radar_candidates, radar_meta = atlas_broad_market_radar(universe)
-    except Exception as e:
-        radar_candidates, radar_meta = [], {"error": str(e), "scan_count": 0}
-        append_changelog("BROAD_MARKET_RADAR", None, None, str(e))
-    _LAST_RADAR_CANDIDATES = list(radar_candidates)
-    _LAST_RADAR_META = dict(radar_meta or {})
-    analysis_universe = list(dict.fromkeys(list(universe) + list(radar_candidates)))
+    _LAST_RADAR_CANDIDATES = []
+    _LAST_RADAR_META = {"disabled": True, "reason": "PHASE3_7_SCOPED_UNIVERSE"}
+    analysis_universe = list(universe)
     persistent_prefetched = atlas_prefetch_persistent_ohlcv(analysis_universe)
     print(f"🧊 Persistent closed-OHLCV prefetched: {persistent_prefetched}")
-    print(f"📡 Broad Market Radar: scanned={_LAST_RADAR_META.get('scan_count', 0)}, deep_candidates={len(radar_candidates)} → {radar_candidates}")
+    print(f"🎯 Phase 3.7 scope: Top10 + Personal only ({len(analysis_universe)} crypto assets); broad radar disabled")
     _LAST_BACKTEST_OK, _LAST_BACKTEST_DETAILS = bool(backtest_ok), (bt or {})
     if backtest_ok:
         self_diagnostic()
@@ -12199,328 +12906,141 @@ def main():
         print(f"🚀 {VERSION}")
         print(f"📅 {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} Tehran")
         print(f"{'='*50}\n")
-        
-        try:
-            telegram_preflight()
-        except Exception as e:
-            # یک preflight ناموفق (مثلاً یک هیک‌آپ گذرای شبکه در فراخوانی
-            # getMe) نباید کل چرخه‌ی ۴ ساعته را فدا کند. تلاش واقعی برای
-            # ارسال گزارش در send_report()/send_with_retry() منطق retry و
-            # گزارش‌دهی خطای خودش را دارد و در پایین همچنان اجرا می‌شود؛
-            # اگر ارسال واقعی هم شکست بخورد آن وقت اجرا با خطا پایان می‌یابد.
-            print(f"⚠️ Telegram preflight failed (continuing anyway): {e}")
-            append_changelog("TELEGRAM_PREFLIGHT", None, None, f"Preflight failed, continuing: {e}")
-        run_mode = get_run_mode()
-        print(f"📌 Run Mode: {run_mode}")
-        print(f"📌 Scheduler: {os.environ.get('ATLAS_SCHEDULED_CADENCE', 'internal')}")
-        print(f"📌 Engine Mode: {get_engine_mode()}")
-        print(f"📌 Voice Enabled: {ENABLE_VOICE_REPORT}")
-        print(f"📌 Auto Voice: {AUTO_SEND_VOICE}")
-        print(f"📌 Image Table: {ENABLE_IMAGE_TABLE}")
-        print()
-        
-        # GitHub Actions is the production scheduler.  A real scheduled
-        # event is authoritative: once GitHub has started this job, ATLAS
-        # must execute the full ANALYSIS + SNAPSHOT cycle and must not apply
-        # local hour-modulo scheduling rules.
-        scheduled_workflow = (
-            os.environ.get("ATLAS_SCHEDULED_CADENCE", "").strip().lower() == "workflow"
-            and os.environ.get("GITHUB_EVENT_NAME", "").strip().lower() == "schedule"
-        )
 
-        if scheduled_workflow:
-            plan = _automatic_run_plan()
-            do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
-            print(f"⏰ GitHub scheduled event detected → honoring resolved ATLAS_RUN_MODE={run_mode}")
-        elif run_mode == "AUTO":
-            plan = _automatic_run_plan()
-            do_analysis, do_snapshot = plan["analysis"], plan["snapshot"]
-        elif run_mode == "SNAPSHOT":
-            do_analysis, do_snapshot = False, True
-        elif run_mode == "ANALYSIS":
-            do_analysis, do_snapshot = True, False
-        else:
-            do_analysis, do_snapshot = True, True
-        
-        print(f"📋 Plan: Analysis={do_analysis}, Snapshot={do_snapshot}")
-        print()
+        run_mode = get_run_mode()
+        deep_cycle = _parse_bool(os.environ.get("ATLAS_PHASE37_DEEP_4H", "0"))
+        daily_cycle = _parse_bool(os.environ.get("ATLAS_PHASE37_DAILY_REPORT", "0"))
+        nightly_cycle = _parse_bool(os.environ.get("ATLAS_PHASE39_NIGHTLY_REPORT", "0"))
+        print(f"📌 Run Mode: {run_mode}")
+        print(f"📌 Phase3.7 Deep4H: {deep_cycle}")
+        print(f"📌 Phase3.7 Daily16: {daily_cycle}")
+        print(f"📌 Phase3.9 Nightly23: {nightly_cycle}")
+        print("📌 Telegram policy: Daily16 + Nightly23 + rare guarded market alerts only")
+
+        # Scheduled production is analysis-only. Snapshot collection remains
+        # internal via _save_snapshot_history; no snapshot Telegram delivery.
+        do_analysis = run_mode in ("AUTO", "ANALYSIS", "BOTH")
+        if run_mode == "SNAPSHOT":
+            do_analysis = False
+        if not do_analysis:
+            print("ℹ️ Phase 3.7 production policy has no Telegram snapshot path.")
+            return 0
 
         total_sent = 0
         all_errors = []
-        analysis_results = []
-        alerts_only = os.environ.get("ATLAS_DELIVERY_MODE", "FULL").strip().upper() == "ALERTS_ONLY"
-        
-        # متغیرهای پیش‌فرض برای همه حالت‌ها
-        news = None
-        btc_regime = None
-        macro = None
-        market_info = None
-        top10 = []
-        dynamic30 = []
 
-        if do_analysis:
-            print("🔍 Starting ANALYSIS...")
-            with _AtlasTimer("FULL CORE REPORT()"):
-                text, results, macro, news, market_info, unavailable = report()
-            print(f"✅ Analysis complete: {len(results)} results, {unavailable} unavailable")
-            
-            with _AtlasTimer("POST-REPORT INTELLIGENCE"):
-                results = [v11_apply_intelligence(r) for r in results]
-                v11_portfolio = v11_portfolio_diagnostics(results)
-                top10, dynamic30 = list(_LAST_TOP10), list(_LAST_DYNAMIC30)
-                btc_regime = btc_market_regime()
-                breadth = market_breadth(results)
-            
-            with _AtlasTimer("Evidence + MTF + Risk + Lifecycle"):
-                results = apply_evidence_fusion(results, news)
-                results = apply_mtf_confirmation(results)
-                persist_mtf_snapshots(results)
-                portfolio_risk = build_portfolio_risk_intelligence(results, top10)
-                results = apply_portfolio_risk_context(results, portfolio_risk)
-                lifecycle_events = update_signal_lifecycle(results, top10)
-                results = apply_phase34_research_shadow(results)
-                persist_phase34_research_features(results)
-            with _AtlasTimer("FREE ALERT ENGINE"):
-                free_alert_events = build_free_alert_events(results)
-                free_alert_sent, free_alert_errors, free_alert_skipped, free_alert_pending = process_free_alert_events(free_alert_events)
-            total_sent += free_alert_sent
-            all_errors.extend(free_alert_errors)
-            print(
-                f"🚨 Free Alert events delivered: {free_alert_sent}, telegram_eligible={free_alert_pending}, "
-                f"info_suppressed={_ATLAS_FREE_ALERT_STATS.get('info_suppressed', 0)}, "
-                f"batches={_ATLAS_FREE_ALERT_STATS.get('telegram_batches', 0)}, "
-                f"dedup_skipped={free_alert_skipped}, errors={len(free_alert_errors)}"
-            )
-            with _AtlasTimer("LIFECYCLE ALERT DELIVERY"):
-                lifecycle_alert_sent, lifecycle_alert_errors = notify_lifecycle_changes(lifecycle_events)
-            total_sent += lifecycle_alert_sent
-            all_errors.extend(lifecycle_alert_errors)
-            print(f"🎯 Lifecycle alerts sent: {lifecycle_alert_sent}, errors={len(lifecycle_alert_errors)}")
-            print(f"📊 Building reports...")
-            
-            # ========================================================
-            # FINAL TELEGRAM DELIVERY — TWO ANALYSIS DOCUMENTS
-            # ========================================================
-            # Do not send the old long text reports. The analysis engines
-            # above remain unchanged; only the Telegram presentation layer
-            # is changed to two comprehensive CSV documents.
-            # ========================================================
+        print("🔍 Starting scoped ANALYSIS (Top10 + Personal)...")
+        with _AtlasTimer("FULL CORE REPORT()"):
+            text, results, macro, news, market_info, unavailable = report()
+        print(f"✅ Crypto analysis complete: {len(results)} results, {unavailable} unavailable")
 
-            print("📊 Generating 2 separate analysis documents...")
+        with _AtlasTimer("POST-REPORT INTELLIGENCE"):
+            results = [v11_apply_intelligence(r) for r in results]
+            top10, dynamic30 = list(_LAST_TOP10), []
+            btc_regime = btc_market_regime()
+            breadth = market_breadth(results)
 
-            if alerts_only:
-                analysis_doc_sent, analysis_doc_errors = 0, []
-            else:
-                with _AtlasTimer("Analysis CSV Reports"):
-                    analysis_doc_sent, analysis_doc_errors = send_analysis_documents(results, top10, dynamic30)
+        with _AtlasTimer("Evidence + MTF + Risk + Lifecycle"):
+            results = apply_evidence_fusion(results, news)
+            results = apply_mtf_confirmation(results)
+            persist_mtf_snapshots(results)
+            portfolio_risk = build_portfolio_risk_intelligence(results, top10)
+            results = apply_portfolio_risk_context(results, portfolio_risk)
+            lifecycle_events = update_signal_lifecycle(results, top10)
+            results = apply_phase34_research_shadow(results)
+            persist_phase34_research_features(results)
 
-            total_sent += analysis_doc_sent
-            all_errors.extend(analysis_doc_errors)
+        # Metals keep their existing dedicated analytical pipeline. No crypto
+        # formula is transplanted onto metals; this avoids quality-distorting
+        # cross-asset assumptions while still producing hourly BUY/SELL/WAIT.
+        with _AtlasTimer("PHASE37 METALS"):
+            metal_results = []
+            for metal in ATLAS_METALS:
+                mr = _metal_analysis(metal)
+                try:
+                    mr = v11_apply_intelligence(mr)
+                except Exception as e:
+                    append_changelog("PHASE37_METAL_INTEL", metal, None, str(e))
+                metal_results.append(mr)
 
-            print(
-                f"📎 Analysis documents sent: {analysis_doc_sent}, "
-                f"errors={len(analysis_doc_errors)}"
-            )
+        scoped_results = list(results) + metal_results
 
-            if alerts_only:
-                aio_sent, aio_errors = 0, []
-            else:
-                with _AtlasTimer("ALL-IN-ONE REPORT DELIVERY"):
-                    aio_sent, aio_errors = send_all_in_one_documents(results, top10, macro, news, btc_regime)
-            total_sent += aio_sent
-            all_errors.extend(aio_errors)
-            print(f"🧠 All-in-One documents sent: {aio_sent}, errors={len(aio_errors)}")
+        # Keep Free Alert detection/persistence for observability, but never send
+        # it to Telegram under Phase 3.7 policy.
+        with _AtlasTimer("FREE ALERT ENGINE STORAGE"):
+            free_alert_events = build_free_alert_events(results)
+            stored_alerts = _p37_store_free_alerts_silently(free_alert_events)
+        print(f"🚨 Free Alert events stored silently: {stored_alerts}")
 
-            # Phase 3.5 smart hourly delivery: ALERTS_ONLY means surveillance is
-            # still complete, but recurring state boards are deferred to FULL.
-            # Hourly Telegram traffic therefore contains only event/state-change
-            # alerts (Free Alerts, Lifecycle, canonical Signal Changes).
-            if alerts_only:
-                board_sent, board_errors = 0, []
-                opp_board_sent, opp_board_errors = 0, []
-                print("ℹ️ Market Decision Board deferred to next FULL run (hourly smart-alert mode).")
-                print("ℹ️ Opportunity Board deferred to next FULL run (hourly smart-alert mode).")
-            else:
-                with _AtlasTimer("MARKET DECISION BOARD"):
-                    board_sent, board_errors = send_current_market_decision_board(results)
-                with _AtlasTimer("OPPORTUNITY BOARD"):
-                    opp_board_sent, opp_board_errors = send_phase34_opportunity_board(results)
-            total_sent += board_sent
-            all_errors.extend(board_errors)
-            total_sent += opp_board_sent
-            all_errors.extend(opp_board_errors)
-            print(f"🧭 Market decision board sent: {board_sent}, errors={len(board_errors)}")
-            print(f"🎯 Opportunity board sent: {opp_board_sent}, errors={len(opp_board_errors)}")
+        with _AtlasTimer("PHASE37 HOURLY SUPABASE"):
+            hourly_count, hourly_ok = persist_phase37_snapshots(scoped_results, top10, deep=False)
+        print(f"🗃 Hourly signal snapshots: {hourly_count}, Supabase OK={hourly_ok}")
 
-            with _AtlasTimer("Signal Notifications"):
-                notify_sent, notify_errors = send_signal_change_notifications(results, top10)
-            total_sent += notify_sent
-            all_errors.extend(notify_errors)
-            print(f"🚨 Signal-change notifications sent: {notify_sent}, errors={len(notify_errors)}")
+        # Rare market-move guard: BTC/ETH/SOL/ADA/ZEC/XRP only. It reuses the
+        # prices already produced above, persists its hourly watch state, and
+        # can send at most one terse alert per cycle under strict guards.
+        with _AtlasTimer("PHASE371 RARE MARKET ALERT"):
+            rare_alert = process_phase38_market_guard(results)
+        print(f"🚨 Rare market alert: {rare_alert}")
 
-            if alerts_only:
-                phase1_sent, phase1_errors = 0, []
-            else:
-                with _AtlasTimer("PHASE-1 REPORT DELIVERY"):
-                    phase1_sent, phase1_errors = send_phase1_documents(results, top10, portfolio_risk)
-            total_sent += phase1_sent
-            all_errors.extend(phase1_errors)
-            print(
-                f"🧩 Phase-1 documents sent: {phase1_sent}, "
-                f"lifecycle_events={len(lifecycle_events)}, errors={len(phase1_errors)}"
-            )
-            if alerts_only:
-                opt_sent, opt_errors = 0, []
-            else:
-                with _AtlasTimer("Backtest Dashboard"):
-                    backtest_dashboard = build_backtest_report()
-                    opt_sent, opt_errors = send_optimization_documents(backtest_dashboard)
-            total_sent += opt_sent
-            all_errors.extend(opt_errors)
-            print(f"📈 Backtest dashboard sent: {opt_sent}, errors={len(opt_errors)}")
+        if deep_cycle:
+            with _AtlasTimer("PHASE37 DEEP4H SUPABASE"):
+                deep_count, deep_ok = persist_phase37_snapshots(scoped_results, top10, deep=True)
+            print(f"🧠 Deep 4H snapshots: {deep_count}, Supabase OK={deep_ok}")
 
-            # Keep a small compatibility marker for existing run metadata.
-            outputs = []
+        # Preserve internal history/persistence. No Telegram report/file/audio/image.
+        with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
+            _save_snapshot_history(results, now_tehran().isoformat())
+        atlas_flush_persistent_ohlcv()
+        with _AtlasTimer("FINAL PERSISTENCE"):
+            save_context(macro, news, market_liquidity_index(results), market_info)
+            save_run(results, 0, macro, news, unavailable)
 
-            # ارسال جدول تصویری - با بررسی ENABLE_IMAGE_TABLE
-            if ENABLE_IMAGE_TABLE and not alerts_only:
-                print("📸 Generating image table...")
-                with _AtlasTimer("PNG / IMAGE"):
-                    image_sent = send_image_table(results, top10, dynamic30)
-                if image_sent:
-                    print("✅ Image table sent successfully")
-                else:
-                    print("ℹ️ Image table not sent (matplotlib may not be installed)")
-            else:
-                print("ℹ️ Image table disabled by ATLAS_ENABLE_IMAGE_TABLE")
-            
-            analysis_results = results
-            # Also log to the price history table on analysis runs (every 4H),
-            # not just snapshot runs (every 3H) — denser history improves the
-            # accuracy of the 4H/24H direction lookups in build_price_snapshot.
-            with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
-                _save_snapshot_history(results, now_tehran().isoformat())
-            atlas_flush_persistent_ohlcv()
-            
-            # Keep the existing legacy CSV delivery active exactly as before.
-            # The three requested analysis documents are additional outputs;
-            # personal / metals / dynamic_top30 remain enabled.
-            print("📊 Generating legacy split CSV reports..." if not alerts_only else "ℹ️ Legacy CSV delivery deferred to next FULL run (generation logic unchanged).")
-            if alerts_only:
-                csv_sent, csv_errors = 0, []
-            else:
-                with _AtlasTimer("LEGACY CSV DELIVERY"):
-                    csv_sent, csv_errors = send_csv_report(results, top10, dynamic30)
-            total_sent += csv_sent
-            all_errors.extend(csv_errors)
-            print(f"CSV export: {csv_sent} destination(s), {len(csv_errors)} error(s)")
-
-            perf_sent, perf_errors = (0, []) if alerts_only else send_performance_telemetry_report()
-            total_sent += perf_sent
-            all_errors.extend(perf_errors)
-            print(f"⏱ Performance telemetry sent: {perf_sent}, errors={len(perf_errors)}")
-            
-            with _AtlasTimer("FINAL PERSISTENCE"):
-                save_context(macro, news, market_liquidity_index(results), market_info)
-                save_run(results, sum(len(split_telegram(x)) for x in outputs), macro, news, unavailable)
-
-        if do_snapshot:
-            print("📸 Starting SNAPSHOT...")
-            with _AtlasTimer("SNAPSHOT FETCH"):
-                snapshot_results = analysis_results if analysis_results else fetch_snapshot_results()
-            print(f"✅ Snapshot results: {len(snapshot_results)}")
-            with _AtlasTimer("SNAPSHOT DELIVERY"):
-                snapshot_sent, snapshot_errors = send_price_snapshot(snapshot_results)
-            total_sent += snapshot_sent
-            all_errors.extend(snapshot_errors)
-            print(f"✅ Snapshot sent: {snapshot_sent}")
-
-        # ============================================================
-        # VOICE REPORT - با بررسی وجود داده
-        # ============================================================
-        if ENABLE_VOICE_REPORT and AUTO_SEND_VOICE and not alerts_only:
+        if daily_cycle:
             try:
-                print("\n🎤 Generating audio report...")
-                
-                snapshot_results = []
-                if not analysis_results:
-                    try:
-                        snapshot_results = fetch_snapshot_results()
-                        print(f"📊 Fetched {len(snapshot_results)} snapshot items for voice")
-                    except Exception as e:
-                        print(f"⚠️ Could not fetch snapshot: {e}")
-                        snapshot_results = []
-                
-                voice_data = analysis_results if analysis_results else snapshot_results
-                
-                if voice_data:
-                    # استفاده از متغیرهای تعریف شده با مقدار پیش‌فرض
-                    news_data = news if news is not None else None
-                    btc_data = btc_regime if btc_regime is not None else None
-                    with _AtlasTimer("VOICE GENERATION"):
-                        audio_file = generate_audio_report(voice_data, news_data, btc_data)
-                    if audio_file:
-                        with _AtlasTimer("VOICE DELIVERY"):
-                            result = send_audio_report(audio_file, "🎤 گزارش صوتی کامل اطلس")
-                        if result:
-                            print("✅ Audio report sent successfully")
-                        try:
-                            os.unlink(audio_file)
-                        except:
-                            pass
-                else:
-                    print("⚠️ No voice data available")
+                telegram_preflight()
             except Exception as e:
-                print(f"⚠️ Audio error: {e}")
-                traceback.print_exc()
+                print(f"⚠️ Telegram preflight failed; daily send will still retry: {e}")
+            with _AtlasTimer("PHASE37 DAILY16 REPORT"):
+                daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
+                parts, sent, errors = send_report(daily_text)
+            total_sent += sent
+            all_errors.extend(errors)
+            print(f"📨 Daily16 comprehensive report: parts={parts}, sent={sent}, errors={len(errors)}")
+            if sent == 0:
+                raise RuntimeError("Daily16 Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
+        elif nightly_cycle and ATLAS_NIGHTLY_BRIEF_ENABLED:
+            try:
+                telegram_preflight()
+            except Exception as e:
+                print(f"⚠️ Telegram preflight failed; nightly send will still retry: {e}")
+            with _AtlasTimer("PHASE39 NIGHTLY23 BRIEF"):
+                nightly_text = build_phase39_nightly_brief(scoped_results, btc_regime)
+                parts, sent, errors = send_report(nightly_text)
+            total_sent += sent
+            all_errors.extend(errors)
+            print(f"🌙 Nightly23 brief: parts={parts}, sent={sent}, errors={len(errors)}")
+            if sent == 0:
+                raise RuntimeError("Nightly23 Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
         else:
-            if not ENABLE_VOICE_REPORT:
-                print(f"ℹ️ Voice disabled: ENABLE_VOICE_REPORT={ENABLE_VOICE_REPORT}")
-            elif not AUTO_SEND_VOICE:
-                print(f"ℹ️ Voice disabled: AUTO_SEND_VOICE={AUTO_SEND_VOICE}")
-
-        # Full profiling is deliberately sent after analysis, persistence,
-        # snapshot and voice so it measures the complete production cycle.
-        try:
-            perf_sent, perf_errors = send_performance_telemetry_report()
-            total_sent += perf_sent
-            all_errors.extend(perf_errors)
-            print(f"⏱ Full performance profiling sent: {perf_sent}, errors={len(perf_errors)}")
-        except Exception as perf_e:
-            all_errors.append(f"FULL_PROFILE: {perf_e}")
-            print(f"⚠️ Full performance profiling failed: {perf_e}")
+            print("🔕 Storage-only cycle complete; no Telegram message by design.")
 
         print(f"\n{'='*50}")
-        print(f"📊 SUMMARY:")
-        print(f"  Total sent: {total_sent}")
+        print("📊 PHASE 3.7 SUMMARY")
+        print(f"  Scoped assets: {len(scoped_results)}")
+        print(f"  Hourly persisted: {hourly_count}")
+        print(f"  Deep4H cycle: {deep_cycle}")
+        print(f"  Daily16 sent parts: {total_sent}")
         print(f"  Errors: {len(all_errors)}")
-        if all_errors:
-            print(f"  Errors: {all_errors[:5]}")
         print(f"{'='*50}\n")
-
-        if not do_analysis and not do_snapshot:
-            print(f"{VERSION}: AUTO schedule has no task at this hour.")
-            return 0
-
-        if total_sent == 0:
-            # هیچ پیامی به هیچ مقصدی نرسید — این واقعاً شکست کامل است.
-            raise RuntimeError("Telegram delivery failed: " + "; ".join(all_errors or ["0 messages sent"]))
-
-        if all_errors:
-            # بخشی از خروجی‌ها (مثلاً CSV به یکی از دو مقصد، یا جدول تصویری)
-            # ناموفق بود ولی گزارش اصلی رسید. قبلاً هر خطای جزئی کل جاب
-            # گیت‌هاب اکشن را «Failed» می‌کرد؛ این باعث می‌شد به اشتباه به نظر
-            # برسد که هیچ گزارشی ارسال نشده، در حالی که فقط بخشی از ارسال‌ها
-            # ناقص بوده. حالا این حالت به‌عنوان هشدار ثبت می‌شود، نه شکست کامل.
-            print(f"⚠️ Partial delivery failure ({len(all_errors)} error(s)) but {total_sent} message(s)/file(s) were delivered.")
-            append_changelog("PARTIAL_DELIVERY", None, None, "; ".join(all_errors))
-
         return 0
     except Exception as e:
         tb = traceback.format_exc()
         append_changelog("FATAL", None, None, str(e), {"traceback": tb})
         print(f"{VERSION} ERROR: {e}")
         print(tb)
+        # Failure alert is intentionally retained: operational failure is not
+        # a market report and must remain visible for reliability.
         try:
             if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
                 alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
@@ -12528,427 +13048,12 @@ def main():
                     if destination:
                         try:
                             telegram_send_one(destination, alert)
-                        except Exception as te:
-                            print(f"Telegram error alert failed: {te}")
+                        except Exception:
+                            pass
         except Exception:
             pass
         return 1
-# ============================================================
-# v11.5 - HUMAN-READABLE REPORT ENGINE
-# ============================================================
-
-def generate_human_readable_report(results, top10, dynamic30, macro, news, btc_regime):
-    original_report = build_report(results, top10, dynamic30, macro, news, None, 0, btc_regime, None)
-    human_sections = []
-    human_sections.append("")
-    human_sections.append("━━━━━━━━━━━━━━━━━━")
-    human_sections.append("📝 تفسیر تحلیلی هوشمند (برای هر دارایی)")
-    human_sections.append("━━━━━━━━━━━━━━━━━━")
-    
-    top_opportunities = top5_opportunities(results) or results[:5]
-    for r in top_opportunities[:5]:
-        coin = r.get("coin", "UNKNOWN")
-        direction = r.get("direction", "NEUTRAL")
-        setup_type = r.get("setup_type", "NO SETUP")
-        entry = r.get("entry")
-        sl = r.get("sl")
-        tp1 = r.get("tp1")
-        tp2 = r.get("tp2")
-        rr = r.get("rr")
-        confidence = r.get("confidence", 0)
-        signal_score = r.get("signal_score", 0)
-        win_prob = r.get("win_probability")
-        regime = r.get("regime_trend", "نامشخص")
-        volatility = r.get("regime_volatility", "نامشخص")
-        reasons = r.get("no_trade_reasons", [])
-        contradictions = r.get("contradictions", [])
-        session, session_label, session_multiplier = get_current_session()
-        
-        setup_map = {
-            "BREAKOUT": "شکست مقاومت (Breakout) با تأیید حجم",
-            "BREAKOUT WATCH": "شکست مقاومت در انتظار تأیید",
-            "BREAKDOWN": "شکست حمایت (Breakdown) با تأیید حجم",
-            "BREAKDOWN WATCH": "شکست حمایت در انتظار تأیید",
-            "PULLBACK": "بازگشت به حمایت (Pullback) و ادامه روند",
-            "REVERSAL": "برگشت قیمت از سطح کلیدی (Reversal)",
-            "RANGE": "بازار در محدوده (Range) - منتظر شکست",
-            "TREND CONTINUATION": "ادامه روند",
-            "NO SETUP": "ستاپ مشخص نیست"
-        }
-        setup_desc = setup_map.get(setup_type, setup_type.replace("_", " ").lower())
-        
-        section = []
-        section.append("")
-        section.append(f"🔹 تحلیل {coin}")
-        section.append("───────────────────")
-        
-        if direction == "LONG":
-            section.append(f"📈 جهت‌گیری: **صعودی (LONG)** — {setup_desc}")
-        elif direction == "SHORT":
-            section.append(f"📉 جهت‌گیری: **نزولی (SHORT)** — {setup_desc}")
-        else:
-            section.append(f"⚪ جهت‌گیری: خنثی — {setup_desc}")
-        
-        if entry and sl and tp1:
-            section.append("")
-            section.append("🎯 سناریوی معاملاتی:")
-            if direction == "LONG":
-                section.append(f"   • ورود: تایید شکست بالای {fmt(entry)} با افزایش حجم")
-            else:
-                section.append(f"   • ورود: تایید شکست زیر {fmt(entry)} با افزایش حجم")
-            section.append(f"   • حد ضرر: زیر {fmt(sl)} برای محافظت در برابر شکست کاذب")
-            section.append(f"   • هدف اول: {fmt(tp1)}")
-            if tp2:
-                section.append(f"   • هدف دوم: {fmt(tp2)} در صورت تداوم مومنتوم")
-            if rr:
-                section.append(f"   • نسبت ریسک به ریوارد: حدود ۱ به {rr:.1f}")
-        else:
-            section.append("")
-            section.append("⏳ سناریوی معاملاتی: هنوز ورود معتبر تأیید نشده است.")
-            if reasons:
-                section.append("   دلایل: " + "، ".join([translate_reason_fa(r) for r in reasons[:3]]))
-        
-        section.append("")
-        section.append("📊 تحلیل عمیق بازار:")
-        section.append(f"   • رژیم کلی بازار: {regime}")
-        section.append(f"   • سطح نوسان: {volatility}")
-        section.append(f"   • امتیاز سیگنال: {signal_score:.0f}/۱۰۰")
-        section.append(f"   • اطمینان مدل: {confidence:.0f}%")
-        if win_prob is not None:
-            section.append(f"   • احتمال برد (کالیبره): {win_prob:.0f}%")
-        else:
-            section.append("   • احتمال برد: هنوز کالیبره نشده (نیاز به معامله بسته بیشتر)")
-        
-        if contradictions:
-            section.append("")
-            section.append("⚠️ تضادهای شناسایی‌شده:")
-            for c in contradictions[:3]:
-                section.append(f"   • {translate_reason_fa(c)}")
-        
-        if sl:
-            section.append("")
-            if direction == "LONG":
-                section.append(f"🔴 سطح ابطال: زیر {fmt(sl)}، که تز صعودی را باطل می‌کند.")
-            else:
-                section.append(f"🔴 سطح ابطال: بالای {fmt(sl)}، که تز نزولی را باطل می‌کند.")
-        
-        section.append("")
-        section.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
-        human_sections.append("\n".join(section))
-    
-    return original_report + "\n\n" + "\n".join(human_sections)
 
 
-def generate_unified_report(results, top10, dynamic30, macro, news, btc_regime, breadth, market_info=None):
-    original_report = build_report(results, top10, dynamic30, macro, news, market_info, 0, btc_regime, breadth)
-    
-    personal_report_text = ""
-    if get_engine_mode() in ("PERSONAL", "BOTH"):
-        personal_report_text = build_personal_report(results, macro, news, market_info, btc_regime, breadth)
-    
-    human_sections = []
-    human_sections.append("")
-    human_sections.append("━━━━━━━━━━━━━━━━━━")
-    human_sections.append("📝 تفسیر تحلیلی جامع (همه ارزها)")
-    human_sections.append("━━━━━━━━━━━━━━━━━━")
-    
-    ranked_results = sorted(
-        [r for r in results if r.get("price") is not None],
-        key=lambda x: (x.get("opportunity_score", 0), x.get("confidence", 0)),
-        reverse=True
-    )
-    top_assets = ranked_results[:10]
-    
-    for idx, r in enumerate(top_assets, 1):
-        coin = r.get("coin", "UNKNOWN")
-        direction = r.get("direction", "NEUTRAL")
-        setup_type = r.get("setup_type", "NO SETUP")
-        decision_state = r.get("decision_state", "NO TRADE")
-        price = r.get("price")
-        change = r.get("change")
-        support = r.get("support")
-        resistance = r.get("resistance")
-        entry = r.get("entry")
-        sl = r.get("sl")
-        tp1 = r.get("tp1")
-        tp2 = r.get("tp2")
-        tp3 = r.get("tp3")
-        tp4 = r.get("tp4")
-        rr = r.get("rr")
-        confidence = r.get("confidence", 0)
-        signal_score = r.get("signal_score", 0)
-        model_strength = r.get("model_strength", 0)
-        win_prob = r.get("win_probability")
-        win_prob_tier = r.get("win_probability_tier", "NOT_CALIBRATED")
-        regime_trend = r.get("regime_trend", "نامشخص")
-        regime_volatility = r.get("regime_volatility", "نامشخص")
-        regime_derivatives = r.get("regime_derivatives", "نامشخص")
-        regime_score = r.get("regime_score", 0)
-        data_quality = r.get("data_quality", 0)
-        liquidity = r.get("liquidity", "UNKNOWN")
-        volume_ratio = r.get("volume_ratio")
-        rsi = r.get("rsi")
-        macd = r.get("macd", "N/A")
-        h4_trend = r.get("h4_trend", "UNKNOWN")
-        d1_trend = r.get("d1_trend", "UNKNOWN")
-        w1_trend = r.get("w1_trend", "UNKNOWN")
-        reasons = r.get("no_trade_reasons", [])
-        contradictions = r.get("contradictions", [])
-        gate = r.get("gate", "BLOCK")
-        gate_reason = r.get("gate_reason", "")
-        session, session_label, session_multiplier = get_current_session()
-        
-        section = []
-        section.append("")
-        section.append(f"🔹 {idx}. تحلیل {coin}")
-        section.append("───────────────────")
-        
-        if decision_state in ("BUY CONFIRMATION", "SELL CONFIRMATION") and gate == "PASS":
-            status_emoji = "🟢" if "BUY" in decision_state else "🔴"
-            status_text = "قابل اجرا (EXECUTABLE)" if "BUY" in decision_state else "قابل اجرا (EXECUTABLE)"
-        elif "WATCH" in decision_state:
-            status_emoji = "🟡"
-            status_text = "در انتظار تأیید (WATCH)"
-        else:
-            status_emoji = "⚪"
-            status_text = "بدون سیگنال (NO TRADE)"
-        
-        direction_text = {
-            "LONG": "صعودی 📈",
-            "SHORT": "نزولی 📉",
-            "NEUTRAL": "خنثی ➡️",
-            "NONE": "نامشخص ❓"
-        }.get(direction, "نامشخص ❓")
-        
-        setup_map = {
-            "BREAKOUT": "شکست مقاومت (Breakout)",
-            "BREAKOUT WATCH": "شکست مقاومت در انتظار تأیید",
-            "BREAKDOWN": "شکست حمایت (Breakdown)",
-            "BREAKDOWN WATCH": "شکست حمایت در انتظار تأیید",
-            "PULLBACK": "بازگشت به حمایت (Pullback)",
-            "REVERSAL": "برگشت از سطح کلیدی (Reversal)",
-            "RANGE": "بازار در محدوده (Range)",
-            "TREND CONTINUATION": "ادامه روند",
-            "NO SETUP": "ستاپ مشخص نیست"
-        }
-        setup_desc = setup_map.get(setup_type, setup_type.replace("_", " ").lower())
-        
-        section.append(f"📊 وضعیت: {status_emoji} {status_text}")
-        section.append(f"🎯 جهت‌گیری: {direction_text}")
-        section.append(f"📐 نوع ستاپ: {setup_desc}")
-        section.append(f"💰 قیمت فعلی: {fmt(price)}")
-        if change is not None:
-            change_emoji = "🟢" if change > 0 else "🔴" if change < 0 else "➡️"
-            section.append(f"📈 تغییر ۲۴ساعته: {change_emoji} {change:+.2f}%")
-        
-        section.append("")
-        section.append("🎯 سناریوی معاملاتی:")
-        if entry and sl and tp1 and gate == "PASS" and decision_state in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
-            if direction == "LONG":
-                section.append(f"   • ورود: تایید شکست و تثبیت بالای {fmt(entry)} با افزایش حجم")
-                section.append(f"   • حد ضرر: زیر {fmt(sl)} (محافظت در برابر شکست کاذب)")
-            else:
-                section.append(f"   • ورود: تایید شکست و تثبیت زیر {fmt(entry)} با افزایش حجم")
-                section.append(f"   • حد ضرر: بالای {fmt(sl)} (محافظت در برابر شکست کاذب)")
-            section.append(f"   • هدف اول (TP1): {fmt(tp1)}")
-            if tp2:
-                section.append(f"   • هدف دوم (TP2): {fmt(tp2)} (در صورت تداوم مومنتوم)")
-            if tp3:
-                section.append(f"   • هدف سوم (TP3): {fmt(tp3)}")
-            if tp4:
-                section.append(f"   • هدف چهارم (TP4): {fmt(tp4)}")
-            if rr:
-                rr_text = "عالی" if rr >= 3 else "خوب" if rr >= 2 else "متوسط" if rr >= 1.5 else "پایین"
-                section.append(f"   • نسبت ریسک به ریوارد: ۱ به {rr:.2f} ({rr_text})")
-        else:
-            section.append("   ⏳ ورود معتبر تأیید نشده است.")
-            if reasons:
-                section.append(f"   🔸 دلایل: " + "؛ ".join([translate_reason_fa(r) for r in reasons[:3]]))
-            elif gate == "BLOCK" and gate_reason:
-                section.append(f"   🔸 گیت مسدود: {translate_reason_fa(gate_reason)}")
-            else:
-                section.append("   🔸 منتظر تأیید ساختار و افزایش حجم باشید.")
-        
-        section.append("")
-        section.append("📊 تحلیل عمیق بازار:")
-        
-        regime_map = {
-            "RISK_ON": "🟢 ریسک‌پذیر (Risk-On) - تمایل صعودی",
-            "RISK_OFF": "🔴 ریسک‌گریز (Risk-Off) - تمایل نزولی",
-            "NEUTRAL": "🟡 خنثی",
-            "TRENDING_BULL": "🟢 روند صعودی قوی",
-            "TRENDING_BEAR": "🔴 روند نزولی قوی",
-            "ACCUMULATION": "🟡 انباشت (خریداران قوی‌تر)",
-            "DISTRIBUTION": "🟠 توزیع (فروشندگان قوی‌تر)",
-            "RANGE": "🟡 محدوده (خنثی)"
-        }
-        regime_text = regime_map.get(regime_trend, regime_trend)
-        section.append(f"   • رژیم بازار: {regime_text} (امتیاز: {regime_score}/۱۰۰)")
-        
-        vol_map = {
-            "LOW": "🟢 پایین - مناسب برای ورود",
-            "NORMAL": "🟡 عادی - قابل قبول",
-            "HIGH": "🟠 بالا - احتیاط بیشتر",
-            "EXTREME": "🔴 فوق‌العاده بالا - ریسک زیاد"
-        }
-        vol_text = vol_map.get(regime_volatility, regime_volatility)
-        section.append(f"   • سطح نوسان: {vol_text}")
-        
-        deriv_map = {
-            "NEUTRAL": "🟢 خنثی - بدون فشار اضافی",
-            "LONG_CROWDED": "🟠 ازدحام خریداران - خطر ریزش",
-            "SHORT_CROWDED": "🟠 ازدحام فروشندگان - خطر رشد",
-            "UNAVAILABLE": "⚪ در دسترس نیست"
-        }
-        deriv_text = deriv_map.get(regime_derivatives, regime_derivatives)
-        section.append(f"   • وضعیت مشتقات: {deriv_text}")
-        
-        dq_label = "عالی" if data_quality >= 80 else "خوب" if data_quality >= 60 else "متوسط" if data_quality >= 40 else "ضعیف"
-        section.append(f"   • کیفیت داده: {data_quality:.0f}% ({dq_label})")
-        liq_map = {"HIGH": "🟢 بالا", "MEDIUM": "🟡 متوسط", "LOW": "🔴 پایین"}
-        section.append(f"   • نقدینگی: {liq_map.get(liquidity, liquidity)}")
-        
-        if volume_ratio is not None:
-            vol_desc = "بسیار بالا (تأیید قوی)" if volume_ratio >= 1.5 else "بالاتر از میانگین" if volume_ratio >= 1.2 else "نزدیک به میانگین" if volume_ratio >= 0.8 else "پایین‌تر از میانگین (نیاز به احتیاط)"
-            section.append(f"   • نسبت حجم: {volume_ratio:.2f}x ({vol_desc})")
-        
-        if rsi is not None:
-            rsi_state = "اشباع خرید" if rsi > 70 else "اشباع فروش" if rsi < 30 else "منطقه تعادل" if 45 <= rsi <= 55 else "متمایل به صعود" if rsi > 55 else "متمایل به نزول"
-            section.append(f"   • RSI: {rsi:.1f} ({rsi_state})")
-        section.append(f"   • MACD: {macd}")
-        section.append(f"   • روندها: H4={h4_trend} | D1={d1_trend} | W1={w1_trend}")
-        if support or resistance:
-            section.append(f"   • سطوح کلیدی: حمایت {fmt(support)} ↔ مقاومت {fmt(resistance)}")
-        
-        section.append("")
-        section.append("📈 امتیازات و احتمال:")
-        section.append(f"   • امتیاز سیگنال (Signal Score): {signal_score:.0f}/۱۰۰")
-        section.append(f"   • قدرت مدل (Model Strength): {model_strength:.0f}%")
-        if win_prob is not None:
-            prob_text = "بالا" if win_prob >= 65 else "متوسط" if win_prob >= 50 else "پایین"
-            section.append(f"   • احتمال برد (کالیبره): {win_prob:.0f}% ({prob_text}) — سطح: {win_prob_tier}")
-        else:
-            section.append(f"   • احتمال برد: هنوز کالیبره نشده (نیاز به معامله بسته بیشتر)")
-        
-        if contradictions:
-            section.append("")
-            section.append("⚠️ تضادهای شناسایی‌شده:")
-            for c in contradictions[:4]:
-                section.append(f"   • {translate_reason_fa(c)}")
-        
-        if r.get("warning"):
-            section.append("")
-            section.append(f"⚠️ هشدار: {r.get('warning')}")
-        
-        if sl and direction != "NEUTRAL":
-            section.append("")
-            if direction == "LONG":
-                section.append(f"🔴 سطح ابطال (Invalidation): زیر {fmt(sl)}")
-                section.append(f"   در صورت بسته‌شدن کندل زیر {fmt(sl)}، تز صعودی باطل شده و احتمال ریزش تا حمایت بعدی وجود دارد.")
-            else:
-                section.append(f"🔴 سطح ابطال (Invalidation): بالای {fmt(sl)}")
-                section.append(f"   در صورت بسته‌شدن کندل بالای {fmt(sl)}، تز نزولی باطل شده و احتمال رشد تا مقاومت بعدی وجود دارد.")
-        
-        section.append("")
-        section.append("🔄 سناریوی جایگزین:")
-        if direction == "LONG" and support:
-            section.append(f"   • در صورت شکست حمایت {fmt(support)}، سناریوی نزولی فعال می‌شود.")
-            section.append(f"   • هدف نزولی احتمالی: {fmt(support * 0.97)}")
-        elif direction == "SHORT" and resistance:
-            section.append(f"   • در صورت شکست مقاومت {fmt(resistance)}، سناریوی صعودی فعال می‌شود.")
-            section.append(f"   • هدف صعودی احتمالی: {fmt(resistance * 1.03)}")
-        else:
-            section.append("   • در صورت تغییر ساختار، سناریو بازبینی خواهد شد.")
-            if support and resistance:
-                section.append(f"   • محدوده فعلی: {fmt(support)} تا {fmt(resistance)}")
-        
-        section.append("")
-        section.append(f"🕐 سشن فعلی: {session_label} | ضریب کیفیت: {session_multiplier:.1f}x")
-        if session == "OVERLAP":
-            section.append("   ✅ همپوشانی سشن‌ها - نقدینگی بالا، اسپرد کمتر")
-        elif session == "CLOSED":
-            section.append("   ⚠️ خارج از سشن - نقدینگی پایین، اسپرد بیشتر")
-        
-        human_sections.append("\n".join(section))
-    
-    summary_section = []
-    summary_section.append("")
-    summary_section.append("━━━━━━━━━━━━━━━━━━")
-    summary_section.append("🧠 خلاصه‌ی هوشمند و توصیه‌ی نهایی")
-    summary_section.append("━━━━━━━━━━━━━━━━━━")
-    
-    total = len(results)
-    executable = sum(1 for r in results if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and r.get("gate") == "PASS")
-    bullish = sum(1 for r in results if r.get("direction") == "LONG")
-    bearish = sum(1 for r in results if r.get("direction") == "SHORT")
-    watch = sum(1 for r in results if "WATCH" in str(r.get("decision_state", "")))
-    
-    summary_section.append(f"📊 آمار کلی: {total} ارز بررسی شد | {executable} سیگنال اجرایی | {watch} در انتظار تأیید")
-    summary_section.append(f"📈 جهت‌گیری بازار: {bullish} صعودی | {bearish} نزولی")
-    
-    if btc_regime:
-        btc_state = btc_regime.get("regime", "UNKNOWN")
-        if btc_state == "RISK_ON":
-            summary_section.append("🟢 رژیم کلی بیت‌کوین: ریسک‌پذیر (Risk-On) — تمایل کلی بازار به سمت صعود است.")
-        elif btc_state == "RISK_OFF":
-            summary_section.append("🔴 رژیم کلی بیت‌کوین: ریسک‌گریز (Risk-Off) — تمایل کلی بازار به سمت نزول است.")
-        else:
-            summary_section.append("🟡 رژیم کلی بیت‌کوین: خنثی — بازار جهت مشخصی ندارد.")
-    
-    best = None
-    best_score = -1
-    for r in results:
-        if r.get("decision_state") in ("BUY CONFIRMATION", "SELL CONFIRMATION") and r.get("gate") == "PASS":
-            score = (r.get("opportunity_score", 0) * 0.5) + (r.get("confidence", 0) * 0.3) + (min(r.get("rr", 0) or 0, 5) * 4)
-            if score > best_score:
-                best_score = score
-                best = r
-    
-    if best:
-        direction_emoji = "🟢" if best.get("direction") == "LONG" else "🔴"
-        summary_section.append("")
-        summary_section.append(f"🏆 بهترین فرصت: {direction_emoji} {best.get('coin')}")
-        summary_section.append(f"   • جهت‌گیری: {'خرید' if best.get('direction') == 'LONG' else 'فروش'}")
-        summary_section.append(f"   • نقطه ورود: {fmt(best.get('entry'))}")
-        summary_section.append(f"   • حد ضرر: {fmt(best.get('sl'))}")
-        summary_section.append(f"   • هدف اول: {fmt(best.get('tp1'))}")
-        if best.get('tp2'):
-            summary_section.append(f"   • هدف دوم: {fmt(best.get('tp2'))}")
-        summary_section.append(f"   • نسبت R/R: {best.get('rr', 0):.2f}")
-        summary_section.append(f"   • اطمینان: {best.get('confidence', 0)}%")
-        
-        if best.get('win_probability') and best.get('win_probability') >= 60:
-            summary_section.append("")
-            summary_section.append("✅ توصیه: با توجه به امتیاز بالا و احتمال برد مناسب، این فرصت قابل بررسی است.")
-            summary_section.append("   🔹 حجم معامله را بر اساس ریسک‌پذیری خود تنظیم کنید.")
-            summary_section.append("   🔹 حد ضرر را حتماً رعایت کنید.")
-        else:
-            summary_section.append("")
-            summary_section.append("⚠️ توصیه: با احتیاط رفتار کنید. احتمال برد هنوز در سطح اطمینان‌بخشی نیست.")
-            summary_section.append("   🔹 منتظر تأیید بیشتر یا بهبود شرایط بازار باشید.")
-    else:
-        summary_section.append("")
-        summary_section.append("⚪ هیچ فرصت اجرایی با کیفیت کافی پیدا نشد.")
-        summary_section.append("   🔹 توصیه: در جایگاه ناظر (HOLD) باشید و منتظر شکل‌گیری ستاپ جدید بمانید.")
-    
-    if news and news.get("impact") == "HIGH":
-        summary_section.append("")
-        summary_section.append(f"📰 اخبار مهم: {news.get('bias', '')} | شدت تأثیر: بالا")
-        summary_section.append("   ⚠️ در معاملات خود احتیاط بیشتری به خرج دهید.")
-    
-    summary_section.append("")
-    summary_section.append("━━━━━━━━━━━━━━━━━━")
-    summary_section.append("🔔 این گزارش یک توصیه‌ی سرمایه‌گذاری قطعی نیست.")
-    summary_section.append("   همیشه قبل از هر معامله، تحلیل خود را انجام دهید.")
-    summary_section.append(f"🕐 آخرین بروزرسانی: {now_tehran().strftime('%Y-%m-%d %H:%M:%S')} تهران")
-    
-    final_report = original_report
-    if personal_report_text:
-        final_report += "\n\n" + personal_report_text
-    final_report += "\n\n" + "\n".join(human_sections)
-    final_report += "\n\n" + "\n".join(summary_section)
-    
-    return final_report
-    
 if __name__ == "__main__":
     raise SystemExit(main())
