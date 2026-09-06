@@ -12928,6 +12928,270 @@ def send_performance_telemetry_report():
 # and before main() starts using them.
 _atlas_install_full_profiler()
 
+
+# ============================================================
+# PHASE 3.11 — ADVISORY INTELLIGENCE LAYER
+# Additive-only: does NOT alter canonical BUY/SELL/WAIT, Entry/SL/TP,
+# Evidence Fusion weights, MTF, Backtest Gate, Lifecycle, or risk sizing.
+# ============================================================
+
+def _p311_mean(xs):
+    xs = [float(x) for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _p311_median(xs):
+    vals = sorted(float(x) for x in xs if x is not None)
+    n = len(vals)
+    if not n:
+        return 0.0
+    m = n // 2
+    return vals[m] if n % 2 else (vals[m-1] + vals[m]) / 2.0
+
+
+def _p311_robust_volume_z(volumes):
+    """Robust volume anomaly score using median/MAD; safe for fat-tailed crypto volume."""
+    if len(volumes) < 25:
+        return None
+    base = [float(v) for v in volumes[-30:-1] if v is not None]
+    if len(base) < 15:
+        return None
+    med = _p311_median(base)
+    mad = _p311_median([abs(v-med) for v in base])
+    cur = float(volumes[-1])
+    if mad <= 1e-12:
+        return None
+    return 0.6745 * (cur-med) / mad
+
+
+def _p311_local_swings(values, kind='high', span=2):
+    vals = [float(v) for v in values]
+    out = []
+    if len(vals) < span*2+3:
+        return out
+    for i in range(span, len(vals)-span):
+        w = vals[i-span:i+span+1]
+        if kind == 'high' and vals[i] == max(w):
+            out.append(i)
+        elif kind == 'low' and vals[i] == min(w):
+            out.append(i)
+    return out
+
+
+def _p311_swing_divergence(closes_):
+    """Swing-based RSI/MACD divergence. Advisory only."""
+    if len(closes_) < 60:
+        return []
+    rs = rsi_series(closes_, 14)
+    fast = ema_series(closes_, 12)
+    slow = ema_series(closes_, 26)
+    if not rs or not fast or not slow:
+        return []
+    off = len(fast) - len(slow)
+    if off < 0:
+        return []
+    ml = [fast[i + off] - slow[i] for i in range(len(slow))]
+    n = min(len(closes_), len(rs), len(ml))
+    c = list(map(float, closes_[-n:]))
+    rs = list(map(float, rs[-n:]))
+    ml = list(map(float, ml[-n:]))
+    out = []
+    highs = _p311_local_swings(c, 'high', 2)
+    lows = _p311_local_swings(c, 'low', 2)
+    if len(highs) >= 2:
+        a,b = highs[-2], highs[-1]
+        if c[b] > c[a]:
+            votes=[]
+            if rs[b] < rs[a]: votes.append('RSI')
+            if ml[b] < ml[a]: votes.append('MACD')
+            if votes: out.append('BEARISH ' + '+'.join(votes))
+    if len(lows) >= 2:
+        a,b = lows[-2], lows[-1]
+        if c[b] < c[a]:
+            votes=[]
+            if rs[b] > rs[a]: votes.append('RSI')
+            if ml[b] > ml[a]: votes.append('MACD')
+            if votes: out.append('BULLISH ' + '+'.join(votes))
+    return out
+
+
+def _p311_breakout_intelligence(r, rows):
+    """Unified breakout-quality / false-breakout diagnostic, not a new trade signal."""
+    if not rows or len(rows) < 30:
+        return {'state':'NO_DATA'}
+    closes_ = [float(x[4]) for x in rows]
+    vols = [float(x[5] or 0) for x in rows]
+    price = closes_[-1]
+    support = _i_num(r.get('support'), None)
+    resistance = _i_num(r.get('resistance'), None)
+    if not support or not resistance:
+        return {'state':'NO_LEVEL'}
+
+    direction = None; level = None
+    if price > resistance:
+        direction, level = 'UP', resistance
+    elif price < support:
+        direction, level = 'DOWN', support
+
+    # false breakout/reclaim within recent bars
+    look = closes_[-6:]
+    false_dir = None
+    if any(x > resistance for x in look[:-1]) and price < resistance:
+        false_dir = 'BULL_TRAP'
+    elif any(x < support for x in look[:-1]) and price > support:
+        false_dir = 'BEAR_TRAP'
+
+    avg20 = _p311_mean(vols[-21:-1])
+    vr = vols[-1] / avg20 if avg20 > 0 else 0.0
+    base = _p311_mean(vols[-25:-5])
+    cum_ratio = sum(vols[-5:]) / (base*5) if base > 0 else 0.0
+    rvz = _p311_robust_volume_z(vols)
+    rsi_val = rsi(closes_)
+
+    score = 0.0
+    reasons=[]
+    if direction:
+        penetration = abs(price-level)/level*100 if level else 0.0
+        score += 10 if penetration > 2 else 7 if penetration > 1 else 4 if penetration > .5 else 1
+        reasons.append(f'close {penetration:.2f}% beyond level')
+        score += 10 if vr > 2 else 7 if vr > 1.5 else 4 if vr > 1.2 else 1
+        if vr >= 1.2: reasons.append(f'volume {vr:.2f}x')
+        bars = sum(1 for x in closes_[-5:] if (x>level if direction=='UP' else x<level))
+        score += 10 if bars>=3 else 6 if bars>=2 else 3 if bars>=1 else 0
+        if cum_ratio >= 1.3:
+            score += 5; reasons.append(f'cumulative volume {cum_ratio:.2f}x')
+        if rsi_val is not None and ((direction=='UP' and rsi_val>55) or (direction=='DOWN' and rsi_val<45)):
+            score += 5; reasons.append(f'RSI {rsi_val:.0f}')
+    quality = 'EXCELLENT' if score>=32 else 'GOOD' if score>=23 else 'MODERATE' if score>=12 else 'POOR'
+    return {
+        'state':'BREAKOUT' if direction else ('FALSE_BREAKOUT' if false_dir else 'INSIDE_RANGE'),
+        'direction':direction, 'false_breakout':false_dir, 'quality':quality, 'score':round(score,1),
+        'volume_ratio':round(vr,2), 'cumulative_volume_ratio':round(cum_ratio,2),
+        'robust_volume_z':None if rvz is None else round(rvz,2), 'reasons':reasons,
+    }
+
+
+def _p311_momentum(rows):
+    if not rows or len(rows) < 13:
+        return ('UNKNOWN', 0.0)
+    c=[float(x[4]) for x in rows]
+    atrp = None
+    try:
+        atrp = atr(rows, 14) / c[-1] * 100 if c[-1] else None
+    except Exception:
+        pass
+    # noise floor adapts modestly to ATR, bounded to avoid over-filtering
+    floor = max(0.35, min(1.25, (atrp or 2.0)*0.18))
+    ch3=(c[-1]/c[-4]-1)*100
+    ch6=(c[-1]/c[-7]-1)*100
+    ch12=(c[-1]/c[-13]-1)*100
+    score=0.0
+    score += 2 if ch3>floor else -2 if ch3<-floor else 0
+    score += 1 if ch6>floor*2 else -1 if ch6<-floor*2 else 0
+    score += .5 if ch12>floor*3 else -.5 if ch12<-floor*3 else 0
+    state='STRONG_UP' if score>=2.5 else 'UP' if score>=1.5 else 'STRONG_DOWN' if score<=-2.5 else 'DOWN' if score<=-1.5 else 'NEUTRAL'
+    return state, round(score,2)
+
+
+def _p311_required_rr(r):
+    atrp = _i_num(r.get('atr_pct'), _i_num(r.get('atrp'), 0.0)) or 0.0
+    vol = str(r.get('volatility_state') or r.get('volatility') or '').upper()
+    if 'EXTREME' in vol: req=3.0
+    elif 'HIGH' in vol: req=2.5
+    elif 'LOW' in vol: req=1.8
+    else: req=2.0
+    if atrp>8: req += .5
+    elif atrp>5: req += .3
+    return round(req,2)
+
+
+def build_phase311_advisory_intelligence(results, btc_regime=None):
+    """Daily16 additive diagnostic. No canonical decision field is mutated."""
+    lines=[
+        '🧠 ATLAS | Phase 3.11 Advisory Intelligence',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        'این لایه تشخیصی است؛ BUY/SELL/WAIT و Entry/SL/TP اصلی را تغییر نمی‌دهد.',
+        ''
+    ]
+    rows_out=[]
+    for r in results:
+        coin=str(r.get('coin') or '').upper()
+        if not coin or coin in ATLAS_METALS:
+            continue
+        try:
+            rows = best_ohlcv(coin, '4h', 90)
+        except Exception:
+            rows = None
+        if not rows:
+            continue
+        bi=_p311_breakout_intelligence(r, rows)
+        mom, momscore=_p311_momentum(rows)
+        divs=_p311_swing_divergence([float(x[4]) for x in rows])
+        reqrr=_p311_required_rr(r)
+        rr=_i_num(r.get('rr'), None)
+        rows_out.append((coin, bi, mom, momscore, divs, reqrr, rr))
+
+    # Show only informative diagnostics to avoid noise.
+    interesting=[]
+    for item in rows_out:
+        coin,bi,mom,momscore,divs,reqrr,rr=item
+        rvz=bi.get('robust_volume_z')
+        if bi.get('state') in ('BREAKOUT','FALSE_BREAKOUT') or divs or (rvz is not None and abs(rvz)>=2.5) or mom.startswith('STRONG'):
+            interesting.append(item)
+    if not interesting:
+        lines.append('• در این چرخه شکست/واگرایی/حجم غیرعادی معناداری شناسایی نشد.')
+    else:
+        for coin,bi,mom,momscore,divs,reqrr,rr in interesting[:12]:
+            tags=[]
+            if bi.get('state')=='BREAKOUT':
+                tags.append(f"Breakout {bi.get('direction')} {bi.get('quality')} {bi.get('score')}/40")
+            if bi.get('false_breakout'):
+                tags.append(f"False breakout: {bi.get('false_breakout')}")
+            rvz=bi.get('robust_volume_z')
+            if rvz is not None and abs(rvz)>=2.5:
+                tags.append(f"Unusual volume z={rvz:+.1f}")
+            if divs: tags.append('Divergence=' + ','.join(divs))
+            if mom.startswith('STRONG'): tags.append(f'Momentum={mom}')
+            if rr is not None: tags.append(f'RR {rr:.2f} / advisory minimum {reqrr:.2f}')
+            lines.append(f"• {coin}: " + ' | '.join(tags))
+
+    # Context-only sentiment summary from evidence already collected by ATLAS.
+    biases=[]
+    fundings=[]
+    for r in results:
+        nb=str(r.get('news_bias') or '').upper()
+        if nb: biases.append(nb)
+        f=_i_num(r.get('funding_rate'), None)
+        if f is not None: fundings.append(f)
+    bull=sum(1 for x in biases if 'BULL' in x or 'POS' in x)
+    bear=sum(1 for x in biases if 'BEAR' in x or 'NEG' in x)
+    lines += ['', '🌐 Sentiment Context (context-only)']
+    if biases:
+        lines.append(f'• News evidence: bullish={bull}, bearish={bear}, observed={len(biases)}')
+    if fundings:
+        lines.append(f'• Mean funding observed: {_p311_mean(fundings):+.5f}')
+    if btc_regime:
+        lines.append(f"• BTC regime: {btc_regime.get('regime','UNKNOWN')}")
+    lines.append('• Sentiment به‌تنهایی سیگنال معاملاتی تولید نمی‌کند و دوباره در Confidence شمرده نمی‌شود.')
+    return '\n'.join(lines)
+
+
+def send_phase311_advisory_intelligence(results, btc_regime=None):
+    content = build_phase311_advisory_intelligence(results, btc_regime)
+    dt=now_tehran(); tag=shamsi(dt).replace('/','')+'_'+dt.strftime('%H%M%S')
+    filename=f'10_ATLAS_PHASE3_11_ADVISORY_{tag}.txt'
+    sent=0; errors=[]
+    destinations=[]
+    for c in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if c and c not in destinations: destinations.append(c)
+    for c in destinations:
+        try:
+            _telegram_send_document(c, content, filename, '🧠 ATLAS | Advisory Intelligence')
+            sent += 1
+        except Exception as e:
+            errors.append(f'PHASE311_ADVISORY[{c}]: {e}')
+    return sent, errors
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -13007,6 +13271,13 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
     parts, s, e = send_report(daily_text)
     sent_total += s; errors.extend(e)
+
+    # 7) Phase 3.11 advisory intelligence: additive diagnostic only.
+    try:
+        s, e = send_phase311_advisory_intelligence(results, btc_regime)
+        sent_total += s; errors.extend(e)
+    except Exception as ex:
+        errors.append(f"PHASE311_ADVISORY_DAILY16: {ex}")
 
     return sent_total, errors, parts
 
@@ -13144,7 +13415,7 @@ def main():
             print("🔕 Storage-only cycle complete; no Telegram message by design.")
 
         print(f"\n{'='*50}")
-        print("📊 PHASE 3.10.1 SUMMARY")
+        print("📊 PHASE 3.11 SUMMARY")
         print(f"  Scoped assets: {len(scoped_results)}")
         print(f"  Hourly persisted: {hourly_count}")
         print(f"  Deep4H cycle: {deep_cycle}")
