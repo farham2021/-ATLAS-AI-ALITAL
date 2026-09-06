@@ -164,7 +164,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 PHASE 3.5.2 NOTIFICATION AUDIT FIX"
+VERSION = "ATLAS v11.5 PHASE 3.6 OHLCV DIAGNOSTICS + SMART ALERT DELIVERY"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -1896,12 +1896,11 @@ def _best_ohlcv_impl(coin, timeframe, limit=250):
     _atlas_cache_stat("ohlcv", False)
     errors = []
 
-    # Prefer the provider that already succeeded for this exact timeframe,
-    # then the provider that succeeded for this coin on another timeframe.
+    # Phase 3.6: provider affinity is exact-timeframe only. A provider that was
+    # good for BTC/4h is not assumed to be best for BTC/15m or BTC/1d.
     preferred = []
     exact = _ATLAS_OHLCV_PROVIDER_AFFINITY.get((coin_key, tf_key))
-    general = _ATLAS_OHLCV_PROVIDER_AFFINITY.get((coin_key, "*"))
-    for eid in (exact, general):
+    for eid in (exact,):
         if eid and eid in EX and eid not in preferred:
             preferred.append(eid)
     ordered_ids = preferred + [eid for eid in EXCHANGE_IDS if eid not in preferred]
@@ -1912,11 +1911,13 @@ def _best_ohlcv_impl(coin, timeframe, limit=250):
         failure_key = (eid, coin_key, tf_key)
         if failure_key in _ATLAS_OHLCV_PROVIDER_FAILURES:
             continue
+        _atlas_ohlcv_diag(tf_key, "network_fetch")
         try:
             rows = exchange_ohlcv(eid, coin, timeframe, limit)
             if rows:
                 _ATLAS_OHLCV_PROVIDER_AFFINITY[(coin_key, tf_key)] = eid
-                _ATLAS_OHLCV_PROVIDER_AFFINITY[(coin_key, "*")] = eid
+                _atlas_ohlcv_diag(tf_key, "network_success")
+                _atlas_ohlcv_diag(tf_key, "provider_success", eid)
                 stored_rows = _atlas_copy_rows(rows)
                 previous = _ATLAS_DATA_CACHE["ohlcv"].get(cache_key)
                 if previous is None or int(limit) >= int(previous["limit"]):
@@ -1932,6 +1933,8 @@ def _best_ohlcv_impl(coin, timeframe, limit=250):
                 _atlas_persistent_ohlcv_stage(coin_key, tf_key, int(limit), stored_rows, eid.upper())
                 return _atlas_copy_rows(stored_rows), eid.upper()
         except Exception as e:
+            _atlas_ohlcv_diag(tf_key, "network_error")
+            _atlas_ohlcv_diag(tf_key, "provider_error", eid)
             kind = _classify_exchange_error(e)
             errors.append(f"{eid}:{kind}")
             # Skip this exact failing provider/coin/timeframe for the remainder
@@ -1961,6 +1964,32 @@ ATLAS_PERSISTENT_CLOSED_OHLCV = os.environ.get("ATLAS_PERSISTENT_CLOSED_OHLCV", 
 _ATLAS_PERSISTENT_OHLCV = {}
 _ATLAS_PERSISTENT_OHLCV_DIRTY = {}
 _ATLAS_PERSISTENT_OHLCV_STATS = {"prefetched":0,"hits":0,"misses":0,"saved":0,"save_fail":0}
+
+# Phase 3.6 observability only: exact-timeframe OHLCV cache/network diagnostics.
+# These counters never participate in provider choice, indicator values, signal logic,
+# Entry/SL/TP, Evidence, MTF or Backtest decisions.
+_ATLAS_OHLCV_DIAG_LOCK = threading.Lock()
+_ATLAS_OHLCV_DIAG = {}
+
+def _atlas_ohlcv_diag(timeframe, field, provider=None, n=1):
+    tf = str(timeframe or "UNKNOWN")
+    with _ATLAS_OHLCV_DIAG_LOCK:
+        row = _ATLAS_OHLCV_DIAG.setdefault(tf, {
+            "in_run_hit":0, "persistent_hit":0, "persistent_missing":0,
+            "persistent_stale":0, "persistent_limit":0, "persistent_short":0,
+            "network_fetch":0, "network_success":0, "network_error":0,
+            "provider_success":{}, "provider_error":{},
+        })
+        if field in ("provider_success", "provider_error"):
+            key = str(provider or "UNKNOWN").upper()
+            bucket = row[field]
+            bucket[key] = int(bucket.get(key, 0)) + int(n)
+        else:
+            row[field] = int(row.get(field, 0)) + int(n)
+
+def _atlas_ohlcv_diag_snapshot():
+    with _ATLAS_OHLCV_DIAG_LOCK:
+        return json.loads(json.dumps(_ATLAS_OHLCV_DIAG))
 
 def _atlas_expected_closed_ts_any(timeframe, now_ms=None):
     now_ms=int(now_ms if now_ms is not None else time.time()*1000)
@@ -2003,15 +2032,34 @@ def atlas_prefetch_persistent_ohlcv(symbols):
     return total
 
 def _atlas_persistent_ohlcv_get(coin,timeframe,limit):
-    if not ATLAS_PERSISTENT_CLOSED_OHLCV: return None
-    key=(str(coin).upper(),str(timeframe)); x=_ATLAS_PERSISTENT_OHLCV.get(key)
-    expected=_atlas_expected_closed_ts_any(str(timeframe))
-    if not x or expected is None or int(x.get("last_closed_ts",-1))!=int(expected) or int(x.get("limit",0))<int(limit):
-        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1; return None
+    tf = str(timeframe)
+    if not ATLAS_PERSISTENT_CLOSED_OHLCV:
+        return None
+    key=(str(coin).upper(),tf); x=_ATLAS_PERSISTENT_OHLCV.get(key)
+    expected=_atlas_expected_closed_ts_any(tf)
+    if not x:
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1
+        _atlas_ohlcv_diag(tf, "persistent_missing")
+        return None
+    if expected is None:
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1
+        _atlas_ohlcv_diag(tf, "persistent_stale")
+        return None
+    if int(x.get("last_closed_ts",-1))!=int(expected):
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1
+        _atlas_ohlcv_diag(tf, "persistent_stale")
+        return None
+    if int(x.get("limit",0))<int(limit):
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1
+        _atlas_ohlcv_diag(tf, "persistent_limit")
+        return None
     rows=x.get("rows") or []
     if len(rows)<min(60,int(limit)):
-        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1; return None
+        _ATLAS_PERSISTENT_OHLCV_STATS["misses"]+=1
+        _atlas_ohlcv_diag(tf, "persistent_short")
+        return None
     _ATLAS_PERSISTENT_OHLCV_STATS["hits"]+=1
+    _atlas_ohlcv_diag(tf, "persistent_hit")
     return _atlas_copy_rows(rows[-int(limit):]), str(x.get("provider") or "PERSISTENT")
 
 def _atlas_persistent_ohlcv_stage(coin,timeframe,limit,rows,provider):
@@ -2097,6 +2145,7 @@ def best_ohlcv(coin, timeframe, limit=250):
     """
     cached = _atlas_ohlcv_cache_read(coin, timeframe, limit, shared_telemetry=True)
     if cached is not None:
+        _atlas_ohlcv_diag(timeframe, "in_run_hit")
         return cached
     persistent = _atlas_persistent_ohlcv_get(coin, timeframe, limit)
     if persistent is not None:
@@ -2110,6 +2159,7 @@ def best_ohlcv(coin, timeframe, limit=250):
         cached = _atlas_ohlcv_cache_read(coin, timeframe, limit, shared_telemetry=True)
         if cached is not None:
             _atlas_cache_stat("ohlcv_wait_reuse", True)
+            _atlas_ohlcv_diag(timeframe, "in_run_hit")
             return cached
         _atlas_cache_stat("ohlcv_shared", False)
         _atlas_cache_stat("ohlcv_wait_reuse", False)
@@ -3170,7 +3220,21 @@ def market_liquidity_index(results):
 # PRICE CONSENSUS
 # ============================================================
 
-def price_consensus(coin):
+# Phase 3.6: in-run single-flight for identical price-consensus requests.
+# No cross-run TTL extension and no stale price reuse are introduced.
+_ATLAS_PRICE_CONSENSUS_LOCKS = {}
+_ATLAS_PRICE_CONSENSUS_LOCKS_GUARD = threading.Lock()
+
+def _atlas_price_consensus_lock(coin):
+    key = str(coin).upper()
+    with _ATLAS_PRICE_CONSENSUS_LOCKS_GUARD:
+        lock = _ATLAS_PRICE_CONSENSUS_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _ATLAS_PRICE_CONSENSUS_LOCKS[key] = lock
+        return lock
+
+def _price_consensus_impl(coin):
     cache_key = str(coin).upper()
     cached = _atlas_ttl_get(
         "price_consensus", cache_key, ATLAS_PRICE_CONSENSUS_CACHE_TTL
@@ -3227,6 +3291,21 @@ def price_consensus(coin):
     result = (med, [dict(x) for x in sources], quality, sp, list(errors))
     _atlas_ttl_set("price_consensus", cache_key, result)
     return med, sources, quality, sp, errors
+
+
+def price_consensus(coin):
+    cache_key = str(coin).upper()
+    cached = _atlas_ttl_get("price_consensus", cache_key, ATLAS_PRICE_CONSENSUS_CACHE_TTL)
+    if cached is not None:
+        med, sources, quality, sp, errors = cached
+        return med, [dict(x) for x in sources], quality, sp, list(errors)
+    lock = _atlas_price_consensus_lock(cache_key)
+    with lock:
+        cached = _atlas_ttl_get("price_consensus", cache_key, ATLAS_PRICE_CONSENSUS_CACHE_TTL)
+        if cached is not None:
+            med, sources, quality, sp, errors = cached
+            return med, [dict(x) for x in sources], quality, sp, list(errors)
+        return _price_consensus_impl(coin)
 
 
 # ============================================================
@@ -11264,9 +11343,12 @@ ATLAS_FREE_ALERT_MAX_HISTORY = int(os.environ.get("ATLAS_FREE_ALERT_MAX_HISTORY"
 ATLAS_FREE_ALERT_BATCH_SIZE = max(10, min(15, int(os.environ.get("ATLAS_FREE_ALERT_BATCH_SIZE", "12"))))
 ATLAS_FREE_ALERT_MAX_MESSAGE_CHARS = max(2500, min(3900, int(os.environ.get("ATLAS_FREE_ALERT_MAX_MESSAGE_CHARS", "3600"))))
 ATLAS_FREE_ALERT_SEND_INFO = os.environ.get("ATLAS_FREE_ALERT_SEND_INFO", "0").strip().lower() in ("1", "true", "yes", "on")
+ATLAS_FREE_ALERT_SMART_HOURLY = os.environ.get("ATLAS_FREE_ALERT_SMART_HOURLY", "1").strip().lower() not in ("0","false","no","off")
+ATLAS_FREE_ALERT_HOURLY_MAX = max(1, int(os.environ.get("ATLAS_FREE_ALERT_HOURLY_MAX", "12")))
 _ATLAS_FREE_ALERT_STATS = {
     "detected": 0, "dedup_skipped": 0, "eligible": 0, "info_suppressed": 0,
     "telegram_batches": 0, "telegram_events": 0, "telegram_errors": 0,
+    "ranked_suppressed": 0, "hourly_cap": ATLAS_FREE_ALERT_HOURLY_MAX,
 }
 
 
@@ -11448,7 +11530,7 @@ def _atlas_existing_alert_state():
             if not key:
                 continue
             status = str(row.get("telegram_status") or "").upper()
-            terminal = bool(row.get("sent")) or status in ("SENT", "SUPPRESSED_INFO")
+            terminal = bool(row.get("sent")) or status in ("SENT", "SUPPRESSED_INFO", "SUPPRESSED_RANKED")
             state[key] = {"sent": terminal, "sent_at": row.get("sent_at"), "telegram_status": status or None}
         if rows:
             return state, "SUPABASE"
@@ -11512,6 +11594,33 @@ def _atlas_alert_sort_key(event):
         str(event.get("event_type") or ""),
     )
 
+
+def _atlas_alert_delivery_score(event):
+    """Delivery-only ranking. It never changes event severity or ATLAS signal state."""
+    sev = str(event.get("severity") or "INFO").upper()
+    score = {"STRONG":100.0,"WATCH":50.0,"INFO":0.0}.get(sev, 0.0)
+    score += min(20.0, max(0.0, _aio_num(event.get("confidence"),0)) * 0.20)
+    score += min(15.0, max(0.0, _aio_num(event.get("mtf_agreement_pct"),0)) * 0.15)
+    et = str(event.get("event_type") or "")
+    if et == "RSI_MACD_CONFIRMATION": score += 12.0
+    elif et in ("MACD_BULLISH_CROSS","MACD_BEARISH_CROSS"): score += 8.0
+    elif et in ("MACD_ZERO_UP","MACD_ZERO_DOWN"): score += 5.0
+    decision = str(event.get("decision_state") or "").upper()
+    if "BUY" in decision or "SELL" in decision: score += 10.0
+    tf = str(event.get("timeframe") or "")
+    score += {"4h":4.0,"1d":4.0,"1h":2.0,"15m":0.0}.get(tf,0.0)
+    return score
+
+def _atlas_rank_hourly_alerts(events):
+    strong = [e for e in events if str(e.get("severity") or "").upper()=="STRONG"]
+    watch = [e for e in events if str(e.get("severity") or "").upper()=="WATCH"]
+    other = [e for e in events if e not in strong and e not in watch]
+    strong = sorted(strong, key=lambda e: (-_atlas_alert_delivery_score(e), _atlas_alert_sort_key(e)))
+    watch = sorted(watch, key=lambda e: (-_atlas_alert_delivery_score(e), _atlas_alert_sort_key(e)))
+    room = max(0, int(ATLAS_FREE_ALERT_HOURLY_MAX) - len(strong))
+    selected = strong + watch[:room]
+    suppressed = watch[room:] + other
+    return selected, suppressed
 
 def _atlas_format_alert_line(event, index):
     sev = str(event.get("severity") or "INFO").upper()
@@ -11635,6 +11744,16 @@ def process_free_alert_events(events):
     _ATLAS_FREE_ALERT_STATS["eligible"] += len(eligible)
     _ATLAS_FREE_ALERT_STATS["info_suppressed"] += len(info_events)
 
+    ranked_suppressed = []
+    alerts_only = os.environ.get("ATLAS_DELIVERY_MODE", "FULL").strip().upper() == "ALERTS_ONLY"
+    if alerts_only and ATLAS_FREE_ALERT_SMART_HOURLY and eligible:
+        eligible, ranked_suppressed = _atlas_rank_hourly_alerts(eligible)
+        for e in ranked_suppressed:
+            e["telegram_status"] = "SUPPRESSED_RANKED"
+            e["sent"] = False
+            e["sent_at"] = None
+        _ATLAS_FREE_ALERT_STATS["ranked_suppressed"] += len(ranked_suppressed)
+
     # Persist every new event before Telegram. INFO is terminally suppressed;
     # WATCH/STRONG stay PENDING so failed batches can retry next run.
     _atlas_persist_alert_rows(pending)
@@ -11644,7 +11763,7 @@ def process_free_alert_events(events):
     batches = _atlas_build_alert_batches(eligible)
     _ATLAS_FREE_ALERT_STATS["telegram_batches"] += len(batches)
     sent_events = 0
-    final_rows = list(info_events)
+    final_rows = list(info_events) + list(ranked_suppressed)
 
     for batch_no, batch in enumerate(batches, 1):
         batch_id = hashlib.sha256(
@@ -11954,6 +12073,26 @@ def build_performance_telemetry_report():
         "- ohlcv_shared = exact in-run dataset reuse (same symbol/timeframe, sufficient stored limit)",
         "- ohlcv_wait_reuse = subset that reused only after waiting on the keyed concurrency lock",
         "",
+        "OHLCV diagnostics by timeframe (Phase 3.6):",
+    ]
+    diag = _atlas_ohlcv_diag_snapshot()
+    tf_order = ["15m","30m","1h","4h","1d","1w","1M"]
+    for tf in tf_order + sorted(k for k in diag if k not in tf_order):
+        row = diag.get(tf)
+        if not row: continue
+        ps = row.get("provider_success") or {}
+        pe = row.get("provider_error") or {}
+        ps_txt = ",".join(f"{k}:{v}" for k,v in sorted(ps.items(), key=lambda kv:(-kv[1],kv[0]))) or "-"
+        pe_txt = ",".join(f"{k}:{v}" for k,v in sorted(pe.items(), key=lambda kv:(-kv[1],kv[0]))) or "-"
+        lines.append(
+            f"- {tf}: in-run={row.get('in_run_hit',0)}, persistent={row.get('persistent_hit',0)}, "
+            f"missing={row.get('persistent_missing',0)}, stale={row.get('persistent_stale',0)}, "
+            f"limit/short={row.get('persistent_limit',0)}/{row.get('persistent_short',0)}, "
+            f"net={row.get('network_fetch',0)}, ok={row.get('network_success',0)}, err={row.get('network_error',0)}"
+        )
+        lines.append(f"    providers ok[{ps_txt}] err[{pe_txt}]")
+    lines += [
+        "",
         "Free Alert Engine delivery:",
         f"- detected events: {_ATLAS_FREE_ALERT_STATS.get('detected', 0)}",
         f"- dedup skipped: {_ATLAS_FREE_ALERT_STATS.get('dedup_skipped', 0)}",
@@ -11964,6 +12103,9 @@ def build_performance_telemetry_report():
         f"- Telegram batch errors: {_ATLAS_FREE_ALERT_STATS.get('telegram_errors', 0)}",
         f"- configured batch size: {ATLAS_FREE_ALERT_BATCH_SIZE}",
         f"- INFO Telegram enabled: {ATLAS_FREE_ALERT_SEND_INFO}",
+        f"- Smart hourly ranking enabled: {ATLAS_FREE_ALERT_SMART_HOURLY}",
+        f"- Hourly Telegram cap (STRONG always preserved): {ATLAS_FREE_ALERT_HOURLY_MAX}",
+        f"- WATCH/other events suppressed by hourly ranking: {_ATLAS_FREE_ALERT_STATS.get('ranked_suppressed', 0)}",
         "",
         "Persistent Backtest Cache (dedicated atlas_backtest_gate_cache):",
         f"- SQLite hits: {_ATLAS_BT_CACHE_STATS.get('sqlite_hit', 0)}",
