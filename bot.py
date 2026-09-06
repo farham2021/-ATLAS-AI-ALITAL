@@ -171,6 +171,7 @@ EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
 EVENT_LOOKBACK_LIMITS = {"15m": 120, "30m": 80, "1h": 120, "4h": 120, "1d": 120, "1w": 80, "1M": 60}
 EVENT_DEDUP_ENABLED = os.environ.get("ATLAS_CANDLE_EVENT_DEDUP", "1").strip() != "0"
 TEHRAN = ZoneInfo("Asia/Tehran")
+TEHRAN_TZ = TEHRAN  # Compatibility alias for Phase 3.8/3.9 Market Guard
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
