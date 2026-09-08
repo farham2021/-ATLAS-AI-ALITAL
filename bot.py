@@ -8573,6 +8573,80 @@ def build_price_snapshot(results, updated_at=None, previous_prices=None):
     return "\n".join(lines)
 
 
+
+def build_daily16_market_snapshot(scoped_results, updated_at=None, previous_prices=None):
+    """Phase 3.11.1 Daily16 market-status table.
+
+    Delivery-only surface for the exact configured universe: Top10 + Personal
+    crypto (including ZEC) plus GOLD/SILVER/COPPER in a separate section.
+    Arrow semantics are intentionally reused from the protected snapshot
+    architecture: 4H history first, then existing snapshot fallback logic.
+    Session information is contextual only and never multiplies Confidence.
+    """
+    by_coin = {str(r.get("coin") or r.get("symbol") or "").upper(): r for r in (scoped_results or [])}
+    dt = updated_at or now_tehran()
+    if previous_prices is None:
+        previous_prices = _snapshot_previous_prices()
+    four_hours_ago = dt.astimezone(timezone.utc) - timedelta(hours=4)
+    weekdays = ("دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه")
+    lines = [
+        f"📅 {weekdays[dt.weekday()]} | {shamsi(dt)}",
+        "",
+        f"⏰ آخرین بروزرسانی : {dt.strftime('%H:%M:%S')}",
+        "",
+        "📊 وضعیت بازار ارزهای دیجیتال:",
+        "───────────────────",
+    ]
+    arrow_stats = {"⬆️": 0, "⬇️": 0, "➡️": 0}
+
+    def _row(sym):
+        r = by_coin.get(sym)
+        if not r:
+            return f"🔹 ➖{sym:<6}:   N/A"
+        price = f(r.get("price"))
+        if price is None:
+            return f"🔹 ➖{sym:<6}:   N/A"
+        change24 = f(r.get("change"))
+        price_4h_ago = _lookup_history_price(sym, four_hours_ago)
+        if price_4h_ago is not None:
+            arrow = _snapshot_direction(price, price_4h_ago)
+        else:
+            arrow = _get_snapshot_arrow(price, previous_prices.get(sym), change24)
+        arrow_stats[arrow] = arrow_stats.get(arrow, 0) + 1
+        change_text = f"  ({change24:+.2f}%)" if change24 is not None else ""
+        return f"🔹 {arrow}{sym:<6}:   {_snapshot_price_text(price)}{change_text}"
+
+    for sym in ATLAS_SCOPED_CRYPTO:
+        lines.append(_row(sym))
+
+    lines += ["───────────────────", "🪙 وضعیت فلزات:", "───────────────────"]
+    metal_icons = {"GOLD": "🥇", "SILVER": "🥈", "COPPER": "🟠"}
+    for sym in ATLAS_METALS:
+        row = _row(sym)
+        # Keep the protected arrow token while making the asset class obvious.
+        lines.append(f"{metal_icons.get(sym, '🔹')} {row[2:] if row.startswith('🔹 ') else row}")
+
+    lines.append("───────────────────")
+    usdt = fetch_usdt_toman_public()
+    if usdt is None:
+        lines.append("💵 🟡نرخ تتر  :   در دسترس نیست")
+    else:
+        lines.append(f"💵 🟢نرخ تتر  :   {usdt:,.0f} تومان")
+    lines.append("📊 Snapshot رسمی گزارش روزانه ATLAS — ساعت 16:00 تهران")
+    session, session_label, _session_multiplier = get_current_session()
+    liquidity = {
+        "OVERLAP": "بالا",
+        "EUROPE": "مناسب",
+        "AMERICA": "مناسب",
+        "ASIA": "متوسط",
+        "CLOSED": "پایین",
+    }.get(str(session).upper(), "متغیر")
+    lines.append(f"🕐 سشن فعلی: {session_label}")
+    lines.append(f"📈 وضعیت نقدشوندگی سشن: {liquidity}")
+    lines.append("ℹ️ Session Context فقط اطلاعاتی است و Confidence اصلی ATLAS را تغییر نمی‌دهد.")
+    print(f"📊 Daily16 arrow stats: ⬆️={arrow_stats.get('⬆️',0)}, ⬇️={arrow_stats.get('⬇️',0)}, ➡️={arrow_stats.get('➡️',0)}")
+    return "\n".join(lines)
+
 def send_price_snapshot(results):
     """Send snapshot separately; persist comparison state only after successful delivery."""
     captured_at = now_tehran().isoformat()
@@ -13209,6 +13283,15 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     scoped_results = _atlas_exact_scope_results(scoped_results, include_metals=True)
     sent_total = 0
     errors = []
+
+    # 0) Restore the legacy-style market status table at the START of Daily16.
+    # Exact scope only; no Broad Radar/outsiders. Arrow logic is protected/reused.
+    try:
+        snapshot_text = build_daily16_market_snapshot(scoped_results)
+        snapshot_parts, s, e = send_report(snapshot_text)
+        sent_total += s; errors.extend(e)
+    except Exception as ex:
+        errors.append(f"DAILY16_MARKET_SNAPSHOT: {ex}")
 
     # 1) The same two comprehensive 4H CSVs the user explicitly requested.
     s, e = send_analysis_documents(results, top10, [])
