@@ -10,7 +10,7 @@
 # - Operational failure alerts remain enabled in bot.py.
 # ============================================================
 
-name: ATLAS AI Phase 3.11.1 Daily16 Market Snapshot
+name: ATLAS AI Phase 3.11.2 Daily16 Trade Plans
 
 on:
   schedule:
@@ -191,7 +191,7 @@ jobs:
           ATLAS_TRADINGVIEW_INTERVAL: "240"
           TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
-          # Snapshot logic remains available internally
+          # Snapshot logic remains available internally; Telegram snapshot is not scheduled
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
           # Risk management — preserved
@@ -213,7 +213,7 @@ jobs:
           ATLAS_BACKTEST_IMPROVEMENT: "10"
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-          # Alert calculations
+          # Alert calculations remain enabled; Phase 3.7 stores them silently
           ATLAS_CANDLE_EVENT_DEDUP: "1"
           ATLAS_FREE_ALERTS_ENABLED: "1"
           ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
@@ -228,28 +228,28 @@ jobs:
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
 
-          # Telegram
+          # Telegram — Daily16 + Nightly23 + rare guarded alerts + operational failures
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # Supabase
+          # Supabase — anon only, no service-role key
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # Market / data APIs
+          # Market / data APIs — preserved
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # News / sentiment
+          # News / sentiment — preserved
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-          # Macro / other APIs
+          # Macro / other APIs — preserved
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-          # Daily16 media
+          # Existing capabilities remain configured, but Phase 3.7 does not send them
           ATLAS_ENABLE_VOICE: "1"
           ATLAS_VOICE_TYPE: "female"
           ATLAS_VOICE_LANGUAGE: "fa"
