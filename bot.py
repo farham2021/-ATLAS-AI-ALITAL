@@ -164,7 +164,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 PHASE 3.10.1 EXACT-SCOPE + FULL DAILY16 + NIGHTLY23"
+VERSION = "ATLAS v11.5 PHASE 3.11.2 DAILY16 TRADE PLANS"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -10584,6 +10584,96 @@ def generate_opportunity_ranking_csv(results):
           "Conviction","EvidenceAgreement","RR","Regime","Derivatives","DataQuality","Executable"]
     return _aio_csv(rows,cols)
 
+
+def build_atlas_trade_plans_txt(results):
+    """Presentation-only Daily16 trade plans from canonical ATLAS geometry.
+
+    This function NEVER recalculates or mutates Entry/SL/TP/RR/confidence.
+    Executable LONG/SHORT setups expose the existing canonical levels. WAIT
+    setups expose only their existing confirmation trigger and key levels.
+    """
+    rows = _atlas_exact_scope_results(results, include_metals=True)
+    lines = [
+        "ATLAS AI — TRADE PLANS 4H",
+        "=" * 64,
+        "Scope: Top10 + Personal Portfolio + GOLD/SILVER/COPPER only",
+        "Canonical Entry / SL / TP / RR — presentation only; no formula changes",
+        "",
+    ]
+    active = []
+    waiting = []
+    for r in rows:
+        sym = _aio_symbol(r)
+        direction = str(r.get("direction") or "NEUTRAL").upper()
+        decision = str(r.get("intel_decision") or r.get("decision_state") or r.get("action") or "WAIT").upper()
+        executable = bool(r.get("executable"))
+        entry, sl = r.get("entry"), r.get("sl")
+        tp1, tp2, tp3, tp4 = r.get("tp1"), r.get("tp2"), r.get("tp3"), r.get("tp4")
+        rr = r.get("rr")
+        confidence = r.get("confidence", r.get("conviction_score", r.get("signal_score")))
+        support, resistance = r.get("support"), r.get("resistance")
+
+        if executable and direction in ("LONG", "SHORT") and entry is not None and sl is not None and tp1 is not None:
+            block = [
+                f"[{sym}] {decision} | {direction}",
+                f"Current: {fmt(r.get('price'))}",
+                f"Entry: {fmt(entry)}",
+                f"Stop Loss: {fmt(sl)}",
+                f"TP1: {fmt(tp1)} | TP2: {fmt(tp2)} | TP3: {fmt(tp3)} | TP4: {fmt(tp4)}",
+                f"R/R: {rr if rr is not None else 'N/A'} | Confidence: {confidence if confidence is not None else 'N/A'}",
+                f"Support: {fmt(support)} | Resistance: {fmt(resistance)}",
+                f"Invalidation: {'below SL / loss of LONG structure' if direction == 'LONG' else 'above SL / loss of SHORT structure'}",
+                "",
+            ]
+            active.append(block)
+        else:
+            trigger = _aio_trigger(r)
+            block = [
+                f"[{sym}] WAIT / NO EXECUTABLE SETUP",
+                f"Current: {fmt(r.get('price'))}",
+                f"Trigger required: {trigger}",
+                f"Support: {fmt(support)} | Resistance: {fmt(resistance)}",
+                f"Signal: {_aio_num(r.get('signal_score')):.0f}/100 | Opportunity: {_aio_num(r.get('opportunity_score')):.0f}/100",
+                "",
+            ]
+            waiting.append(block)
+
+    lines.append("ACTIVE / EXECUTABLE SETUPS")
+    lines.append("-" * 64)
+    if active:
+        for b in active:
+            lines.extend(b)
+    else:
+        lines.extend(["No executable setup in the exact ATLAS scope.", ""])
+
+    lines.append("WAIT / TRIGGER WATCH")
+    lines.append("-" * 64)
+    for b in waiting:
+        lines.extend(b)
+    return "\n".join(lines)
+
+
+def send_atlas_trade_plans(results):
+    """Send one Daily16 trade-plan document to configured Telegram destinations."""
+    dt = now_tehran()
+    tag = shamsi(dt).replace("/", "") + "_" + dt.strftime("%H%M%S")
+    content = build_atlas_trade_plans_txt(results)
+    filename = f"06_ATLAS_TRADE_PLANS_{tag}.txt"
+    destinations = []
+    for c in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        if c and c not in destinations:
+            destinations.append(c)
+    sent = 0
+    errors = []
+    for c in destinations:
+        try:
+            _telegram_send_document(c, content, filename, "🎯 ATLAS | Trade Plans")
+            sent += 1
+        except Exception as ex:
+            errors.append(f"TRADE_PLANS[{c}]: {ex}")
+            append_changelog("TRADE_PLANS", None, None, str(ex))
+    return sent, errors
+
 def send_all_in_one_documents(results, top10, macro, news, btc_regime):
     dt=now_tehran(); tag=shamsi(dt).replace("/","")+"_"+dt.strftime("%H%M%S")
     docs=[
@@ -13300,6 +13390,14 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     # 2) Market Context + Deep Analysis + Best Watch + Opportunity Ranking.
     s, e = send_all_in_one_documents(results, top10, macro, news, btc_regime)
     sent_total += s; errors.extend(e)
+
+    # 2.5) Operational Trade Plans: expose canonical Entry/SL/TP/RR for
+    # executable setups; WAIT rows show trigger/key levels only. No math changes.
+    try:
+        s, e = send_atlas_trade_plans(scoped_results)
+        sent_total += s; errors.extend(e)
+    except Exception as ex:
+        errors.append(f"TRADE_PLANS_DAILY16: {ex}")
 
     # 3) Current Decision Board + Opportunity Board, scoped CORE-only.
     global _LAST_RADAR_CANDIDATES
