@@ -112,6 +112,7 @@
 # ============================================================
 
 import os
+import sys
 import re
 import json
 import math
@@ -13463,7 +13464,270 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     return sent_total, errors, parts
 
 
+
+# ============================================================
+# SUMMER_BOOK_SCAN_V1 — strict book scan (drop-in; analysis only)
+# Usage:
+#   python bot.py --book-scan
+#   python bot.py --book-scan --json
+#   ATLAS_BOOK_SCAN=1 python bot.py
+# Optional YAML: ATLAS_BOOK_CONFIG=/path/to/summer_book.yaml
+# ============================================================
+
+ATLAS_BOOK_SCAN_AUTO = os.environ.get("ATLAS_BOOK_SCAN_AUTO", "0").strip().lower() in ("1", "true", "yes", "on")
+ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT = os.environ.get("ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT", "1").strip().lower() in ("1", "true", "yes", "on")
+
+SUMMER_BOOK_DEFAULT = {
+    "symbols": ["BTC", "ETH", "SOL", "XRP", "BNB"],
+    "acceptance_closes": 2,
+    "strict": True,
+    "book": {
+        "BTC": {"status": "sold_wait_reentry", "exit_watch": 77600, "reentry_reclaim": [78000, 78500]},
+        "ETH": {"status": "hold", "exit_watch": 2394, "reentry_reclaim": [2470, 2500]},
+        "SOL": {"status": "sold_wait_reentry", "exit_watch": 103.4, "reentry_reclaim": [102.5, 103.0]},
+        "XRP": {"status": "hold", "exit_watch": 1.35, "reentry_reclaim": [1.38, 1.40]},
+        "BNB": {
+            "status": "sold_wait_reentry",
+            "exit_watch": 730,
+            "exit_watch_high": 734,
+            "reentry_reclaim": [730, 745],
+        },
+    },
+}
+
+
+def _summer_load_book_config():
+    cfg = json.loads(json.dumps(SUMMER_BOOK_DEFAULT))  # deep copy via json
+    path = os.environ.get("ATLAS_BOOK_CONFIG", "").strip()
+    if not path:
+        return cfg
+    try:
+        import yaml  # optional
+        with open(path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh) or {}
+        if isinstance(loaded, dict):
+            if "book" in loaded and isinstance(loaded["book"], dict):
+                cfg["book"].update(loaded["book"])
+            for k in ("symbols", "acceptance_closes", "strict"):
+                if k in loaded:
+                    cfg[k] = loaded[k]
+    except Exception as e:
+        print(f"⚠️ ATLAS_BOOK_CONFIG ignored: {e}")
+    return cfg
+
+
+def _summer_closes(rows):
+    return [f(x[4]) for x in (rows or []) if f(x[4]) is not None]
+
+
+def _summer_sma(values, n):
+    if len(values) < n:
+        return None
+    return sum(values[-n:]) / n
+
+
+def _summer_trend_bias(rows):
+    c = _summer_closes(rows)
+    s20, s50 = _summer_sma(c, 20), _summer_sma(c, 50)
+    if s20 is None or s50 is None or not c:
+        return "unknown"
+    px = c[-1]
+    if px > s20 > s50:
+        return "bullish"
+    if px < s20 < s50:
+        return "bearish"
+    return "mixed"
+
+
+def _summer_acceptance_below(rows, level, n=2):
+    if level is None or len(rows or []) < n:
+        return False
+    return all(f(r[4]) is not None and f(r[4]) < float(level) for r in rows[-n:])
+
+
+def _summer_acceptance_above(rows, level, n=2):
+    if level is None or len(rows or []) < n:
+        return False
+    return all(f(r[4]) is not None and f(r[4]) > float(level) for r in rows[-n:])
+
+
+def _summer_evaluate_symbol(symbol, book, rows_4h, rows_1d, acceptance_closes=2, strict=True):
+    c4 = _summer_closes(rows_4h)
+    cd = _summer_closes(rows_1d)
+    price = c4[-1] if c4 else (cd[-1] if cd else None)
+    bias = {"4h": _summer_trend_bias(rows_4h), "1d": _summer_trend_bias(rows_1d)}
+    status = str((book or {}).get("status") or "watch")
+    exit_lo = (book or {}).get("exit_watch")
+    exit_hi = (book or {}).get("exit_watch_high", exit_lo)
+    reclaim = (book or {}).get("reentry_reclaim") or []
+    reclaim_lo = reclaim[0] if len(reclaim) >= 1 else None
+    reclaim_hi = reclaim[1] if len(reclaim) >= 2 else reclaim_lo
+
+    if status == "hold" and exit_lo is not None and price is not None:
+        level = float(exit_lo)
+        broke = _summer_acceptance_below(rows_4h, level, acceptance_closes) and _summer_acceptance_below(
+            rows_1d, float(exit_hi or exit_lo), max(1, acceptance_closes - 1)
+        )
+        if broke and (not strict or bias["1d"] in ("bearish", "mixed")):
+            return {
+                "symbol": symbol,
+                "kind": "exit_break",
+                "quality": "excellent",
+                "price": price,
+                "level": level,
+                "reason": f"accepted closes below exit watch {level}; 4h+1d confirm",
+                "tf_bias": bias,
+            }
+
+    if status == "sold_wait_reentry" and reclaim_lo is not None and price is not None:
+        lo = float(reclaim_lo)
+        hi = float(reclaim_hi or reclaim_lo)
+        mid = (lo + hi) / 2
+        reclaimed = _summer_acceptance_above(rows_4h, mid, acceptance_closes) and _summer_acceptance_above(
+            rows_1d, lo, max(1, acceptance_closes - 1)
+        )
+        if reclaimed and (not strict or bias["1d"] in ("bullish", "mixed")):
+            return {
+                "symbol": symbol,
+                "kind": "entry_reclaim",
+                "quality": "excellent",
+                "price": price,
+                "level": mid,
+                "reason": f"accepted reclaim of {lo}-{hi}; 4h+1d confirm",
+                "tf_bias": bias,
+            }
+
+    note = "no clean excellent setup"
+    if status == "sold_wait_reentry" and reclaim_lo and price is not None:
+        note = f"waiting reclaim {reclaim_lo}-{reclaim_hi or reclaim_lo}; spot={price:.4g}"
+    elif status == "hold" and exit_lo and price is not None:
+        note = f"hold; exit watch {exit_lo}; spot={price:.4g}"
+
+    return {
+        "symbol": symbol,
+        "kind": "none",
+        "quality": "none",
+        "price": price,
+        "level": None,
+        "reason": note,
+        "tf_bias": bias,
+    }
+
+
+def _summer_book_scan_payload():
+    """Return strict Summer Book Scan payload without changing the main ATLAS decision engine."""
+    cfg = _summer_load_book_config()
+    ensure_exchanges()
+    symbols = [str(s).upper() for s in cfg.get("symbols") or []]
+    book = cfg.get("book") or {}
+    acceptance = int(cfg.get("acceptance_closes") or 2)
+    strict = bool(cfg.get("strict", True))
+    signals = []
+    errors = []
+    for sym in symbols:
+        try:
+            rows_4h, _eng4 = best_ohlcv(sym, "4h", 200)
+            rows_1d, _engd = best_ohlcv(sym, "1d", 200)
+            signals.append(
+                _summer_evaluate_symbol(
+                    sym, book.get(sym) or {}, rows_4h, rows_1d, acceptance_closes=acceptance, strict=strict
+                )
+            )
+        except Exception as e:
+            errors.append(f"{sym}: {e}")
+            signals.append(
+                {
+                    "symbol": sym,
+                    "kind": "none",
+                    "quality": "none",
+                    "price": None,
+                    "level": None,
+                    "reason": f"data error: {e}",
+                    "tf_bias": {},
+                }
+            )
+
+    excellent = [s for s in signals if s.get("quality") == "excellent"]
+    return {
+        "meta": {
+            "ts_tehran": now_tehran().isoformat(),
+            "version": VERSION,
+            "mode": "SUMMER_BOOK_SCAN_V1",
+            "errors": errors,
+        },
+        "signals": excellent,
+        "pulse": [s for s in signals if s.get("quality") != "excellent"],
+        "has_excellent": bool(excellent),
+    }
+
+
+def _summer_book_scan_text(payload, include_pulse=True):
+    signals = list(payload.get("signals") or [])
+    pulse = list(payload.get("pulse") or [])
+    lines = ["📚 ATLAS | Summer Book Scan", "سخت‌گیر 4H + 1D"]
+    if not signals:
+        lines.append("هیچ ستاپ تمیز و قوی نیست.")
+    else:
+        for s in signals:
+            kind = "ورود دوباره" if s.get("kind") == "entry_reclaim" else "خروج"
+            lines.append(
+                f"• {s['symbol']}: {kind} excellent @ {s.get('price')} (سطح {s.get('level')}) — {s.get('reason')}"
+            )
+    if include_pulse and pulse:
+        lines.append("")
+        lines.append("پالس:")
+        for s in pulse:
+            px = s.get("price")
+            px_s = f"{px:.4g}" if isinstance(px, (int, float)) else "?"
+            bias = s.get("tf_bias") or {}
+            lines.append(
+                f"• {s.get('symbol')}: {s.get('reason')} | bias 4h={bias.get('4h')} 1d={bias.get('1d')} | {px_s}"
+            )
+    return "\n".join(lines)
+
+
+def run_summer_book_scan(as_json=False):
+    """Strict book scan using ATLAS OHLCV helpers. Analysis only — no orders."""
+    payload = _summer_book_scan_payload()
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(_summer_book_scan_text(payload, include_pulse=True))
+    return 0
+
+
+def run_summer_book_scan_auto():
+    """Automatic Deep4H book scan. Sends Telegram only for excellent setups by default."""
+    payload = _summer_book_scan_payload()
+    excellent = list(payload.get("signals") or [])
+    if ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT and not excellent:
+        print("📚 Auto Book Scan: no excellent setup; Telegram suppressed.")
+        return {"sent": 0, "has_excellent": False, "errors": payload.get("meta", {}).get("errors", [])}
+
+    msg = _summer_book_scan_text(payload, include_pulse=not ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT)
+    destinations = list(dict.fromkeys(str(x) for x in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID) if x))
+    sent = 0
+    errors = []
+    for dest in destinations:
+        try:
+            if telegram_send_one(dest, msg):
+                sent += 1
+            else:
+                errors.append(f"{dest}: send returned false")
+        except Exception as e:
+            errors.append(f"{dest}: {e}")
+    print(f"📚 Auto Book Scan: excellent={len(excellent)}, sent={sent}, errors={len(errors)}")
+    return {"sent": sent, "has_excellent": bool(excellent), "errors": errors}
+
+
 def main():
+    # Summer strict book scan (does not run full ATLAS pipeline)
+    if (
+        "--book-scan" in sys.argv
+        or os.environ.get("ATLAS_BOOK_SCAN", "").strip() in ("1", "true", "TRUE", "yes", "YES")
+    ):
+        return run_summer_book_scan(as_json=("--json" in sys.argv))
+
     _atlas_perf_reset()
     _atlas_cache_reset()
     try:
@@ -13594,6 +13858,17 @@ def main():
                 raise RuntimeError("Nightly23 Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
         else:
             print("🔕 Storage-only cycle complete; no Telegram message by design.")
+
+        # Automatic Summer Book Scan: run on every Deep4H cycle, including DAILY16.
+        # It is additive only and does not replace/short-circuit the core ATLAS pipeline.
+        # Telegram is sent only when an excellent strict 4H+1D setup exists (default).
+        if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
+            try:
+                with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
+                    run_summer_book_scan_auto()
+            except Exception as e:
+                append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
+                print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
 
         print(f"\n{'='*50}")
         print("📊 PHASE 3.11 SUMMARY")
