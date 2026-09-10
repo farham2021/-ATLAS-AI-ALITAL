@@ -1,25 +1,64 @@
 # ============================================================
-# ATLAS AI v11.5 / Phase 3.10.2 — Storage-First + Market Guard + Daily16 + Nightly23 Tehran
+# ATLAS AI v11.5 / Phase 3.11.2
+# Storage-First + Market Guard + Daily16 FULL + Nightly23
 # Repository path: .github/workflows/atlas.yml
 #
-# Scheduled policy:
-# - Every hour at :30 UTC  -> ANALYSIS for Top10 + Personal + Metals, persist to Supabase.
-# - Every 4 UTC hours      -> also persist Deep-4H snapshot.
-# - 12:30 UTC every day    -> 16:00 Tehran: FULL legacy-quality report suite + new intelligence.
-# - Hourly/Deep4H are storage-only; Daily16 re-enables the FULL report suite.
-# - Operational failure alerts remain enabled in bot.py.
+# Schedule policy — Tehran 2026 = UTC+03:30
+#
+# - Ordinary hourly cycles:
+#     Storage-only
+#
+# - 00:30 / 04:30 / 08:30 / 16:30 / 20:30 UTC:
+#     Deep4H + hourly persistence
+#
+# - 12:30 UTC:
+#     16:00 Tehran
+#     Deep4H + FULL Daily16 Telegram report
+#
+# - 19:30 UTC:
+#     23:00 Tehran
+#     Nightly Brief
+#
+# IMPORTANT:
+# Cycle detection uses github.event.schedule, NOT runner start time.
+# GitHub queue delay therefore cannot convert DAILY16/NIGHTLY23
+# into an ordinary hourly cycle.
 # ============================================================
 
-name: ATLAS AI Phase 3.11.2 Daily16 Trade Plans
+name: ATLAS AI Phase 3.11.2 Reliable Scheduler
 
 on:
   schedule:
-    - cron: "30 * * * *"
+
+    # --------------------------------------------------------
+    # Ordinary hourly storage-only cycles
+    # Excludes Deep4H hours, Daily16 (12 UTC), Nightly23 (19 UTC)
+    # --------------------------------------------------------
+    - cron: "30 1-3,5-7,9-11,13-15,17-18,21-23 * * *"
+
+    # --------------------------------------------------------
+    # Deep4H storage cycles
+    # 00:30 / 04:30 / 08:30 / 16:30 / 20:30 UTC
+    # 12:30 UTC is handled separately by DAILY16
+    # --------------------------------------------------------
+    - cron: "30 0,4,8,16,20 * * *"
+
+    # --------------------------------------------------------
+    # 16:00 Tehran = 12:30 UTC
+    # FULL Daily16 + Deep4H
+    # --------------------------------------------------------
+    - cron: "30 12 * * *"
+
+    # --------------------------------------------------------
+    # 23:00 Tehran = 19:30 UTC
+    # Short Nightly Brief only
+    # --------------------------------------------------------
+    - cron: "30 19 * * *"
 
   workflow_dispatch:
     inputs:
       cycle_mode:
-        description: "Manual Phase 3.10.2 cycle"
+        description: "Manual ATLAS cycle"
         required: true
         default: "HOURLY"
         type: choice
@@ -43,223 +82,383 @@ jobs:
     timeout-minutes: 35
 
     steps:
+
+      # ======================================================
+      # Checkout
+      # ======================================================
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # ======================================================
+      # Python
+      # ======================================================
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
 
+      # ======================================================
+      # Dependencies
+      # ======================================================
       - name: Install dependencies
         run: |
           set -euo pipefail
+
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Resolve Phase 3.7 cycle
+      # ======================================================
+      # Resolve cycle
+      #
+      # CRITICAL:
+      # Scheduled cycles are identified from github.event.schedule.
+      # We DO NOT use `date -u` to decide DAILY16/NIGHTLY23.
+      # ======================================================
+      - name: Resolve ATLAS cycle
         shell: bash
         run: |
           set -euo pipefail
 
           echo "ATLAS_RUN_MODE_RESOLVED=ANALYSIS" >> "$GITHUB_ENV"
           echo "ATLAS_DELIVERY_MODE=STORAGE_ONLY" >> "$GITHUB_ENV"
+
+          echo "ATLAS_PHASE37_DEEP_4H=0" >> "$GITHUB_ENV"
+          echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
           echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
 
+          # ==================================================
+          # Manual execution
+          # ==================================================
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+
             MODE="${{ inputs.cycle_mode }}"
+
             if [ "$MODE" = "DAILY16" ]; then
+
               echo "ATLAS_PHASE37_DEEP_4H=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=DAILY16" >> "$GITHUB_ENV"
+
             elif [ "$MODE" = "NIGHTLY23" ]; then
+
               echo "ATLAS_PHASE37_DEEP_4H=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=NIGHTLY23" >> "$GITHUB_ENV"
+
             elif [ "$MODE" = "DEEP4H" ]; then
+
               echo "ATLAS_PHASE37_DEEP_4H=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=DEEP4H" >> "$GITHUB_ENV"
+
             else
+
               echo "ATLAS_PHASE37_DEEP_4H=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=HOURLY" >> "$GITHUB_ENV"
+
             fi
+
+          # ==================================================
+          # Scheduled execution
+          # ==================================================
           else
-            HOUR=$(date -u +%H)
-            HOUR_NUM=$((10#$HOUR))
 
-            if (( HOUR_NUM % 4 == 0 )); then
+            SCHEDULE="${{ github.event.schedule }}"
+
+            echo "Triggered schedule: $SCHEDULE"
+
+            # ----------------------------------------------
+            # Daily16
+            # 12:30 UTC = 16:00 Tehran
+            # ----------------------------------------------
+            if [ "$SCHEDULE" = "30 12 * * *" ]; then
+
               echo "ATLAS_PHASE37_DEEP_4H=1" >> "$GITHUB_ENV"
-            else
-              echo "ATLAS_PHASE37_DEEP_4H=0" >> "$GITHUB_ENV"
-            fi
-
-            # Iran is UTC+03:30 in 2026; 12:30 UTC = 16:00 Tehran.
-            if (( HOUR_NUM == 12 )); then
               echo "ATLAS_PHASE37_DAILY_REPORT=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=DAILY16" >> "$GITHUB_ENV"
-            elif (( HOUR_NUM == 19 )); then
+
+            # ----------------------------------------------
+            # Nightly23
+            # 19:30 UTC = 23:00 Tehran
+            # ----------------------------------------------
+            elif [ "$SCHEDULE" = "30 19 * * *" ]; then
+
+              echo "ATLAS_PHASE37_DEEP_4H=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=NIGHTLY23" >> "$GITHUB_ENV"
-            elif (( HOUR_NUM % 4 == 0 )); then
+
+            # ----------------------------------------------
+            # Deep4H
+            # ----------------------------------------------
+            elif [ "$SCHEDULE" = "30 0,4,8,16,20 * * *" ]; then
+
+              echo "ATLAS_PHASE37_DEEP_4H=1" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=DEEP4H" >> "$GITHUB_ENV"
+
+            # ----------------------------------------------
+            # Ordinary Hourly
+            # ----------------------------------------------
             else
+
+              echo "ATLAS_PHASE37_DEEP_4H=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_DAILY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE39_NIGHTLY_REPORT=0" >> "$GITHUB_ENV"
               echo "ATLAS_PHASE37_CYCLE=HOURLY" >> "$GITHUB_ENV"
+
             fi
+
           fi
 
+      # ======================================================
+      # Configuration diagnostic
+      # ======================================================
       - name: Show ATLAS configuration
         run: |
           set -euo pipefail
+
           echo "=================================================="
-          echo "🚀 ATLAS AI Phase 3.8"
+          echo "🚀 ATLAS AI Phase 3.11.2"
           echo "Cycle: ${ATLAS_PHASE37_CYCLE}"
           echo "Run mode: ${ATLAS_RUN_MODE_RESOLVED}"
           echo "Deep4H: ${ATLAS_PHASE37_DEEP_4H}"
-          echo "Daily16 report: ${ATLAS_PHASE37_DAILY_REPORT}"
+          echo "Daily16 FULL report: ${ATLAS_PHASE37_DAILY_REPORT}"
           echo "Nightly23 brief: ${ATLAS_PHASE39_NIGHTLY_REPORT}"
           echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
           echo "=================================================="
 
+      # ======================================================
+      # Run ATLAS
+      # ======================================================
       - name: Run ATLAS
         env:
+
+          # --------------------------------------------------
+          # Core
+          # --------------------------------------------------
           PYTHONUNBUFFERED: "1"
+
           ATLAS_VERSION: "11.5"
           ATLAS_ENGINE: "BOTH"
           ATLAS_SCHEDULED_CADENCE: "workflow"
+
           ATLAS_RUN_MODE: ${{ env.ATLAS_RUN_MODE_RESOLVED }}
           ATLAS_DELIVERY_MODE: ${{ env.ATLAS_DELIVERY_MODE }}
+
           ATLAS_PHASE37_DEEP_4H: ${{ env.ATLAS_PHASE37_DEEP_4H }}
           ATLAS_PHASE37_DAILY_REPORT: ${{ env.ATLAS_PHASE37_DAILY_REPORT }}
           ATLAS_PHASE39_NIGHTLY_REPORT: ${{ env.ATLAS_PHASE39_NIGHTLY_REPORT }}
+
+          ATLAS_TIMEFRAME: "4H"
+          ATLAS_PHASE37_HISTORY_HOURS: "24"
+
+          # --------------------------------------------------
+          # Daily / Nightly intelligence
+          # --------------------------------------------------
           ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
           ATLAS_DAILY_DELTA_ENABLED: "1"
           ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
           ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+
+          # --------------------------------------------------
+          # Reversal
+          # --------------------------------------------------
           ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
           ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
           ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
           ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
-          ATLAS_PHASE37_HISTORY_HOURS: "24"
-          ATLAS_TIMEFRAME: "4H"
 
-          # Exact analysis universe is hard-enforced in bot.py:
-          # Top10 + Personal crypto only, plus GOLD/SILVER/COPPER.
+          # --------------------------------------------------
+          # Exact universe
+          #
+          # Hard-enforced in bot.py:
+          # Top10 + Personal including ZEC
+          # + GOLD / SILVER / COPPER
+          # Broad outsider radar disabled
+          # --------------------------------------------------
 
-          # Rare severe-market guard — notification only, no recommendation
+          # --------------------------------------------------
+          # Rare Severe Move
+          # --------------------------------------------------
           ATLAS_RARE_ALERT_ENABLED: "1"
+
           ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
+
           ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+
           ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
           ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
           ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
 
-          # Phase 3.8 rare complementary guards — notification layer only
+          # --------------------------------------------------
+          # Structural Shock
+          # --------------------------------------------------
           ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
+
           ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
           ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+
+          # --------------------------------------------------
+          # Pullback / Reversal Guard
+          # --------------------------------------------------
           ATLAS_PULLBACK_ALERT_ENABLED: "1"
           ATLAS_PULLBACK_RETRACE_PCT: "30"
+
+          # --------------------------------------------------
+          # Key Level Guard
+          # --------------------------------------------------
           ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
+
           ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
           ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
+          # --------------------------------------------------
+          # Weekly intelligence
+          # Friday 16:00 Tehran
+          # --------------------------------------------------
           ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
           ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
           ATLAS_WEEKLY_HISTORY_HOURS: "168"
 
-          # Performance / concurrency — preserved
+          # --------------------------------------------------
+          # Performance / concurrency
+          # --------------------------------------------------
           ATLAS_ANALYSIS_WORKERS: "3"
           ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
           ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
+
           ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
           ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
 
-          # TradingView / market configuration — preserved
+          # --------------------------------------------------
+          # TradingView
+          # --------------------------------------------------
           ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
           ATLAS_TRADINGVIEW_INTERVAL: "240"
+
           TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
 
-          # Snapshot logic remains available internally; Telegram snapshot is not scheduled
+          # --------------------------------------------------
+          # Snapshot arrow architecture
+          # --------------------------------------------------
           ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
 
-          # Risk management — preserved
+          # --------------------------------------------------
+          # Risk
+          # --------------------------------------------------
           RISK_PER_TRADE_PCT: "1.5"
           MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
           ATLAS_MAX_LEVERAGE: "10"
 
-          # Signal thresholds — preserved
+          # --------------------------------------------------
+          # Signal thresholds
+          # --------------------------------------------------
           ATLAS_MIN_CONFIDENCE: "55"
           ATLAS_MIN_WATCH_CONFIDENCE: "45"
+
           ATLAS_MIN_EXECUTABLE_RR: "1.5"
           ATLAS_MIN_VOLUME_RATIO: "0.60"
+
           ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
           ATLAS_H4_FALLBACK_MIN_SCORE: "60"
 
-          # Backtest — preserved
+          # --------------------------------------------------
+          # Backtest
+          # --------------------------------------------------
           ATLAS_BACKTEST_DAYS: "180"
           ATLAS_SIGNAL_HORIZON_BARS: "36"
           ATLAS_BACKTEST_IMPROVEMENT: "10"
           ATLAS_BACKTEST_REFRESH_HOURS: "24"
 
-          # Alert calculations remain enabled; Phase 3.7 stores them silently
+          # --------------------------------------------------
+          # Existing alert calculations
+          # --------------------------------------------------
           ATLAS_CANDLE_EVENT_DEDUP: "1"
+
           ATLAS_FREE_ALERTS_ENABLED: "1"
           ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
           ATLAS_FREE_ALERT_SEND_INFO: "0"
+
           ATLAS_FREE_ALERT_SMART_HOURLY: "1"
           ATLAS_FREE_ALERT_HOURLY_MAX: "12"
           ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+
           ATLAS_NOTIFICATION_MIN_SCORE: "68"
           ATLAS_SIGNAL_MENTIONS: ""
 
-          # Local storage
+          # --------------------------------------------------
+          # Storage
+          # --------------------------------------------------
           ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
           ATLAS_CHANGELOG: "changelog.txt"
 
-          # Telegram — Daily16 + Nightly23 + rare guarded alerts + operational failures
+          # --------------------------------------------------
+          # Telegram
+          #
+          # Hourly / Deep4H:
+          # storage-only except exceptional Market Guard alerts
+          #
+          # Daily16:
+          # FULL report suite
+          #
+          # Nightly23:
+          # short brief
+          # --------------------------------------------------
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
 
-          # Supabase — anon only, no service-role key
+          # --------------------------------------------------
+          # Supabase
+          # --------------------------------------------------
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # Market / data APIs — preserved
+          # --------------------------------------------------
+          # Market Data APIs
+          # --------------------------------------------------
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
 
-          # News / sentiment — preserved
+          # --------------------------------------------------
+          # News / Sentiment
+          # --------------------------------------------------
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
 
-          # Macro / other APIs — preserved
+          # --------------------------------------------------
+          # Macro
+          # --------------------------------------------------
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
-          # Existing capabilities remain configured, but Phase 3.7 does not send them
+          # --------------------------------------------------
+          # Daily16 PNG + Voice
+          # --------------------------------------------------
           ATLAS_ENABLE_VOICE: "1"
           ATLAS_VOICE_TYPE: "female"
           ATLAS_VOICE_LANGUAGE: "fa"
           ATLAS_AUTO_SEND_VOICE: "1"
+
           ATLAS_ENABLE_IMAGE_TABLE: "1"
 
         run: |
           set -euo pipefail
+
           python bot.py
 
+      # ======================================================
+      # Failure artifacts
+      # ======================================================
       - name: Upload ATLAS logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -274,15 +473,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # ======================================================
+      # Success summary
+      # ======================================================
       - name: ATLAS completed
         if: success()
         run: |
           echo "=================================================="
-          echo "✅ ATLAS Phase 3.10.2 completed"
+          echo "✅ ATLAS Phase 3.11.2 completed"
           echo "Cycle: ${ATLAS_PHASE37_CYCLE}"
-          echo "Hourly scope: Top10 + Personal + Metals"
+          echo "Hourly scope: Top10 + Personal + ZEC + Metals"
           echo "Deep4H persisted: ${ATLAS_PHASE37_DEEP_4H}"
-          echo "Daily16 Telegram report: ${ATLAS_PHASE37_DAILY_REPORT}"
+          echo "Daily16 FULL Telegram report: ${ATLAS_PHASE37_DAILY_REPORT}"
           echo "Nightly23 Telegram brief: ${ATLAS_PHASE39_NIGHTLY_REPORT}"
           echo "Broad outsider radar: disabled"
+          echo "Scheduler source: github.event.schedule"
           echo "=================================================="
