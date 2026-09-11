@@ -1,5 +1,5 @@
-============================================================
-# ATLAS Execution Layer — Phase 3.11.5 SAFE EXECUTION
+# ============================================================
+# ATLAS Execution Layer — Phase 3.11.7 MULTIUSER SAFE
 # Additive OMS / paper-execution layer.
 #
 # GUARANTEES:
@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
-EXEC_VERSION = "ATLAS v11.5 PHASE 3.11.5 SAFE EXECUTION"
+EXEC_VERSION = "ATLAS v11.5 PHASE 3.11.7 MULTIUSER SAFE"
 
 EXECUTABLE_STATES = {"BUY CONFIRMATION", "SELL CONFIRMATION"}
 DEFAULT_SYMBOLS = ("BTC", "ETH")
@@ -801,7 +801,7 @@ def evaluate_results(results, backtest_ok=False):
 def format_execution_report(payload):
     ctx = payload["context"]
     lines = [
-        "⚙️ ATLAS | Execution Layer 3.11.5",
+        "⚙️ ATLAS | Execution Layer 3.11.7",
         f"Mode: {payload['mode']} | Requested: {payload['requested_mode']} | "
         f"Live locks: {'OPEN' if payload['live_locks'] else 'CLOSED'}",
         f"Persistence: {payload.get('persistence')}",
