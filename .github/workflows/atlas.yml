@@ -1,0 +1,871 @@
+# ============================================================
+# ATLAS AI v11.5 / Phase 3.11.8 (multi-user Atlas Desk: welcome + private capital)
+# Single-file reliable scheduler with four independent jobs.
+#
+# IMPORTANT:
+# - One YAML file only.
+# - Four fixed jobs: HOURLY / DEEP4H / DAILY16 / NIGHTLY23.
+# - No runtime clock-based resolver.
+# - DAILY16 cannot degrade into DEEP4H due to GitHub queue delay.
+# - Auto Book Scan runs on DEEP4H and DAILY16 because
+#   ATLAS_PHASE37_DEEP_4H=1 in those jobs.
+# ============================================================
+
+name: ATLAS AI Phase 3.11.8 Personal Portfolio Desk
+
+on:
+  schedule:
+    # Ordinary hourly storage-only cycles
+    - cron: "30 1-3,5-7,9-11,13-15,17-18,21-23 * * *"
+
+    # Deep4H storage + Auto Book Scan
+    - cron: "30 0,4,8,16,20 * * *"
+
+    # 16:00 Tehran = 12:30 UTC — FULL Daily16 + Deep4H + Auto Book Scan
+    - cron: "30 12 * * *"
+
+    # 23:00 Tehran = 19:30 UTC — Nightly Brief
+    - cron: "30 19 * * *"
+
+  workflow_dispatch:
+    inputs:
+      cycle_mode:
+        description: "Manual ATLAS cycle"
+        required: true
+        default: "HOURLY"
+        type: choice
+        options:
+          - HOURLY
+          - DEEP4H
+          - DAILY16
+          - NIGHTLY23
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-bot
+  cancel-in-progress: false
+
+# ============================================================
+# Threshold lock (must match bot.py defaults):
+#   ATLAS_MIN_CONFIDENCE=55
+#   ATLAS_MIN_WATCH_CONFIDENCE=55
+#   ATLAS_MIN_EXECUTABLE_RR=2.0
+#   ATLAS_H4_FALLBACK_MIN_SCORE=70
+# Book Scan auto only on DEEP4H + DAILY16.
+# Delivery: STORAGE_ONLY on HOURLY/DEEP4H; FULL on DAILY16/NIGHTLY23.
+#
+# Shared environment values are repeated intentionally.
+# GitHub Actions does not support YAML anchors reliably across
+# all hosted runner processing paths, so explicit duplication
+# is safer for production.
+# ============================================================
+
+jobs:
+
+  # ==========================================================
+  # HOURLY
+  # ==========================================================
+  hourly:
+    if: >
+      (github.event_name == 'schedule' &&
+       github.event.schedule == '30 1-3,5-7,9-11,13-15,17-18,21-23 * * *')
+      ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.cycle_mode == 'HOURLY')
+
+    name: Run HOURLY
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show ATLAS configuration
+        run: |
+          echo "=================================================="
+          echo "🚀 ATLAS AI Phase 3.11.8"
+          echo "Cycle: HOURLY"
+          echo "Deep4H: 0"
+          echo "Daily16 report: 0"
+          echo "Nightly23 brief: 0"
+          echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
+          echo "=================================================="
+
+      - name: Run ATLAS
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_VERSION: "ATLAS v11.5 PHASE 3.11.8 PERSONAL PORTFOLIO DESK"
+          ATLAS_ENGINE: "BOTH"
+          ATLAS_SCHEDULED_CADENCE: "workflow"
+          ATLAS_RUN_MODE: "ANALYSIS"
+          ATLAS_DELIVERY_MODE: "STORAGE_ONLY"
+
+          ATLAS_PHASE37_CYCLE: "HOURLY"
+          ATLAS_PHASE37_DEEP_4H: "0"
+          ATLAS_PHASE37_DAILY_REPORT: "0"
+          ATLAS_PHASE39_NIGHTLY_REPORT: "0"
+
+          ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
+          ATLAS_DAILY_DELTA_ENABLED: "1"
+          ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
+          ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+
+          ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
+          ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
+          ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
+          ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
+
+          ATLAS_PHASE37_HISTORY_HOURS: "24"
+          ATLAS_TIMEFRAME: "4H"
+
+
+          ATLAS_EXECUTION_ENABLED: "0"
+          ATLAS_EXECUTION_MODE: "PAPER"
+          ATLAS_LIVE_TRADING: "0"
+          ATLAS_LIVE_CONFIRM: ""
+          ATLAS_EXEC_SYMBOLS: "BTC,ETH"
+          ATLAS_EXEC_EQUITY_USDT: "10000"
+          ATLAS_EXEC_MAX_LEVERAGE: "3"
+          ATLAS_EXEC_MAX_OPEN: "2"
+          ATLAS_DAILY_KILL_R: "3"
+          ATLAS_TRADE_EXCHANGE: "bybit"
+          ATLAS_TRADE_MARKET: "spot"
+          ATLAS_TRADE_SANDBOX: "1"
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_HOURLY_PUSH: "1"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_SEND_ON_DEEP: "1"
+          ATLAS_DESK_USERS_TABLE: "atlas_desk_users"
+          ATLAS_DESK_META_TABLE: "atlas_desk_meta"
+          ATLAS_DESK_DELIVERY_TABLE: "atlas_desk_deliveries"
+          ATLAS_DESK_HOLDINGS_TABLE: "atlas_desk_holdings"
+
+
+          ATLAS_RARE_ALERT_ENABLED: "1"
+          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
+          ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+          ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
+          ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
+          ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
+
+          ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
+          ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
+          ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+
+          ATLAS_PULLBACK_ALERT_ENABLED: "1"
+          ATLAS_PULLBACK_RETRACE_PCT: "30"
+
+          ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
+          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
+          ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
+          ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
+          ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
+          ATLAS_WEEKLY_HISTORY_HOURS: "168"
+
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
+          ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
+          ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
+
+          ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+          ATLAS_TRADINGVIEW_INTERVAL: "240"
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
+          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MAX_LEVERAGE: "10"
+
+          ATLAS_MIN_CONFIDENCE: "55"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_VOLUME_RATIO: "0.60"
+          ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+          ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+          ATLAS_FREE_ALERTS_ENABLED: "1"
+          ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
+          ATLAS_FREE_ALERT_SEND_INFO: "0"
+          ATLAS_FREE_ALERT_SMART_HOURLY: "1"
+          ATLAS_FREE_ALERT_HOURLY_MAX: "12"
+          ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+          ATLAS_NOTIFICATION_MIN_SCORE: "68"
+          ATLAS_SIGNAL_MENTIONS: ""
+
+          ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          ATLAS_ENABLE_VOICE: "1"
+          ATLAS_VOICE_TYPE: "female"
+          ATLAS_VOICE_LANGUAGE: "fa"
+          ATLAS_AUTO_SEND_VOICE: "1"
+          ATLAS_ENABLE_IMAGE_TABLE: "1"
+
+        run: |
+          set -euo pipefail
+          python bot.py
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-hourly-failure-${{ github.run_id }}
+          path: |
+            *.log
+            *.txt
+            atlas_changelog.jsonl
+            changelog.txt
+            atlas_v11.sqlite3
+            atlas_execution.sqlite3
+            atlas_desk.sqlite3
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ==========================================================
+  # DEEP4H
+  # ==========================================================
+  deep4h:
+    if: >
+      (github.event_name == 'schedule' &&
+       github.event.schedule == '30 0,4,8,16,20 * * *')
+      ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.cycle_mode == 'DEEP4H')
+
+    name: Run DEEP4H
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show ATLAS configuration
+        run: |
+          echo "=================================================="
+          echo "🚀 ATLAS AI Phase 3.11.8"
+          echo "Cycle: DEEP4H"
+          echo "Deep4H: 1"
+          echo "Daily16 report: 0"
+          echo "Nightly23 brief: 0"
+          echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
+          echo "=================================================="
+
+      - name: Run ATLAS
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_VERSION: "ATLAS v11.5 PHASE 3.11.8 PERSONAL PORTFOLIO DESK"
+          ATLAS_ENGINE: "BOTH"
+          ATLAS_SCHEDULED_CADENCE: "workflow"
+          ATLAS_RUN_MODE: "ANALYSIS"
+          ATLAS_DELIVERY_MODE: "STORAGE_ONLY"
+
+          ATLAS_PHASE37_CYCLE: "DEEP4H"
+          ATLAS_PHASE37_DEEP_4H: "1"
+          ATLAS_PHASE37_DAILY_REPORT: "0"
+          ATLAS_PHASE39_NIGHTLY_REPORT: "0"
+
+          ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
+          ATLAS_DAILY_DELTA_ENABLED: "1"
+          ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
+          ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+
+          ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
+          ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
+          ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
+          ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
+
+          ATLAS_PHASE37_HISTORY_HOURS: "24"
+          ATLAS_TIMEFRAME: "4H"
+
+          ATLAS_BOOK_SCAN_AUTO: "1"
+          ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT: "1"
+
+          ATLAS_EXECUTION_ENABLED: "1"
+          ATLAS_EXECUTION_MODE: "PAPER"
+          ATLAS_EXEC_REQUIRE_PERSISTENCE: "1"
+          ATLAS_EXEC_REQUIRE_PROTECTIVE: "1"
+          ATLAS_EXEC_ALLOW_SPOT_SELL: "0"
+          ATLAS_EXEC_INTENT_TABLE: "atlas_exec_intents"
+          ATLAS_EXEC_EVENT_TABLE: "atlas_exec_events"
+          ATLAS_LIVE_TRADING: "0"
+          ATLAS_LIVE_CONFIRM: ""
+          ATLAS_EXEC_SYMBOLS: "BTC,ETH"
+          ATLAS_EXEC_EQUITY_USDT: "10000"
+          ATLAS_EXEC_MAX_LEVERAGE: "3"
+          ATLAS_EXEC_MAX_OPEN: "2"
+          ATLAS_DAILY_KILL_R: "3"
+          ATLAS_TRADE_EXCHANGE: "bybit"
+          ATLAS_TRADE_MARKET: "spot"
+          ATLAS_TRADE_SANDBOX: "1"
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_HOURLY_PUSH: "1"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_SEND_ON_DEEP: "1"
+          ATLAS_DESK_USERS_TABLE: "atlas_desk_users"
+          ATLAS_DESK_META_TABLE: "atlas_desk_meta"
+          ATLAS_DESK_DELIVERY_TABLE: "atlas_desk_deliveries"
+          ATLAS_DESK_HOLDINGS_TABLE: "atlas_desk_holdings"
+
+
+          ATLAS_RARE_ALERT_ENABLED: "1"
+          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
+          ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+          ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
+          ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
+          ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
+
+          ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
+          ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
+          ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+
+          ATLAS_PULLBACK_ALERT_ENABLED: "1"
+          ATLAS_PULLBACK_RETRACE_PCT: "30"
+
+          ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
+          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
+          ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
+          ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
+          ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
+          ATLAS_WEEKLY_HISTORY_HOURS: "168"
+
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
+          ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
+          ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
+
+          ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+          ATLAS_TRADINGVIEW_INTERVAL: "240"
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
+          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MAX_LEVERAGE: "10"
+
+          ATLAS_MIN_CONFIDENCE: "55"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_VOLUME_RATIO: "0.60"
+          ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+          ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+          ATLAS_FREE_ALERTS_ENABLED: "1"
+          ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
+          ATLAS_FREE_ALERT_SEND_INFO: "0"
+          ATLAS_FREE_ALERT_SMART_HOURLY: "1"
+          ATLAS_FREE_ALERT_HOURLY_MAX: "12"
+          ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+          ATLAS_NOTIFICATION_MIN_SCORE: "68"
+          ATLAS_SIGNAL_MENTIONS: ""
+
+          ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          ATLAS_ENABLE_VOICE: "1"
+          ATLAS_VOICE_TYPE: "female"
+          ATLAS_VOICE_LANGUAGE: "fa"
+          ATLAS_AUTO_SEND_VOICE: "1"
+          ATLAS_ENABLE_IMAGE_TABLE: "1"
+
+        run: |
+          set -euo pipefail
+          python bot.py
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-deep4h-failure-${{ github.run_id }}
+          path: |
+            *.log
+            *.txt
+            atlas_changelog.jsonl
+            changelog.txt
+            atlas_v11.sqlite3
+            atlas_execution.sqlite3
+            atlas_desk.sqlite3
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ==========================================================
+  # DAILY16
+  # ==========================================================
+  daily16:
+    if: >
+      (github.event_name == 'schedule' &&
+       github.event.schedule == '30 12 * * *')
+      ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.cycle_mode == 'DAILY16')
+
+    name: Run DAILY16 FULL
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show ATLAS configuration
+        run: |
+          echo "=================================================="
+          echo "🚀 ATLAS AI Phase 3.11.8"
+          echo "Cycle: DAILY16"
+          echo "Deep4H: 1"
+          echo "Daily16 report: 1"
+          echo "Nightly23 brief: 0"
+          echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
+          echo "=================================================="
+
+      - name: Run ATLAS
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_VERSION: "ATLAS v11.5 PHASE 3.11.8 PERSONAL PORTFOLIO DESK"
+          ATLAS_ENGINE: "BOTH"
+          ATLAS_SCHEDULED_CADENCE: "workflow"
+          ATLAS_RUN_MODE: "ANALYSIS"
+          ATLAS_DELIVERY_MODE: "FULL"
+
+          ATLAS_PHASE37_CYCLE: "DAILY16"
+          ATLAS_PHASE37_DEEP_4H: "1"
+          ATLAS_PHASE37_DAILY_REPORT: "1"
+          ATLAS_PHASE39_NIGHTLY_REPORT: "0"
+
+          ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
+          ATLAS_DAILY_DELTA_ENABLED: "1"
+          ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
+          ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+
+          ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
+          ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
+          ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
+          ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
+
+          ATLAS_PHASE37_HISTORY_HOURS: "24"
+          ATLAS_TIMEFRAME: "4H"
+
+          ATLAS_BOOK_SCAN_AUTO: "1"
+          ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT: "1"
+
+          ATLAS_EXECUTION_ENABLED: "1"
+          ATLAS_EXECUTION_MODE: "PAPER"
+          ATLAS_EXEC_REQUIRE_PERSISTENCE: "1"
+          ATLAS_EXEC_REQUIRE_PROTECTIVE: "1"
+          ATLAS_EXEC_ALLOW_SPOT_SELL: "0"
+          ATLAS_EXEC_INTENT_TABLE: "atlas_exec_intents"
+          ATLAS_EXEC_EVENT_TABLE: "atlas_exec_events"
+          ATLAS_LIVE_TRADING: "0"
+          ATLAS_LIVE_CONFIRM: ""
+          ATLAS_EXEC_SYMBOLS: "BTC,ETH"
+          ATLAS_EXEC_EQUITY_USDT: "10000"
+          ATLAS_EXEC_MAX_LEVERAGE: "3"
+          ATLAS_EXEC_MAX_OPEN: "2"
+          ATLAS_DAILY_KILL_R: "3"
+          ATLAS_TRADE_EXCHANGE: "bybit"
+          ATLAS_TRADE_MARKET: "spot"
+          ATLAS_TRADE_SANDBOX: "1"
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_HOURLY_PUSH: "1"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_SEND_ON_DEEP: "1"
+          ATLAS_DESK_USERS_TABLE: "atlas_desk_users"
+          ATLAS_DESK_META_TABLE: "atlas_desk_meta"
+          ATLAS_DESK_DELIVERY_TABLE: "atlas_desk_deliveries"
+          ATLAS_DESK_HOLDINGS_TABLE: "atlas_desk_holdings"
+
+
+          ATLAS_RARE_ALERT_ENABLED: "1"
+          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
+          ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+          ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
+          ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
+          ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
+
+          ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
+          ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
+          ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+
+          ATLAS_PULLBACK_ALERT_ENABLED: "1"
+          ATLAS_PULLBACK_RETRACE_PCT: "30"
+
+          ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
+          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
+          ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
+          ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
+          ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
+          ATLAS_WEEKLY_HISTORY_HOURS: "168"
+
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
+          ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
+          ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
+
+          ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+          ATLAS_TRADINGVIEW_INTERVAL: "240"
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
+          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MAX_LEVERAGE: "10"
+
+          ATLAS_MIN_CONFIDENCE: "55"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_VOLUME_RATIO: "0.60"
+          ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+          ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+          ATLAS_FREE_ALERTS_ENABLED: "1"
+          ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
+          ATLAS_FREE_ALERT_SEND_INFO: "0"
+          ATLAS_FREE_ALERT_SMART_HOURLY: "1"
+          ATLAS_FREE_ALERT_HOURLY_MAX: "12"
+          ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+          ATLAS_NOTIFICATION_MIN_SCORE: "68"
+          ATLAS_SIGNAL_MENTIONS: ""
+
+          ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          ATLAS_ENABLE_VOICE: "1"
+          ATLAS_VOICE_TYPE: "female"
+          ATLAS_VOICE_LANGUAGE: "fa"
+          ATLAS_AUTO_SEND_VOICE: "1"
+          ATLAS_ENABLE_IMAGE_TABLE: "1"
+
+        run: |
+          set -euo pipefail
+          python bot.py
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-daily16-failure-${{ github.run_id }}
+          path: |
+            *.log
+            *.txt
+            atlas_changelog.jsonl
+            changelog.txt
+            atlas_v11.sqlite3
+            atlas_execution.sqlite3
+            atlas_desk.sqlite3
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ==========================================================
+  # NIGHTLY23
+  # ==========================================================
+  nightly23:
+    if: >
+      (github.event_name == 'schedule' &&
+       github.event.schedule == '30 19 * * *')
+      ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.cycle_mode == 'NIGHTLY23')
+
+    name: Run NIGHTLY23
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show ATLAS configuration
+        run: |
+          echo "=================================================="
+          echo "🚀 ATLAS AI Phase 3.11.8"
+          echo "Cycle: NIGHTLY23"
+          echo "Deep4H: 0"
+          echo "Daily16 report: 0"
+          echo "Nightly23 brief: 1"
+          echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
+          echo "=================================================="
+
+      - name: Run ATLAS
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_VERSION: "ATLAS v11.5 PHASE 3.11.8 PERSONAL PORTFOLIO DESK"
+          ATLAS_ENGINE: "BOTH"
+          ATLAS_SCHEDULED_CADENCE: "workflow"
+          ATLAS_RUN_MODE: "ANALYSIS"
+          ATLAS_DELIVERY_MODE: "FULL"
+
+          ATLAS_PHASE37_CYCLE: "NIGHTLY23"
+          ATLAS_PHASE37_DEEP_4H: "0"
+          ATLAS_PHASE37_DAILY_REPORT: "0"
+          ATLAS_PHASE39_NIGHTLY_REPORT: "1"
+
+          ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
+          ATLAS_DAILY_DELTA_ENABLED: "1"
+          ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
+          ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+
+          ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
+          ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
+          ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
+          ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
+
+          ATLAS_PHASE37_HISTORY_HOURS: "24"
+          ATLAS_TIMEFRAME: "4H"
+
+
+          ATLAS_EXECUTION_ENABLED: "0"
+          ATLAS_EXECUTION_MODE: "PAPER"
+          ATLAS_LIVE_TRADING: "0"
+          ATLAS_LIVE_CONFIRM: ""
+          ATLAS_EXEC_SYMBOLS: "BTC,ETH"
+          ATLAS_EXEC_EQUITY_USDT: "10000"
+          ATLAS_EXEC_MAX_LEVERAGE: "3"
+          ATLAS_EXEC_MAX_OPEN: "2"
+          ATLAS_DAILY_KILL_R: "3"
+          ATLAS_TRADE_EXCHANGE: "bybit"
+          ATLAS_TRADE_MARKET: "spot"
+          ATLAS_TRADE_SANDBOX: "1"
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_HOURLY_PUSH: "1"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_SEND_ON_DEEP: "1"
+          ATLAS_DESK_USERS_TABLE: "atlas_desk_users"
+          ATLAS_DESK_META_TABLE: "atlas_desk_meta"
+          ATLAS_DESK_DELIVERY_TABLE: "atlas_desk_deliveries"
+          ATLAS_DESK_HOLDINGS_TABLE: "atlas_desk_holdings"
+
+
+          ATLAS_RARE_ALERT_ENABLED: "1"
+          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
+          ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+          ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
+          ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
+          ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
+
+          ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
+          ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
+          ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+
+          ATLAS_PULLBACK_ALERT_ENABLED: "1"
+          ATLAS_PULLBACK_RETRACE_PCT: "30"
+
+          ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
+          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
+          ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
+          ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
+          ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
+          ATLAS_WEEKLY_HISTORY_HOURS: "168"
+
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
+          ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
+          ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
+
+          ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+          ATLAS_TRADINGVIEW_INTERVAL: "240"
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+
+          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MAX_LEVERAGE: "10"
+
+          ATLAS_MIN_CONFIDENCE: "55"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_VOLUME_RATIO: "0.60"
+          ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+          ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+          ATLAS_FREE_ALERTS_ENABLED: "1"
+          ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
+          ATLAS_FREE_ALERT_SEND_INFO: "0"
+          ATLAS_FREE_ALERT_SMART_HOURLY: "1"
+          ATLAS_FREE_ALERT_HOURLY_MAX: "12"
+          ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+          ATLAS_NOTIFICATION_MIN_SCORE: "68"
+          ATLAS_SIGNAL_MENTIONS: ""
+
+          ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          ATLAS_ENABLE_VOICE: "1"
+          ATLAS_VOICE_TYPE: "female"
+          ATLAS_VOICE_LANGUAGE: "fa"
+          ATLAS_AUTO_SEND_VOICE: "1"
+          ATLAS_ENABLE_IMAGE_TABLE: "1"
+
+        run: |
+          set -euo pipefail
+          python bot.py
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-nightly23-failure-${{ github.run_id }}
+          path: |
+            *.log
+            *.txt
+            atlas_changelog.jsonl
+            changelog.txt
+            atlas_v11.sqlite3
+            atlas_execution.sqlite3
+            atlas_desk.sqlite3
+          if-no-files-found: ignore
+          retention-days: 7
