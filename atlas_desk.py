@@ -1,5 +1,5 @@
 # ============================================================
-# ATLAS Desk v1.2 — multi-user personal desk
+# ATLAS Desk v1.4 — multi-user desk + personal holdings
 #
 # Flow:
 #   1) New member joins the Telegram supergroup
@@ -32,6 +32,13 @@
 #     value text,
 #     updated_at timestamptz
 #   );
+#   create table if not exists atlas_desk_holdings (
+#     user_id text not null,
+#     coin text not null,
+#     qty double precision not null default 0,
+#     updated_at timestamptz,
+#     primary key (user_id, coin)
+#   );
 # ============================================================
 
 from __future__ import annotations
@@ -49,10 +56,11 @@ from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
 DESK_DB = os.environ.get("ATLAS_DESK_SQLITE", "atlas_desk.sqlite3")
-DESK_VERSION = "ATLAS Desk v1.2"
-SUPABASE_TABLE_USERS = "atlas_desk_users"
-SUPABASE_TABLE_META = "atlas_desk_meta"
-SUPABASE_TABLE_DELIVERIES = "atlas_desk_deliveries"
+DESK_VERSION = "ATLAS Desk v1.4"
+SUPABASE_TABLE_USERS = os.environ.get("ATLAS_DESK_USERS_TABLE", "atlas_desk_users").strip() or "atlas_desk_users"
+SUPABASE_TABLE_META = os.environ.get("ATLAS_DESK_META_TABLE", "atlas_desk_meta").strip() or "atlas_desk_meta"
+SUPABASE_TABLE_DELIVERIES = os.environ.get("ATLAS_DESK_DELIVERY_TABLE", "atlas_desk_deliveries").strip() or "atlas_desk_deliveries"
+SUPABASE_TABLE_HOLDINGS = os.environ.get("ATLAS_DESK_HOLDINGS_TABLE", "atlas_desk_holdings").strip() or "atlas_desk_holdings"
 
 EXECUTABLE = {"BUY CONFIRMATION", "SELL CONFIRMATION"}
 DEFAULT_PERSONAL = (
@@ -69,6 +77,13 @@ _STATUS_RE = re.compile(r"(?i)^\s*(?:/)?(?:desk|status|میز|وضعیت)\s*$")
 _HELP_RE = re.compile(r"(?i)^\s*(?:/)?(?:start|help|راهنما)(?:@\w+)?(?:\s+desk)?\s*$")
 _HOURLY_ON_RE = re.compile(r"(?i)^\s*(?:/)?(?:hourlyon|ساعتی_روشن)\s*$")
 _HOURLY_OFF_RE = re.compile(r"(?i)^\s*(?:/)?(?:hourlyoff|ساعتی_خاموش)\s*$")
+_HOLD_RE = re.compile(
+    r"(?i)^\s*(?:/)?(?:hold|دارایی)\s+([A-Za-z]{2,10})\s+([0-9]+(?:[.,][0-9]+)?)\s*$"
+)
+_UNHOLD_RE = re.compile(
+    r"(?i)^\s*(?:/)?(?:unhold|حذف)\s+([A-Za-z]{2,10})\s*$"
+)
+_PORT_RE = re.compile(r"(?i)^\s*(?:/)?(?:portfolio|holds|bag|سبد|داراییها|دارایی‌ها)\s*$")
 
 
 def _parse_bool(value, default=False):
@@ -155,6 +170,13 @@ def init_desk_db():
                 delivery_type text not null,
                 sent_at text not null
             );
+            create table if not exists desk_holdings(
+                user_id text not null,
+                coin text not null,
+                qty real not null default 0,
+                updated_at text,
+                primary key(user_id, coin)
+            );
             """
         )
 
@@ -236,12 +258,22 @@ def _sb_success(value):
 
 
 def _signal_hash(r):
+    """Stable identity for one canonical signal event."""
     raw = "|".join(str(x) for x in (
         str(r.get("coin") or "").upper(),
         str(r.get("decision_state") or "").upper(),
         str(r.get("direction") or "").upper(),
-        r.get("entry"), r.get("sl"), r.get("tp1"), r.get("tp2"),
         r.get("signal_candle_ts"),
+    ))
+    import hashlib
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _signal_level_hash(r):
+    """Fingerprint current Entry/SL/TP geometry for update notifications."""
+    base = _signal_hash(r)
+    raw = "|".join(str(x) for x in (
+        base, r.get("entry"), r.get("sl"), r.get("tp1"), r.get("tp2"),
     ))
     import hashlib
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
@@ -301,6 +333,117 @@ def record_delivery(user_id, signal_hash, delivery_type):
             (key, str(user_id), str(signal_hash), str(delivery_type), ts),
         )
     return True
+
+
+def _norm_coin(coin):
+    return str(coin or "").strip().upper().replace("/USDT", "").replace("USDT", "")
+
+
+def sb_get_holdings(user_id=None):
+    """Return list on successful Supabase read, None on read failure."""
+    path = f"/rest/v1/{SUPABASE_TABLE_HOLDINGS}?select=user_id,coin,qty"
+    if user_id:
+        path += f"&user_id=eq.{urllib.parse.quote(str(user_id))}"
+    rows = _sb_request("GET", path)
+    if rows is None:
+        return None
+    return rows if isinstance(rows, list) else []
+
+
+def sb_upsert_holding(row):
+    return _sb_request(
+        "POST",
+        f"/rest/v1/{SUPABASE_TABLE_HOLDINGS}?on_conflict=user_id,coin",
+        row,
+        extra_prefer="resolution=merge-duplicates,return=minimal",
+    )
+
+
+def sb_delete_holding(user_id, coin):
+    path = (
+        f"/rest/v1/{SUPABASE_TABLE_HOLDINGS}"
+        f"?user_id=eq.{urllib.parse.quote(str(user_id))}"
+        f"&coin=eq.{urllib.parse.quote(coin)}"
+    )
+    return _sb_request("DELETE", path)
+
+
+def load_all_holdings():
+    """user_id -> {COIN: qty}; fail-closed when configured Supabase read fails."""
+    init_desk_db()
+    out = {}
+    remote = sb_get_holdings()
+    if remote is None:
+        if _sb_conf():
+            raise RuntimeError("Atlas Desk holdings read failed; refusing to infer an empty portfolio")
+        with _conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "select user_id,coin,qty from desk_holdings where qty>0"
+            )]
+    else:
+        rows = remote
+
+    for r in rows or []:
+        uid = str(r.get("user_id") or "")
+        coin = _norm_coin(r.get("coin"))
+        qty = _f(r.get("qty"), 0.0) or 0.0
+        if not uid or not coin or qty <= 0:
+            continue
+        out.setdefault(uid, {})[coin] = qty
+    return out
+
+
+def set_holding(user_id, coin, qty):
+    coin = _norm_coin(coin)
+    qty = _f(qty, 0.0) or 0.0
+    if not user_id or not coin:
+        raise ValueError("invalid holding")
+    if qty <= 0:
+        return delete_holding(user_id, coin)
+    ts = _now_utc().isoformat()
+    remote = sb_upsert_holding({
+        "user_id": str(user_id),
+        "coin": coin,
+        "qty": qty,
+        "updated_at": ts,
+    })
+    if not _sb_success(remote):
+        raise RuntimeError("Atlas Desk persistent holding write failed")
+    init_desk_db()
+    with _conn() as c:
+        c.execute(
+            "insert or replace into desk_holdings(user_id,coin,qty,updated_at) values (?,?,?,?)",
+            (str(user_id), coin, qty, ts),
+        )
+    return coin, qty
+
+
+def delete_holding(user_id, coin):
+    coin = _norm_coin(coin)
+    remote = sb_delete_holding(user_id, coin)
+    if remote is None and _sb_conf():
+        raise RuntimeError("Atlas Desk persistent holding delete failed")
+    init_desk_db()
+    with _conn() as c:
+        c.execute("delete from desk_holdings where user_id=? and coin=?", (str(user_id), coin))
+    return coin
+
+
+def format_portfolio(user_id):
+    try:
+        bag = load_all_holdings().get(str(user_id), {})
+    except Exception:
+        return (
+            "⚠️ فعلاً دسترسی پایدار به سبد ممکن نیست. "
+            "هیچ دارایی‌ای حذف یا صفر فرض نشده؛ کمی بعد دوباره /portfolio را بفرست."
+        )
+    if not bag:
+        return "سبد خالی است.\nثبت کن: /hold BTC 0.05"
+    lines = ["📦 سبد دارایی تو"]
+    for coin in sorted(bag):
+        lines.append(f"• {coin}: {_fmt_qty(bag[coin])}")
+    lines.append("\nتغییر: /hold ETH 1.2\nحذف: /unhold ETH")
+    return "\n".join(lines)
 
 
 # ---------- user store ----------
@@ -499,8 +642,11 @@ def welcome_text(first_name=""):
         "۲) بفرست /start\n"
         "۳) سرمایه‌ات را به دلار/تتر بفرست، مثلاً:\n"
         "/capital 4000\n\n"
+        "۴) دارایی‌های فعلی‌ات را ثبت کن، مثلاً:\n"
+        "/hold BTC 0.05\n"
+        "/hold ETH 1.2\n\n"
         "بعد روزانه — و اگر سیگنال ورود جدید باشد ساعتی — "
-        "ورود، حد ضرر و حد سود متناسب با سرمایه خودت را می‌گیری.\n"
+        "ورود و خروج متناسب با سرمایه و سبد خودت را می‌گیری.\n"
         "ربات سفارش نمی‌گذارد؛ فقط سیگنال می‌دهد."
     )
 
@@ -513,10 +659,14 @@ def private_help_text():
         "/capital 4000\n"
         "یا: سرمایه 2500\n\n"
         "وضعیت: /desk\n"
+        "سبد دارایی: /portfolio\n"
+        "ثبت دارایی: /hold BTC 0.05\n"
+        "حذف دارایی: /unhold BTC\n"
         "سیگنال ساعتی روشن: /hourlyon\n"
         "سیگنال ساعتی خاموش (فقط روزانه): /hourlyoff\n\n"
-        "سیگنال‌ها روی لیست شخصی ATLAS ساخته می‌شوند.\n"
-        "WATCH یعنی ورود نکن. خروج = SL یا TP همان سیگنال ورود."
+        "سیگنال خروج فقط برای ارزی می‌آید که در سبدت باشد.\n"
+        "خرید جدید با سرمایه ثبت‌شده سایز می‌شود.\n"
+        "WATCH یعنی ورود نکن. خروج = SL یا TP همان سیگنال."
     )
 
 
@@ -669,11 +819,38 @@ def ingest_telegram_commands(sender=None):
                     chat.get("id"),
                     f"✅ سرمایه تو ثبت شد: {amount:,.2f} USDT\n"
                     f"ریسک هر معامله: {risk_pct():.2f}% = {risk_usd:,.2f} USDT\n"
-                    "سیگنال ورود/خروج از این به بعد با همین عدد سایز می‌شود."
+                    "سیگنال ورود با همین سرمایه سایز می‌شود.\n"
+                    "دارایی‌هایت را هم ثبت کن: /hold BTC 0.05"
                     + note,
                 )
+        elif _HOLD_RE.match(text):
+            m = _HOLD_RE.match(text)
+            coin, raw_qty = _norm_coin(m.group(1)), _f(m.group(2).replace(",", "."))
+            allowed = set(personal_universe())
+            if coin not in allowed:
+                reply(chat.get("id"), f"{coin} در لیست شخصی ATLAS نیست.\nمجاز: {', '.join(DEFAULT_PERSONAL)}")
+            elif raw_qty is None:
+                reply(chat.get("id"), "مقدار نامعتبر است. مثال: /hold BTC 0.05")
+            elif raw_qty <= 0:
+                delete_holding(user_id, coin)
+                reply(chat.get("id"), f"{coin} از سبد حذف شد.\n{format_portfolio(user_id)}")
+            else:
+                set_holding(user_id, coin, raw_qty)
+                reply(chat.get("id"), f"✅ {coin} ثبت شد: {_fmt_qty(raw_qty)}\n\n{format_portfolio(user_id)}")
+        elif _UNHOLD_RE.match(text):
+            coin = _norm_coin(_UNHOLD_RE.match(text).group(1))
+            delete_holding(user_id, coin)
+            reply(chat.get("id"), f"{coin} از سبد حذف شد.\n{format_portfolio(user_id)}")
+        elif _PORT_RE.match(text):
+            reply(chat.get("id"), format_portfolio(user_id))
         elif _STATUS_RE.match(text):
             eq = _f(me.get("equity_usdt"))
+            try:
+                bag = load_all_holdings().get(user_id, {})
+                bag_status = None
+            except Exception:
+                bag = {}
+                bag_status = "⚠️ وضعیت سبد موقتاً قابل دریافت نیست و صفر فرض نشده است."
             if not eq:
                 reply(chat.get("id"), "هنوز سرمایه نداری.\nبفرست: /capital 4000")
             else:
@@ -682,8 +859,10 @@ def ingest_telegram_commands(sender=None):
                     f"{DESK_VERSION}\n"
                     f"سرمایه تو: {eq:,.2f} USDT\n"
                     f"ریسک هر معامله: {risk_pct():.2f}% = {eq * risk_pct() / 100.0:,.2f} USDT\n"
-                    f"سیگنال ساعتی: {'روشن' if me.get('hourly_on', 1) else 'خاموش'}\n"
-                    f"عضو گروه: {'بله' if me.get('seen_in_group') else 'هنوز دیده نشد'}",
+                    + (f"تعداد دارایی ثبت‌شده: {len(bag)}\n" if bag_status is None else bag_status + "\n")
+                    + f"سیگنال ساعتی: {'روشن' if me.get('hourly_on', 1) else 'خاموش'}\n"
+                    + f"عضو گروه: {'بله' if me.get('seen_in_group') else 'هنوز دیده نشد'}\n\n"
+                    + format_portfolio(user_id),
                 )
         elif _HOURLY_ON_RE.match(text):
             merge_user(user_id, hourly_on=1)
@@ -755,22 +934,38 @@ def classify(r):
     return "NO"
 
 
-def build_entry_card(r, equity, risk):
+def build_entry_card(r, equity, risk, held_qty=None):
     coin = str(r.get("coin") or "").upper()
-    side = "خرید / LONG" if str(r.get("direction") or "").upper() == "LONG" else "فروش / SHORT"
-    sized = size_for_capital(r.get("entry"), r.get("sl"), equity, risk)
+    direction = str(r.get("direction") or "").upper()
+    is_long = direction == "LONG"
+    side = "خرید / LONG" if is_long else "خروج / کاهش موقعیت"
+    entry, sl = r.get("entry"), r.get("sl")
+    sized = size_for_capital(entry, sl, equity, risk)
+    held_qty = _f(held_qty)
     lines = [
-        f"📌 ورود {coin}",
+        f"📌 {'افزایش / ورود' if is_long else 'خروج'} {coin}",
         f"جهت: {side}",
-        f"قیمت ورود: {_fmt_px(r.get('entry'))} USDT",
-        f"خروج ضرر (SL): {_fmt_px(r.get('sl'))} USDT",
+        f"قیمت ورود: {_fmt_px(entry)} USDT",
+        f"خروج ضرر (SL): {_fmt_px(sl)} USDT",
         f"خروج سود ۱ (TP1): {_fmt_px(r.get('tp1'))} USDT",
     ]
     if _f(r.get("tp2")):
         lines.append(f"خروج سود ۲ (TP2): {_fmt_px(r.get('tp2'))} USDT")
-    if sized:
+    if held_qty and held_qty > 0:
+        lines.append(f"موجودی ثبت‌شده تو: {_fmt_qty(held_qty)} {coin}")
+    if not is_long and held_qty and held_qty > 0:
+        px = _f(entry) or 0.0
+        stop = abs((_f(entry) or 0) - (_f(sl) or 0))
         lines += [
-            f"مقدار برای تو: {_fmt_qty(sized['qty'])} {coin}",
+            f"حداکثر مقدار قابل خروج بر اساس سبد ثبت‌شده: {_fmt_qty(held_qty)} {coin}",
+            f"ارزش حدودی: {held_qty * px:,.2f} USDT" if px else "ارزش حدودی: —",
+        ]
+        if stop and px:
+            lines.append(f"ریسک این خروج روی موجودی: {held_qty * stop:,.2f} USDT")
+    elif sized:
+        label = "مقدار خرید پیشنهادی" if is_long else "مقدار پیشنهادی"
+        lines += [
+            f"{label}: {_fmt_qty(sized['qty'])} {coin}",
             f"ارزش حدودی: {sized['notional']:,.2f} USDT",
             f"ریسک این معامله: {sized['risk_usd']:,.2f} USDT ({sized['risk_pct']:.2f}%)",
         ]
@@ -807,33 +1002,59 @@ def split_results(results, personal_symbols=None):
     return entries, watches
 
 
-def build_user_report(user, entries, watches, kind="daily"):
+def personalize_signals(entries, watches, holdings):
+    """SELL only if the user holds the coin. BUY stays available as a new entry."""
+    holdings = holdings or {}
+    kept_e, kept_w = [], []
+    for r in entries or []:
+        coin = _norm_coin(r.get("coin"))
+        direction = str(r.get("direction") or "").upper()
+        if direction == "SHORT" and not holdings.get(coin):
+            continue
+        kept_e.append(r)
+    for r in watches or []:
+        coin = _norm_coin(r.get("coin"))
+        state = str(r.get("decision_state") or "")
+        if "BEARISH" in state and not holdings.get(coin):
+            continue
+        kept_w.append(r)
+    return kept_e, kept_w
+
+
+def build_user_report(user, entries, watches, kind="daily", holdings=None):
     equity = _f(user.get("equity_usdt"))
     name = user.get("first_name") or "تریدر"
     risk = risk_pct()
-    title = "گزارش روزانه" if kind == "daily" else "سیگنال جدید ساعتی"
+    holdings = holdings or {}
+    title = ("گزارش روزانه" if kind == "daily" else "به‌روزرسانی سیگنال" if kind == "update" else "سیگنال جدید ساعتی")
     lines = [
         f"💼 {DESK_VERSION} | {title}",
         f"سلام {name}",
         f"{_now_tehran().strftime('%Y-%m-%d %H:%M')} تهران",
         f"سرمایه تو: {equity:,.2f} USDT",
         f"ریسک هر معامله: {risk:.2f}% = {equity * risk / 100.0:,.2f} USDT",
-        "",
     ]
+    if holdings:
+        bag = "، ".join(f"{c} {_fmt_qty(q)}" for c, q in sorted(holdings.items()))
+        lines.append(f"سبد تو: {bag}")
+    else:
+        lines.append("سبد خالی است. ثبت کن: /hold BTC 0.05")
+    lines.append("")
     if entries:
         lines.append("=== سیگنال ورود + خروج ===")
         for r in entries:
-            lines.append(build_entry_card(r, equity, risk))
+            coin = _norm_coin(r.get("coin"))
+            lines.append(build_entry_card(r, equity, risk, held_qty=holdings.get(coin)))
             lines.append("")
     else:
-        lines.append("الان سیگنال ورود قطعی در لیست شخصی نیست.")
+        lines.append("الان سیگنال قابل اجرا برای سبد/سرمایه تو نیست.")
         lines.append("")
     if watches and kind == "daily":
         lines.append("=== فقط مراقبت؛ ورود نکن ===")
         for r in watches[:12]:
             lines.append(build_watch_line(r))
         lines.append("")
-    lines.append("خروج = رسیدن قیمت به SL یا TP همین سیگنال.")
+    lines.append("برای خروج، ATLAS فقط تا سقف موجودی ثبت‌شده همان ارز را نمایش می‌دهد؛ خرید جدید از روی سرمایه سایز می‌شود.")
     return "\n".join(lines).strip()
 
 
@@ -875,13 +1096,7 @@ def should_push(cycle, user, has_entries):
 
 
 def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True):
-    """Multi-user Desk cycle.
-
-    - Ingests welcome/private commands on every cycle.
-    - DAILY16: one personal report per user per Tehran day.
-    - HOURLY/DEEP: sends only ENTRY signals not previously delivered to that user.
-    - NIGHTLY: no Desk push.
-    """
+    """Multi-user Desk cycle with persistent dedupe and holdings-aware personalization."""
     if not desk_enabled():
         print("💼 Atlas Desk disabled")
         return {"enabled": False}
@@ -889,14 +1104,22 @@ def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True
     ingest = ingest_telegram_commands(sender=sender)
     entries, watches = split_results(results, personal_symbols=personal_symbols)
     users = load_users()
+
+    holdings_ok = True
+    holdings_error = None
+    try:
+        holdings_by_user = load_all_holdings()
+    except Exception as e:
+        holdings_by_user = {}
+        holdings_ok = False
+        holdings_error = str(e)
+        print(f"⚠️ Desk holdings unavailable; exit personalization fail-closed: {e}")
+
     require_group = not _parse_bool(os.environ.get("ATLAS_DESK_ALLOW_DM_ONLY", "0"))
     subs = eligible_subscribers(users, require_group=require_group)
     cycle = current_cycle()
 
-    sent = 0
-    skipped = 0
-    deduped = 0
-    persist_errors = 0
+    sent = skipped = deduped = updates_sent = persist_errors = 0
 
     if send_report and sender:
         for user in subs:
@@ -906,15 +1129,31 @@ def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True
                 skipped += 1
                 continue
 
-            # DAILY16: exactly once per Tehran calendar day per user.
+            bag = holdings_by_user.get(uid, {}) if holdings_ok else {}
+            if holdings_ok:
+                user_entries, user_watches = personalize_signals(entries, watches, bag)
+            else:
+                user_entries = [r for r in entries if str(r.get("direction") or "").upper() == "LONG"]
+                user_watches = [
+                    r for r in watches
+                    if "BEARISH" not in str(r.get("decision_state") or "").upper()
+                ]
+
             if cycle == "daily":
                 day = _now_tehran().strftime("%Y-%m-%d")
                 daily_hash = f"DAILY:{day}"
-                dkey = _delivery_key(uid, daily_hash, "DAILY")
-                if delivery_exists(dkey):
+                if delivery_exists(_delivery_key(uid, daily_hash, "DAILY")):
                     deduped += 1
                     continue
-                text = build_user_report(user, entries, watches, kind="daily")
+                text = build_user_report(
+                    user, user_entries, user_watches, kind="daily",
+                    holdings=bag if holdings_ok else {}
+                )
+                if not holdings_ok:
+                    text += (
+                        "\n\n⚠️ وضعیت سبد از Supabase موقتاً در دسترس نبود؛ "
+                        "هیچ سیگنال خروج شخصی‌سازی‌شده‌ای در این گزارش صادر نشد."
+                    )
                 try:
                     if sender(chat_id, text):
                         if record_delivery(uid, daily_hash, "DAILY"):
@@ -925,48 +1164,77 @@ def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True
                     print(f"⚠️ Desk daily push {uid}: {e}")
                 continue
 
-            # NIGHTLY23 never sends Desk cards.
             if cycle == "nightly":
                 skipped += 1
                 continue
 
-            # HOURLY/DEEP: only new canonical ENTRY signals for users with hourly_on.
-            if not user.get("hourly_on", 1) or not _parse_bool(os.environ.get("ATLAS_DESK_HOURLY_PUSH", "1"), True):
+            if not user.get("hourly_on", 1) or not _parse_bool(
+                os.environ.get("ATLAS_DESK_HOURLY_PUSH", "1"), True
+            ):
                 skipped += 1
                 continue
 
-            new_entries = []
-            delivery_rows = []
-            for r in entries:
-                sh = _signal_hash(r)
-                dkey = _delivery_key(uid, sh, "ENTRY")
-                if delivery_exists(dkey):
+            new_entries, new_records = [], []
+            updated_entries, update_records = [], []
+
+            for r in user_entries:
+                base_hash = _signal_hash(r)
+                level_hash = _signal_level_hash(r)
+                entry_seen = delivery_exists(_delivery_key(uid, base_hash, "ENTRY"))
+                level_seen = delivery_exists(_delivery_key(uid, level_hash, "LEVEL"))
+
+                if not entry_seen:
+                    new_entries.append(r)
+                    new_records.append((base_hash, level_hash))
+                elif not level_seen:
+                    updated_entries.append(r)
+                    update_records.append(level_hash)
+                else:
                     deduped += 1
-                    continue
-                new_entries.append(r)
-                delivery_rows.append((sh, dkey))
 
-            if not new_entries:
-                skipped += 1
-                continue
-
-            text = build_user_report(user, new_entries, [], kind="hourly")
-            try:
-                if sender(chat_id, text):
-                    all_persisted = True
-                    for sh, _dkey in delivery_rows:
-                        if not record_delivery(uid, sh, "ENTRY"):
-                            all_persisted = False
+            if new_entries:
+                text = build_user_report(
+                    user, new_entries, [], kind="hourly",
+                    holdings=bag if holdings_ok else {}
+                )
+                try:
+                    if sender(chat_id, text):
+                        ok = True
+                        for base_hash, level_hash in new_records:
+                            ok = record_delivery(uid, base_hash, "ENTRY") and ok
+                            ok = record_delivery(uid, level_hash, "LEVEL") and ok
+                        if ok:
+                            sent += 1
+                        else:
                             persist_errors += 1
-                    if all_persisted:
-                        sent += 1
-            except Exception as e:
-                print(f"⚠️ Desk hourly push {uid}: {e}")
+                except Exception as e:
+                    print(f"⚠️ Desk hourly entry push {uid}: {e}")
+
+            if updated_entries:
+                text = build_user_report(
+                    user, updated_entries, [], kind="update",
+                    holdings=bag if holdings_ok else {}
+                )
+                try:
+                    if sender(chat_id, text):
+                        ok = True
+                        for level_hash in update_records:
+                            ok = record_delivery(uid, level_hash, "LEVEL") and ok
+                        if ok:
+                            sent += 1
+                            updates_sent += 1
+                        else:
+                            persist_errors += 1
+                except Exception as e:
+                    print(f"⚠️ Desk hourly update push {uid}: {e}")
+
+            if not new_entries and not updated_entries:
+                skipped += 1
 
     print(
         f"💼 Desk cycle={cycle} users={len(users)} subs={len(subs)} "
-        f"entries={len(entries)} sent={sent} skipped={skipped} deduped={deduped} "
-        f"persist_errors={persist_errors} ingest={ingest}"
+        f"entries={len(entries)} sent={sent} updates={updates_sent} skipped={skipped} "
+        f"deduped={deduped} persist_errors={persist_errors} holdings_ok={holdings_ok} ingest={ingest}"
     )
     return {
         "enabled": True,
@@ -977,8 +1245,11 @@ def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True
         "entries": len(entries),
         "watches": len(watches),
         "telegram_sent": sent,
+        "updates_sent": updates_sent,
         "deduped": deduped,
         "persist_errors": persist_errors,
+        "holdings_ok": holdings_ok,
+        "holdings_error": holdings_error,
         "stats": {"entries": len(entries), "watches": len(watches), "equity": None},
     }
 
