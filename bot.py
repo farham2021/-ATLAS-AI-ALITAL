@@ -26,8 +26,8 @@
 #   - Every self-modification is written to the changelog.
 #
 # IMPORTANT:
-#   ATLAS analysis remains canonical and read-only for execution.
-#   A separate guarded Execution Layer may create PAPER intents; LIVE is fail-closed.
+#   Canonical ATLAS analysis remains the source of truth.
+#   Atlas Desk personalizes signal sizing; the separate Execution Layer is PAPER/fail-closed by default.
 #   No model can guarantee low-error signals or profits.
 #
 # ------------------------------------------------------------
@@ -166,7 +166,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-ATLAS_VERSION_DEFAULT = "ATLAS v11.5 PHASE 3.11.5 SAFE EXECUTION"
+ATLAS_VERSION_DEFAULT = "ATLAS v11.5 PHASE 3.11.7 MULTIUSER SAFE"
 VERSION = os.environ.get("ATLAS_VERSION", ATLAS_VERSION_DEFAULT).strip() or ATLAS_VERSION_DEFAULT
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
@@ -10099,7 +10099,7 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                 cellobj.set_facecolor("#2E8B57" if v>=75 else "#D4AC0D" if v>=60 else "#C0392B")
                 cellobj.set_text_props(color="white")
         ax.set_title("ATLAS v11.4 — OPPORTUNITY RANKING",fontsize=17,weight="bold",pad=18)
-        ax.text(0.5,0.03,"Opportunity ≠ probability | Conditional triggers only | Execution is separately gated",ha="center",fontsize=9)
+        ax.text(0.5,0.03,"Opportunity ≠ probability | Conditional triggers only | No order execution",ha="center",fontsize=9)
         plt.tight_layout()
         plt.savefig(filename,dpi=160,bbox_inches="tight",facecolor="white")
         plt.close()
@@ -13797,6 +13797,14 @@ def main():
         total_sent = 0
         all_errors = []
 
+        # Atlas Desk: pick up /capital from Telegram before analysis reports fire.
+        try:
+            from atlas_desk import ingest_telegram_commands, desk_enabled
+            if desk_enabled():
+                ingest_telegram_commands(sender=telegram_send_one)
+        except Exception as e:
+            print(f"⚠️ Atlas Desk ingest failed non-fatally: {e}")
+
         print("🔍 Starting scoped ANALYSIS (Top10 + Personal)...")
         with _AtlasTimer("FULL CORE REPORT()"):
             text, results, macro, news, market_info, unavailable = report()
@@ -13899,7 +13907,7 @@ def main():
 
         # Execution layer (paper by default). Read-only on canonical decision fields.
         # Does not mutate Entry/SL/TP or decision_state. Live orders stay dark
-        # unless the triple lock in atlas_execution.live_locks_open() is set.
+        # unless every fail-closed lock in atlas_execution.live_locks_open() is open.
         if deep_cycle or daily_cycle:
             try:
                 with _AtlasTimer("EXECUTION LAYER"):
@@ -13921,6 +13929,26 @@ def main():
                 append_changelog("EXECUTION_LAYER", None, None, str(e))
                 print(f"⚠️ Execution layer failed non-fatally: {e}")
 
+        # Atlas Desk: sized entry/exit cards for the personal list using stored USDT capital.
+        try:
+            from atlas_desk import run_desk_cycle
+            with _AtlasTimer("ATLAS DESK"):
+                desk_payload = run_desk_cycle(
+                    scoped_results,
+                    personal_symbols=list(ATLAS_PERSONAL_ASSETS),
+                    sender=telegram_send_one,
+                    send_report=True,
+                )
+            print(
+                "💼 Desk:",
+                "entries=", (desk_payload.get("stats") or {}).get("entries"),
+                "equity=", (desk_payload.get("stats") or {}).get("equity"),
+                "tg=", desk_payload.get("telegram_sent"),
+            )
+        except Exception as e:
+            append_changelog("ATLAS_DESK", None, None, str(e))
+            print(f"⚠️ Atlas Desk failed non-fatally: {e}")
+
         # Automatic Summer Book Scan: run on every Deep4H cycle, including DAILY16.
         # It is additive only and does not replace/short-circuit the core ATLAS pipeline.
         # Telegram is sent only when an excellent strict 4H+1D setup exists (default).
@@ -13933,7 +13961,7 @@ def main():
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
 
         print(f"\n{'='*50}")
-        print("📊 PHASE 3.11.5 SUMMARY")
+        print("📊 PHASE 3.11.7 SUMMARY")
         print(f"  Scoped assets: {len(scoped_results)}")
         print(f"  Hourly persisted: {hourly_count}")
         print(f"  Deep4H cycle: {deep_cycle}")
