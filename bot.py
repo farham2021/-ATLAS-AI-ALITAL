@@ -13361,6 +13361,18 @@ def send_phase311_advisory_intelligence(results, btc_regime=None):
 # MAIN EXECUTION
 # ============================================================
 
+
+def _daily16_diag(section, sent, errs):
+    """Operational logging only; does not change ATLAS analysis or delivery behavior."""
+    try:
+        nerr = len(errs or [])
+    except Exception:
+        nerr = 0
+    print(f"🧪 DAILY16 DIAG | {section}: sent={sent}, errors={nerr}")
+    if errs:
+        for i, err in enumerate(errs, 1):
+            print(f"❌ DAILY16 ERROR | {section} | {i}: {err}")
+
 def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc_regime, portfolio_risk):
     """Daily 16:00 FULL reporting layer, scoped strictly to Top10 + Personal + Metals.
 
@@ -13381,32 +13393,42 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
         snapshot_text = build_daily16_market_snapshot(scoped_results)
         snapshot_parts, s, e = send_report(snapshot_text)
         sent_total += s; errors.extend(e)
+        _daily16_diag("MARKET_SNAPSHOT", s, e)
     except Exception as ex:
-        errors.append(f"DAILY16_MARKET_SNAPSHOT: {ex}")
+        _e = f"DAILY16_MARKET_SNAPSHOT: {ex}"
+        errors.append(_e)
+        _daily16_diag("MARKET_SNAPSHOT", 0, [_e])
 
     # 1) The same two comprehensive 4H CSVs the user explicitly requested.
     s, e = send_analysis_documents(results, top10, [])
     sent_total += s; errors.extend(e)
+    _daily16_diag("ANALYSIS_CSV", s, e)
 
     # 2) Market Context + Deep Analysis + Best Watch + Opportunity Ranking.
     s, e = send_all_in_one_documents(results, top10, macro, news, btc_regime)
     sent_total += s; errors.extend(e)
+    _daily16_diag("ALL_IN_ONE_DOCS", s, e)
 
     # 2.5) Operational Trade Plans: expose canonical Entry/SL/TP/RR for
     # executable setups; WAIT rows show trigger/key levels only. No math changes.
     try:
         s, e = send_atlas_trade_plans(scoped_results)
         sent_total += s; errors.extend(e)
+        _daily16_diag("TRADE_PLANS", s, e)
     except Exception as ex:
-        errors.append(f"TRADE_PLANS_DAILY16: {ex}")
+        _e = f"TRADE_PLANS_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("TRADE_PLANS", 0, [_e])
 
     # 3) Current Decision Board + Opportunity Board, scoped CORE-only.
     global _LAST_RADAR_CANDIDATES
     _LAST_RADAR_CANDIDATES = []
     s, e = send_current_market_decision_board(results)
     sent_total += s; errors.extend(e)
+    _daily16_diag("DECISION_BOARD", s, e)
     s, e = send_phase34_opportunity_board(results)
     sent_total += s; errors.extend(e)
+    _daily16_diag("OPPORTUNITY_BOARD", s, e)
 
     # 4) Preserve the additional Phase-1 and backtest/optimization documents
     # from the last stable FULL reporting path. These consume only current
@@ -13414,15 +13436,21 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     try:
         s, e = send_phase1_documents(results, top10, portfolio_risk)
         sent_total += s; errors.extend(e)
+        _daily16_diag("PHASE1_DOCS", s, e)
     except Exception as ex:
-        errors.append(f"PHASE1_FULL_DAILY16: {ex}")
+        _e = f"PHASE1_FULL_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("PHASE1_DOCS", 0, [_e])
 
     try:
         backtest_dashboard = build_backtest_report()
         s, e = send_optimization_documents(backtest_dashboard)
         sent_total += s; errors.extend(e)
+        _daily16_diag("BACKTEST_DASHBOARD", s, e)
     except Exception as ex:
-        errors.append(f"BACKTEST_FULL_DAILY16: {ex}")
+        _e = f"BACKTEST_FULL_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("BACKTEST_DASHBOARD", 0, [_e])
 
     # 5) Restore FULL visual + voice outputs at Daily16 only.
     try:
@@ -13453,14 +13481,22 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
     parts, s, e = send_report(daily_text)
     sent_total += s; errors.extend(e)
+    _daily16_diag("DAILY_INTELLIGENCE", s, e)
 
     # 7) Phase 3.11 advisory intelligence: additive diagnostic only.
     try:
         s, e = send_phase311_advisory_intelligence(results, btc_regime)
         sent_total += s; errors.extend(e)
+        _daily16_diag("PHASE311_ADVISORY", s, e)
     except Exception as ex:
-        errors.append(f"PHASE311_ADVISORY_DAILY16: {ex}")
+        _e = f"PHASE311_ADVISORY_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("PHASE311_ADVISORY", 0, [_e])
 
+    print(f"🧪 DAILY16 DIAG FINAL | sent_total={sent_total}, errors={len(errors)}")
+    if errors:
+        for i, err in enumerate(errors, 1):
+            print(f"❌ DAILY16 FINAL ERROR {i}: {err}")
     return sent_total, errors, parts
 
 
