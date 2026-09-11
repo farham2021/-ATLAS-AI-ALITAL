@@ -26,7 +26,8 @@
 #   - Every self-modification is written to the changelog.
 #
 # IMPORTANT:
-#   This is an analytical engine. It does not place orders.
+#   ATLAS analysis remains canonical and read-only for execution.
+#   A separate guarded Execution Layer may create PAPER intents; LIVE is fail-closed.
 #   No model can guarantee low-error signals or profits.
 #
 # ------------------------------------------------------------
@@ -165,7 +166,8 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-VERSION = "ATLAS v11.5 PHASE 3.11.2 DAILY16 TRADE PLANS"
+ATLAS_VERSION_DEFAULT = "ATLAS v11.5 PHASE 3.11.5 SAFE EXECUTION"
+VERSION = os.environ.get("ATLAS_VERSION", ATLAS_VERSION_DEFAULT).strip() or ATLAS_VERSION_DEFAULT
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -2385,7 +2387,7 @@ def _portfolio_symbols():
     return list(dict.fromkeys([
         "BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA", "TRX", "LINK",
         "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
-        "NEAR", "TAO", "ONDO"
+        "NEAR", "TAO", "ONDO", "ZEC"
     ]))
 
 def _portfolio_rows(results):
@@ -10097,7 +10099,7 @@ def build_image_table(results, top10_symbols=None, dynamic30_symbols=None, filen
                 cellobj.set_facecolor("#2E8B57" if v>=75 else "#D4AC0D" if v>=60 else "#C0392B")
                 cellobj.set_text_props(color="white")
         ax.set_title("ATLAS v11.4 — OPPORTUNITY RANKING",fontsize=17,weight="bold",pad=18)
-        ax.text(0.5,0.03,"Opportunity ≠ probability | Conditional triggers only | No order execution",ha="center",fontsize=9)
+        ax.text(0.5,0.03,"Opportunity ≠ probability | Conditional triggers only | Execution is separately gated",ha="center",fontsize=9)
         plt.tight_layout()
         plt.savefig(filename,dpi=160,bbox_inches="tight",facecolor="white")
         plt.close()
@@ -13284,7 +13286,7 @@ def build_phase311_advisory_intelligence(results, btc_regime=None):
         if not coin or coin in ATLAS_METALS:
             continue
         try:
-            rows, _engine = best_ohlcv(coin, '4h', 90)
+            rows = best_ohlcv(coin, '4h', 90)
         except Exception:
             rows = None
         if not rows:
@@ -13361,6 +13363,18 @@ def send_phase311_advisory_intelligence(results, btc_regime=None):
 # MAIN EXECUTION
 # ============================================================
 
+
+def _daily16_diag(section, sent, errs):
+    """Operational logging only; does not change ATLAS analysis or delivery behavior."""
+    try:
+        nerr = len(errs or [])
+    except Exception:
+        nerr = 0
+    print(f"🧪 DAILY16 DIAG | {section}: sent={sent}, errors={nerr}")
+    if errs:
+        for i, err in enumerate(errs, 1):
+            print(f"❌ DAILY16 ERROR | {section} | {i}: {err}")
+
 def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc_regime, portfolio_risk):
     """Daily 16:00 FULL reporting layer, scoped strictly to Top10 + Personal + Metals.
 
@@ -13381,32 +13395,42 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
         snapshot_text = build_daily16_market_snapshot(scoped_results)
         snapshot_parts, s, e = send_report(snapshot_text)
         sent_total += s; errors.extend(e)
+        _daily16_diag("MARKET_SNAPSHOT", s, e)
     except Exception as ex:
-        errors.append(f"DAILY16_MARKET_SNAPSHOT: {ex}")
+        _e = f"DAILY16_MARKET_SNAPSHOT: {ex}"
+        errors.append(_e)
+        _daily16_diag("MARKET_SNAPSHOT", 0, [_e])
 
     # 1) The same two comprehensive 4H CSVs the user explicitly requested.
     s, e = send_analysis_documents(results, top10, [])
     sent_total += s; errors.extend(e)
+    _daily16_diag("ANALYSIS_CSV", s, e)
 
     # 2) Market Context + Deep Analysis + Best Watch + Opportunity Ranking.
     s, e = send_all_in_one_documents(results, top10, macro, news, btc_regime)
     sent_total += s; errors.extend(e)
+    _daily16_diag("ALL_IN_ONE_DOCS", s, e)
 
     # 2.5) Operational Trade Plans: expose canonical Entry/SL/TP/RR for
     # executable setups; WAIT rows show trigger/key levels only. No math changes.
     try:
         s, e = send_atlas_trade_plans(scoped_results)
         sent_total += s; errors.extend(e)
+        _daily16_diag("TRADE_PLANS", s, e)
     except Exception as ex:
-        errors.append(f"TRADE_PLANS_DAILY16: {ex}")
+        _e = f"TRADE_PLANS_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("TRADE_PLANS", 0, [_e])
 
     # 3) Current Decision Board + Opportunity Board, scoped CORE-only.
     global _LAST_RADAR_CANDIDATES
     _LAST_RADAR_CANDIDATES = []
     s, e = send_current_market_decision_board(results)
     sent_total += s; errors.extend(e)
+    _daily16_diag("DECISION_BOARD", s, e)
     s, e = send_phase34_opportunity_board(results)
     sent_total += s; errors.extend(e)
+    _daily16_diag("OPPORTUNITY_BOARD", s, e)
 
     # 4) Preserve the additional Phase-1 and backtest/optimization documents
     # from the last stable FULL reporting path. These consume only current
@@ -13414,15 +13438,21 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     try:
         s, e = send_phase1_documents(results, top10, portfolio_risk)
         sent_total += s; errors.extend(e)
+        _daily16_diag("PHASE1_DOCS", s, e)
     except Exception as ex:
-        errors.append(f"PHASE1_FULL_DAILY16: {ex}")
+        _e = f"PHASE1_FULL_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("PHASE1_DOCS", 0, [_e])
 
     try:
         backtest_dashboard = build_backtest_report()
         s, e = send_optimization_documents(backtest_dashboard)
         sent_total += s; errors.extend(e)
+        _daily16_diag("BACKTEST_DASHBOARD", s, e)
     except Exception as ex:
-        errors.append(f"BACKTEST_FULL_DAILY16: {ex}")
+        _e = f"BACKTEST_FULL_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("BACKTEST_DASHBOARD", 0, [_e])
 
     # 5) Restore FULL visual + voice outputs at Daily16 only.
     try:
@@ -13453,14 +13483,22 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
     daily_text = build_phase37_daily_report(scoped_results, top10, macro, news, btc_regime)
     parts, s, e = send_report(daily_text)
     sent_total += s; errors.extend(e)
+    _daily16_diag("DAILY_INTELLIGENCE", s, e)
 
     # 7) Phase 3.11 advisory intelligence: additive diagnostic only.
     try:
         s, e = send_phase311_advisory_intelligence(results, btc_regime)
         sent_total += s; errors.extend(e)
+        _daily16_diag("PHASE311_ADVISORY", s, e)
     except Exception as ex:
-        errors.append(f"PHASE311_ADVISORY_DAILY16: {ex}")
+        _e = f"PHASE311_ADVISORY_DAILY16: {ex}"
+        errors.append(_e)
+        _daily16_diag("PHASE311_ADVISORY", 0, [_e])
 
+    print(f"🧪 DAILY16 DIAG FINAL | sent_total={sent_total}, errors={len(errors)}")
+    if errors:
+        for i, err in enumerate(errors, 1):
+            print(f"❌ DAILY16 FINAL ERROR {i}: {err}")
     return sent_total, errors, parts
 
 
@@ -13859,6 +13897,30 @@ def main():
         else:
             print("🔕 Storage-only cycle complete; no Telegram message by design.")
 
+        # Execution layer (paper by default). Read-only on canonical decision fields.
+        # Does not mutate Entry/SL/TP or decision_state. Live orders stay dark
+        # unless the triple lock in atlas_execution.live_locks_open() is set.
+        if deep_cycle or daily_cycle:
+            try:
+                with _AtlasTimer("EXECUTION LAYER"):
+                    from atlas_execution import run_execution_cycle
+                    exec_payload = run_execution_cycle(
+                        scoped_results,
+                        backtest_ok=bool(globals().get("_LAST_BACKTEST_OK", False)),
+                        sender=telegram_send_one,
+                        send_telegram=bool(daily_cycle),
+                    )
+                    print(
+                        "⚙️ Execution:",
+                        "mode=", exec_payload.get("mode"),
+                        "accepted=", len(exec_payload.get("accepted") or []),
+                        "rejected=", len(exec_payload.get("rejected") or []),
+                        "tg=", exec_payload.get("telegram_sent"),
+                    )
+            except Exception as e:
+                append_changelog("EXECUTION_LAYER", None, None, str(e))
+                print(f"⚠️ Execution layer failed non-fatally: {e}")
+
         # Automatic Summer Book Scan: run on every Deep4H cycle, including DAILY16.
         # It is additive only and does not replace/short-circuit the core ATLAS pipeline.
         # Telegram is sent only when an excellent strict 4H+1D setup exists (default).
@@ -13871,7 +13933,7 @@ def main():
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
 
         print(f"\n{'='*50}")
-        print("📊 PHASE 3.11 SUMMARY")
+        print("📊 PHASE 3.11.5 SUMMARY")
         print(f"  Scoped assets: {len(scoped_results)}")
         print(f"  Hourly persisted: {hourly_count}")
         print(f"  Deep4H cycle: {deep_cycle}")
