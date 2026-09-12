@@ -13286,7 +13286,7 @@ def build_phase311_advisory_intelligence(results, btc_regime=None):
         if not coin or coin in ATLAS_METALS:
             continue
         try:
-            rows = best_ohlcv(coin, '4h', 90)
+            rows, _engine = best_ohlcv(coin, '4h', 90)
         except Exception:
             rows = None
         if not rows:
@@ -13797,13 +13797,16 @@ def main():
         total_sent = 0
         all_errors = []
 
-        # Atlas Desk: pick up /capital from Telegram before analysis reports fire.
+        # Atlas Desk command ingestion belongs to the lightweight Fast Inbox.
+        # Main analysis jobs must not compete for Telegram getUpdates.
         try:
-            from atlas_desk import ingest_telegram_commands, desk_enabled
-            if desk_enabled():
+            from atlas_desk import ingest_telegram_commands, desk_enabled, ingest_enabled
+            if desk_enabled() and ingest_enabled():
                 ingest_telegram_commands(sender=telegram_send_one)
+            elif desk_enabled():
+                print("💼 Desk ingest disabled in main ATLAS; owner=atlas-desk-inbox")
         except Exception as e:
-            print(f"⚠️ Atlas Desk ingest failed non-fatally: {e}")
+            print(f"⚠️ Atlas Desk ingest gate failed non-fatally: {e}")
 
         print("🔍 Starting scoped ANALYSIS (Top10 + Personal)...")
         with _AtlasTimer("FULL CORE REPORT()"):
@@ -13961,7 +13964,7 @@ def main():
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
 
         print(f"\n{'='*50}")
-        print("📊 PHASE 3.11.7 SUMMARY")
+        print(f"📊 {VERSION} SUMMARY")
         print(f"  Scoped assets: {len(scoped_results)}")
         print(f"  Hourly persisted: {hourly_count}")
         print(f"  Deep4H cycle: {deep_cycle}")
