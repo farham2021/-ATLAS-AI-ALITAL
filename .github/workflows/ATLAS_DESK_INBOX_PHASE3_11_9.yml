@@ -1,0 +1,56 @@
+# ============================================================
+# ATLAS Desk Inbox — Phase 3.11.9 — command replies only
+# Runs every 5 minutes. Does NOT analyze markets.
+# Separate concurrency from atlas-bot so /portfolio is not
+# stuck behind a 35-minute Hourly/Daily job.
+# ============================================================
+
+name: ATLAS Desk Inbox
+
+on:
+  schedule:
+    - cron: "2-57/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-desk-inbox
+  cancel-in-progress: false
+
+jobs:
+  inbox:
+    name: Desk command inbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Run Desk inbox
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_INGEST_ENABLED: "1"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_USERS_TABLE: "atlas_desk_users"
+          ATLAS_DESK_META_TABLE: "atlas_desk_meta"
+          ATLAS_DESK_DELIVERY_TABLE: "atlas_desk_deliveries"
+          ATLAS_DESK_HOLDINGS_TABLE: "atlas_desk_holdings"
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          python atlas_desk.py
