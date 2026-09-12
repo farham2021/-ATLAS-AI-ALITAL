@@ -56,7 +56,7 @@ from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
 DESK_DB = os.environ.get("ATLAS_DESK_SQLITE", "atlas_desk.sqlite3")
-DESK_VERSION = "ATLAS Desk v1.4"
+DESK_VERSION = "ATLAS Desk v1.5"
 SUPABASE_TABLE_USERS = os.environ.get("ATLAS_DESK_USERS_TABLE", "atlas_desk_users").strip() or "atlas_desk_users"
 SUPABASE_TABLE_META = os.environ.get("ATLAS_DESK_META_TABLE", "atlas_desk_meta").strip() or "atlas_desk_meta"
 SUPABASE_TABLE_DELIVERIES = os.environ.get("ATLAS_DESK_DELIVERY_TABLE", "atlas_desk_deliveries").strip() or "atlas_desk_deliveries"
@@ -114,6 +114,11 @@ def _now_tehran():
 
 def desk_enabled():
     return _parse_bool(os.environ.get("ATLAS_DESK_ENABLED", "1"), True)
+
+
+def ingest_enabled():
+    """Only one workflow should own Telegram getUpdates at a time."""
+    return _parse_bool(os.environ.get("ATLAS_DESK_INGEST_ENABLED", "1"), True)
 
 
 def risk_pct():
@@ -1101,7 +1106,11 @@ def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True
         print("💼 Atlas Desk disabled")
         return {"enabled": False}
 
-    ingest = ingest_telegram_commands(sender=sender)
+    ingest = (
+        ingest_telegram_commands(sender=sender)
+        if ingest_enabled()
+        else {"disabled": True, "owner": "atlas-desk-inbox"}
+    )
     entries, watches = split_results(results, personal_symbols=personal_symbols)
     users = load_users()
 
@@ -1253,3 +1262,49 @@ def run_desk_cycle(results, personal_symbols=None, sender=None, send_report=True
         "stats": {"entries": len(entries), "watches": len(watches), "equity": None},
     }
 
+def telegram_send_text(chat_id, text):
+    """Standalone sender so inbox job does not import bot.py."""
+    token = _token()
+    if not token or not chat_id or not text:
+        return False
+    chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [text]
+    ok = True
+    for chunk in chunks:
+        body = urllib.parse.urlencode({"chat_id": str(chat_id), "text": chunk}).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=body,
+            headers={
+                "User-Agent": "ATLAS-Desk/1.4",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                payload = json.loads(r.read().decode("utf-8", errors="replace"))
+            if not payload.get("ok"):
+                print(f"⚠️ Desk sendMessage rejected: {payload}")
+                ok = False
+        except Exception as e:
+            print(f"⚠️ Desk sendMessage failed: {e}")
+            ok = False
+    return ok
+
+
+def run_desk_inbox():
+    """Command inbox only. No market analysis. No signal cards."""
+    print(f"📥 {DESK_VERSION} inbox {_now_tehran().strftime('%Y-%m-%d %H:%M')} Tehran")
+    if not desk_enabled():
+        print("📥 Desk disabled")
+        return {"enabled": False}
+    if not _token():
+        raise RuntimeError("TELEGRAM_TOKEN missing")
+    if not _sb_conf():
+        raise RuntimeError("Supabase missing; inbox refuses to ack without persistence")
+    out = ingest_telegram_commands(sender=telegram_send_text)
+    print("📥 inbox", out)
+    return out
+
+
+if __name__ == "__main__":
+    run_desk_inbox()
