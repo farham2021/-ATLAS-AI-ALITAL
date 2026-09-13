@@ -1,0 +1,315 @@
+name: ATLAS AI Phase 3.11.13 Scheduler Hardening + Desk Webhook
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+
+  workflow_dispatch:
+    inputs:
+      cycle_mode:
+        description: "Manual ATLAS cycle"
+        required: true
+        default: "HOURLY"
+        type: choice
+        options:
+          - HOURLY
+          - DEEP4H
+          - DAILY16
+          - NIGHTLY23
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-bot
+  cancel-in-progress: false
+
+jobs:
+  atlas:
+    name: Self-healing ATLAS dispatcher
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Decide cycle from actual Tehran time
+        id: plan
+        env:
+          ATLAS_SCHEDULER_TABLE: "atlas_scheduler_runs"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python atlas_schedule_guard.py plan --manual "${{ inputs.cycle_mode }}" --github-output "$GITHUB_OUTPUT"
+          else
+            python atlas_schedule_guard.py plan --github-output "$GITHUB_OUTPUT"
+          fi
+
+      - name: Show dispatcher decision
+        run: |
+          echo "Mode: ${{ steps.plan.outputs.mode }}"
+          echo "Run key: ${{ steps.plan.outputs.run_key }}"
+          echo "Reason: ${{ steps.plan.outputs.reason }}"
+          echo "Scheduled: ${{ steps.plan.outputs.scheduled }}"
+          echo "UTC now: $(date -u +'%Y-%m-%d %H:%M:%S')"
+
+      - name: Claim scheduled slot lease
+        id: claim
+        if: >
+          steps.plan.outputs.scheduled == '1' &&
+          steps.plan.outputs.mode != 'NONE'
+        env:
+          ATLAS_SCHEDULER_TABLE: "atlas_scheduler_runs"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          python atlas_schedule_guard.py claim \
+            --run-key "${{ steps.plan.outputs.run_key }}" \
+            --cycle "${{ steps.plan.outputs.mode }}" \
+            --ttl-min 65 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: >
+          steps.plan.outputs.mode != 'NONE' &&
+          (
+            steps.plan.outputs.scheduled != '1' ||
+            steps.claim.outputs.claimed == 'CLAIMED'
+          )
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run selected ATLAS cycle
+        if: >
+          steps.plan.outputs.mode != 'NONE' &&
+          (
+            steps.plan.outputs.scheduled != '1' ||
+            steps.claim.outputs.claimed == 'CLAIMED'
+          )
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_VERSION: "ATLAS v11.5 PHASE 3.11.13 SCHEDULER HARDENING"
+          ATLAS_ENGINE: "BOTH"
+          ATLAS_SCHEDULED_CADENCE: "workflow"
+          ATLAS_RUN_MODE: "ANALYSIS"
+
+          ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
+          ATLAS_DAILY_DELTA_ENABLED: "1"
+          ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
+          ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+
+          ATLAS_REVERSAL_MOMENTUM_CONFIRM: "1"
+          ATLAS_REVERSAL_SYMBOLS: "BTC,ETH"
+          ATLAS_REVERSAL_MIN_RECOVERY_PCT: "0.5"
+          ATLAS_REVERSAL_SHOCK_MIN_PCT: "5.0"
+
+          ATLAS_PHASE37_HISTORY_HOURS: "24"
+          ATLAS_TIMEFRAME: "4H"
+
+          ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT: "1"
+
+          ATLAS_EXECUTION_MODE: "PAPER"
+          ATLAS_EXEC_REQUIRE_PERSISTENCE: "1"
+          ATLAS_EXEC_REQUIRE_PROTECTIVE: "1"
+          ATLAS_EXEC_ALLOW_SPOT_SELL: "0"
+          ATLAS_EXEC_INTENT_TABLE: "atlas_exec_intents"
+          ATLAS_EXEC_EVENT_TABLE: "atlas_exec_events"
+          ATLAS_LIVE_TRADING: "0"
+          ATLAS_LIVE_CONFIRM: ""
+          ATLAS_EXEC_SYMBOLS: "BTC,ETH"
+          ATLAS_EXEC_EQUITY_USDT: "10000"
+          ATLAS_EXEC_MAX_LEVERAGE: "3"
+          ATLAS_EXEC_MAX_OPEN: "2"
+          ATLAS_DAILY_KILL_R: "3"
+          ATLAS_TRADE_EXCHANGE: "bybit"
+          ATLAS_TRADE_MARKET: "spot"
+          ATLAS_TRADE_SANDBOX: "1"
+
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_INGEST_ENABLED: "0"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_HOURLY_PUSH: "1"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_SEND_ON_DEEP: "1"
+          ATLAS_DESK_USERS_TABLE: "atlas_desk_users"
+          ATLAS_DESK_META_TABLE: "atlas_desk_meta"
+          ATLAS_DESK_DELIVERY_TABLE: "atlas_desk_deliveries"
+          ATLAS_DESK_HOLDINGS_TABLE: "atlas_desk_holdings"
+
+          ATLAS_RARE_ALERT_ENABLED: "1"
+          ATLAS_RARE_ALERT_SYMBOLS: "BTC,ETH,SOL,ADA,XRP,ZEC"
+          ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+          ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
+          ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
+          ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
+
+          ATLAS_STRUCTURAL_SHOCK_ENABLED: "1"
+          ATLAS_STRUCTURAL_SHOCK_MOVE_PCT: "4.5"
+          ATLAS_STRUCTURAL_SHOCK_VOLUME_RATIO: "2.0"
+          ATLAS_PULLBACK_ALERT_ENABLED: "1"
+          ATLAS_PULLBACK_RETRACE_PCT: "30"
+          ATLAS_KEY_LEVEL_ALERT_ENABLED: "1"
+          ATLAS_KEY_LEVEL_MAX_DISTANCE_PCT: "0.30"
+          ATLAS_KEY_LEVEL_MIN_SR_SCORE: "60"
+
+          ATLAS_WEEKLY_SUMMARY_ENABLED: "1"
+          ATLAS_WEEKLY_SUMMARY_WEEKDAY: "4"
+          ATLAS_WEEKLY_HISTORY_HOURS: "168"
+
+          ATLAS_ANALYSIS_WORKERS: "3"
+          ATLAS_EXCHANGE_MAX_CONCURRENCY: "2"
+          ATLAS_PREFETCH_EXCHANGE_WORKERS: "3"
+          ATLAS_SQLITE_OHLCV_CACHE_ENABLED: "0"
+          ATLAS_PERSISTENT_CLOSED_OHLCV: "1"
+
+          ATLAS_TRADINGVIEW_EXCHANGE: "BYBIT"
+          ATLAS_TRADINGVIEW_INTERVAL: "240"
+          TRADINGVIEW_CONFIRMATION_URL: ${{ secrets.TRADINGVIEW_CONFIRMATION_URL }}
+          ATLAS_SNAPSHOT_FLAT_THRESHOLD_PCT: "0.05"
+
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MAX_LEVERAGE: "10"
+          ATLAS_MIN_CONFIDENCE: "55"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_VOLUME_RATIO: "0.60"
+          ATLAS_TRADE_GEOMETRY_EPSILON: "1e-12"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+
+          ATLAS_BACKTEST_DAYS: "180"
+          ATLAS_SIGNAL_HORIZON_BARS: "36"
+          ATLAS_BACKTEST_IMPROVEMENT: "10"
+          ATLAS_BACKTEST_REFRESH_HOURS: "24"
+
+          ATLAS_CANDLE_EVENT_DEDUP: "1"
+          ATLAS_FREE_ALERTS_ENABLED: "1"
+          ATLAS_FREE_ALERT_INFO_TELEGRAM: "0"
+          ATLAS_FREE_ALERT_SEND_INFO: "0"
+          ATLAS_FREE_ALERT_SMART_HOURLY: "1"
+          ATLAS_FREE_ALERT_HOURLY_MAX: "12"
+          ATLAS_FREE_ALERT_BATCH_SIZE: "12"
+          ATLAS_NOTIFICATION_MIN_SCORE: "68"
+          ATLAS_SIGNAL_MENTIONS: ""
+
+          ATLAS_SQLITE_FILE: "atlas_v11.sqlite3"
+          ATLAS_CHANGELOG: "changelog.txt"
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+          ATLAS_ENABLE_VOICE: "1"
+          ATLAS_VOICE_TYPE: "female"
+          ATLAS_VOICE_LANGUAGE: "fa"
+          ATLAS_AUTO_SEND_VOICE: "1"
+          ATLAS_ENABLE_IMAGE_TABLE: "1"
+
+          SELECTED_MODE: ${{ steps.plan.outputs.mode }}
+
+        run: |
+          set -euo pipefail
+
+          case "$SELECTED_MODE" in
+            HOURLY)
+              export ATLAS_DELIVERY_MODE="STORAGE_ONLY"
+              export ATLAS_PHASE37_CYCLE="HOURLY"
+              export ATLAS_PHASE37_DEEP_4H="0"
+              export ATLAS_PHASE37_DAILY_REPORT="0"
+              export ATLAS_PHASE39_NIGHTLY_REPORT="0"
+              export ATLAS_BOOK_SCAN_AUTO="0"
+              export ATLAS_EXECUTION_ENABLED="0"
+              ;;
+            DEEP4H)
+              export ATLAS_DELIVERY_MODE="STORAGE_ONLY"
+              export ATLAS_PHASE37_CYCLE="DEEP4H"
+              export ATLAS_PHASE37_DEEP_4H="1"
+              export ATLAS_PHASE37_DAILY_REPORT="0"
+              export ATLAS_PHASE39_NIGHTLY_REPORT="0"
+              export ATLAS_BOOK_SCAN_AUTO="1"
+              export ATLAS_EXECUTION_ENABLED="1"
+              ;;
+            DAILY16)
+              export ATLAS_DELIVERY_MODE="FULL"
+              export ATLAS_PHASE37_CYCLE="DAILY16"
+              export ATLAS_PHASE37_DEEP_4H="1"
+              export ATLAS_PHASE37_DAILY_REPORT="1"
+              export ATLAS_PHASE39_NIGHTLY_REPORT="0"
+              export ATLAS_BOOK_SCAN_AUTO="1"
+              export ATLAS_EXECUTION_ENABLED="1"
+              ;;
+            NIGHTLY23)
+              export ATLAS_DELIVERY_MODE="FULL"
+              export ATLAS_PHASE37_CYCLE="NIGHTLY23"
+              export ATLAS_PHASE37_DEEP_4H="0"
+              export ATLAS_PHASE37_DAILY_REPORT="0"
+              export ATLAS_PHASE39_NIGHTLY_REPORT="1"
+              export ATLAS_BOOK_SCAN_AUTO="0"
+              export ATLAS_EXECUTION_ENABLED="0"
+              ;;
+            *)
+              echo "::error::Unknown selected mode: $SELECTED_MODE"
+              exit 2
+              ;;
+          esac
+
+          echo "Running $SELECTED_MODE at $(TZ=Asia/Tehran date +'%Y-%m-%d %H:%M:%S Tehran')"
+          python bot.py
+
+      - name: Mark scheduled slot complete
+        if: >
+          success() &&
+          steps.plan.outputs.mode != 'NONE' &&
+          steps.plan.outputs.scheduled == '1' &&
+          steps.plan.outputs.run_key != '' &&
+          steps.claim.outputs.claimed == 'CLAIMED' &&
+          steps.claim.outputs.lease_token != ''
+        continue-on-error: true
+        env:
+          ATLAS_SCHEDULER_TABLE: "atlas_scheduler_runs"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RUN_KEY: ${{ steps.plan.outputs.run_key }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          LEASE_TOKEN: ${{ steps.claim.outputs.lease_token }}
+        run: |
+          set -euo pipefail
+          python atlas_schedule_guard.py mark --run-key "$RUN_KEY" --cycle "$MODE" --lease-token "$LEASE_TOKEN" --source self-healing \
+          || echo "::warning::Report ran successfully but scheduler mark failed; next heartbeat may retry."
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-self-healing-failure-${{ github.run_id }}
+          path: |
+            *.log
+            *.txt
+            atlas_changelog.jsonl
+            changelog.txt
+            atlas_v11.sqlite3
+            atlas_execution.sqlite3
+            atlas_desk.sqlite3
