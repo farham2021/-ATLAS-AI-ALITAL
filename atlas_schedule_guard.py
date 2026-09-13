@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,19 +11,8 @@ from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
 TABLE = (os.environ.get("ATLAS_SCHEDULER_TABLE") or "atlas_scheduler_runs").strip()
-DEEP_HOURS = {0, 4, 8, 12, 20}
-DEFAULT_LEASE_MIN = int(os.environ.get("ATLAS_SCHEDULER_LEASE_MIN", "45") or 45)
-
-# create table if not exists atlas_scheduler_runs (
-#   run_key text primary key,
-#   cycle text,
-#   tehran_date text,
-#   source text,
-#   status text,
-#   lease_until timestamptz,
-#   completed_at timestamptz
-# );
-# Keep RLS enabled. GitHub must use SUPABASE_SERVICE_ROLE_KEY.
+DEEP_HOURS = (0, 4, 8, 12, 20)
+DEFAULT_LEASE_MIN = int(os.environ.get("ATLAS_SCHEDULER_LEASE_MIN", "65") or 65)
 
 
 def _conf():
@@ -35,21 +23,25 @@ def _conf():
     return url, key
 
 
-def _request(method: str, path: str, body=None, prefer=None, ok_statuses=None):
+def _request(method: str, path: str, body=None, prefer=None):
     url, key = _conf()
-    headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
     if prefer:
         headers["Prefer"] = prefer
+
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url + path, data=data, headers=headers, method=method)
+
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             raw = r.read().decode("utf-8", errors="replace")
-            return r.status, (json.loads(raw) if raw else {"_ok": True})
+            return r.status, (json.loads(raw) if raw else None)
     except urllib.error.HTTPError as e:
-        err = e.read().decode("utf-8", errors="replace")[:500]
-        if ok_statuses and e.code in ok_statuses:
-            return e.code, err
+        err = e.read().decode("utf-8", errors="replace")[:1000]
         raise RuntimeError(f"Supabase HTTP {e.code}: {err}") from e
 
 
@@ -75,14 +67,6 @@ def hour_key(cycle: str, dt: datetime) -> str:
     return f"{cycle}:{dt.strftime('%Y-%m-%d:%H')}"
 
 
-def date_from_run_key(run_key: str, dt=None) -> str:
-    dt = dt or now_tehran()
-    m = re.search(r"(20\d{2}-\d{2}-\d{2})", str(run_key or ""))
-    if m:
-        return m.group(1)
-    return dt.date().isoformat()
-
-
 def _parse_ts(value):
     if not value:
         return None
@@ -96,9 +80,19 @@ def _parse_ts(value):
     return dt
 
 
+def _key_date(run_key: str) -> str:
+    parts = run_key.split(":")
+    if len(parts) < 2 or not parts[1]:
+        return now_tehran().date().isoformat()
+    return parts[1]
+
+
 def fetch_row(run_key: str):
     q = urllib.parse.quote(run_key, safe="")
-    code, rows = _request("GET", f"/rest/v1/{TABLE}?run_key=eq.{q}&select=*&limit=1")
+    _, rows = _request(
+        "GET",
+        f"/rest/v1/{TABLE}?run_key=eq.{q}&select=*&limit=1",
+    )
     if not isinstance(rows, list):
         return None
     return rows[0] if rows else None
@@ -107,24 +101,25 @@ def fetch_row(run_key: str):
 def classify_row(row, now=None):
     if not row:
         return "MISSING"
+
     status = str(row.get("status") or "").upper()
     if status == "DONE" or (not status and row.get("completed_at")):
         return "DONE"
+
     lease = _parse_ts(row.get("lease_until"))
     now = now or now_utc()
+
     if status == "RUNNING" and lease and lease > now:
         return "RUNNING"
+
     return "EXPIRED"
 
 
 def remote_done(run_key: str):
-    """True=finished, False=needs work, None=unknown."""
+    """True = already satisfied/actively owned; False = needs work; None = state unavailable."""
     try:
-        row = fetch_row(run_key)
-        state = classify_row(row)
-        if state == "DONE":
-            return True
-        if state == "RUNNING":
+        state = classify_row(fetch_row(run_key))
+        if state in ("DONE", "RUNNING"):
             return True
         return False
     except Exception as e:
@@ -132,87 +127,66 @@ def remote_done(run_key: str):
         return None
 
 
-def mark_done(run_key: str, cycle: str, source: str):
-    key_date = date_from_run_key(run_key)
-    row = {
-        "run_key": run_key,
-        "cycle": cycle,
-        "tehran_date": key_date,
-        "source": source,
-        "status": "DONE",
-        "lease_until": None,
-        "completed_at": now_utc().isoformat(),
-    }
-    return _request(
-        "POST",
-        f"/rest/v1/{TABLE}?on_conflict=run_key",
-        row,
-        prefer="resolution=merge-duplicates,return=minimal",
-    )
+def _rpc_row(name: str, payload: dict):
+    _, data = _request("POST", f"/rest/v1/rpc/{name}", payload)
+
+    if isinstance(data, list):
+        if not data:
+            raise RuntimeError(f"{name} returned an empty result")
+        row = data[0]
+    elif isinstance(data, dict):
+        row = data
+    else:
+        raise RuntimeError(f"{name} returned unexpected payload: {data!r}")
+
+    if not isinstance(row, dict):
+        raise RuntimeError(f"{name} returned non-object row: {row!r}")
+    return row
 
 
 def claim_slot(run_key: str, cycle: str, ttl_min: int):
-    now = now_utc()
-    lease = now + timedelta(minutes=max(5, ttl_min))
-    key_date = date_from_run_key(run_key)
-    payload = {
-        "run_key": run_key,
-        "cycle": cycle,
-        "tehran_date": key_date,
-        "source": "claim",
-        "status": "RUNNING",
-        "lease_until": lease.isoformat(),
-        "completed_at": None,
-    }
-
+    """Atomic lease acquisition through the Supabase RPC. No direct table writes."""
     try:
-        row = fetch_row(run_key)
-    except Exception as e:
-        return {"claimed": "ERROR", "detail": str(e)}
-
-    state = classify_row(row, now)
-    if state == "DONE":
-        return {"claimed": "DONE", "detail": "already completed"}
-    if state == "RUNNING":
-        return {"claimed": "LOCKED", "detail": f"lease until {row.get('lease_until')}"}
-
-    if state == "MISSING":
-        try:
-            _request(
-                "POST",
-                f"/rest/v1/{TABLE}",
-                payload,
-                prefer="return=minimal",
-                ok_statuses=(),
-            )
-            return {"claimed": "CLAIMED", "detail": "inserted RUNNING"}
-        except RuntimeError as e:
-            if "HTTP 409" in str(e) or "HTTP 23505" in str(e):
-                row = fetch_row(run_key)
-                state = classify_row(row, now)
-                if state == "DONE":
-                    return {"claimed": "DONE", "detail": "lost race to DONE"}
-                if state == "RUNNING":
-                    return {"claimed": "LOCKED", "detail": "lost race to RUNNING"}
-            return {"claimed": "ERROR", "detail": str(e)}
-
-    # EXPIRED: take over the same row.
-    q = urllib.parse.quote(run_key, safe="")
-    try:
-        _request(
-            "PATCH",
-            f"/rest/v1/{TABLE}?run_key=eq.{q}&or=(status.eq.RUNNING,status.is.null)",
+        row = _rpc_row(
+            "atlas_scheduler_claim",
             {
-                "status": "RUNNING",
-                "source": "claim-reap",
-                "lease_until": lease.isoformat(),
-                "completed_at": None,
+                "p_run_key": run_key,
+                "p_cycle": cycle,
+                "p_tehran_date": _key_date(run_key),
+                "p_ttl_min": max(5, int(ttl_min)),
             },
-            prefer="return=minimal",
         )
-        return {"claimed": "CLAIMED", "detail": "reaped expired lease"}
+        out = {
+            "claimed": str(row.get("claimed") or "ERROR").upper(),
+            "detail": str(row.get("detail") or ""),
+            "lease_token": str(row.get("lease_token") or ""),
+        }
+        if out["claimed"] not in {"CLAIMED", "DONE", "LOCKED", "ERROR"}:
+            return {
+                "claimed": "ERROR",
+                "detail": f"unexpected claim state: {out['claimed']}",
+                "lease_token": "",
+            }
+        return out
     except Exception as e:
-        return {"claimed": "ERROR", "detail": str(e)}
+        return {"claimed": "ERROR", "detail": str(e), "lease_token": ""}
+
+
+def mark_done(run_key: str, cycle: str, lease_token: str, source: str):
+    """Complete only the lease owned by this worker."""
+    row = _rpc_row(
+        "atlas_scheduler_mark_done",
+        {
+            "p_run_key": run_key,
+            "p_cycle": cycle,
+            "p_lease_token": lease_token,
+            "p_source": source,
+        },
+    )
+    return {
+        "result": str(row.get("result") or "ERROR").upper(),
+        "detail": str(row.get("detail") or ""),
+    }
 
 
 def _plan(mode: str, run_key: str, reason: str, scheduled: bool = True):
@@ -224,7 +198,23 @@ def _plan(mode: str, run_key: str, reason: str, scheduled: bool = True):
     }
 
 
+def _latest_deep_slot(dt: datetime):
+    candidates = [h for h in DEEP_HOURS if h <= dt.hour]
+    if not candidates:
+        return None
+    h = max(candidates)
+    return dt.replace(hour=h, minute=0, second=0, microsecond=0)
+
+
 def choose_plan(dt: datetime, state_getter=remote_done):
+    """
+    Priority:
+      1) NIGHTLY23 due/recovery
+      2) DAILY16 due/recovery
+      3) previous NIGHTLY recovery just after midnight
+      4) latest DEEP4H slot within its active window
+      5) current HOURLY slot
+    """
     dt = dt.astimezone(TEHRAN)
     today = dt.date()
 
@@ -248,27 +238,33 @@ def choose_plan(dt: datetime, state_getter=remote_done):
         if s is not True:
             return _plan("NIGHTLY23", prev_nightly, "previous_nightly_recovery")
 
-    if dt.hour == 16:
-        desired, key = "DAILY16", today_daily
-    elif dt.hour == 23:
-        desired, key = "NIGHTLY23", today_nightly
-    elif dt.hour in DEEP_HOURS:
-        desired, key = "DEEP4H", hour_key("DEEP4H", dt)
-    else:
-        desired, key = "HOURLY", hour_key("HOURLY", dt)
+    deep_dt = _latest_deep_slot(dt)
+    if deep_dt is not None:
+        # DAILY16 itself includes deep analysis, so there is intentionally no 16:00 DEEP4H slot.
+        deep_key = hour_key("DEEP4H", deep_dt)
+        # Recover only inside that slot's 4-hour window.
+        if dt - deep_dt < timedelta(hours=4):
+            s = state_getter(deep_key)
+            if s is False:
+                return _plan("DEEP4H", deep_key, "deep4h_due_or_recovery")
+            if s is None:
+                return _plan("NONE", "", "deep4h_state_unavailable")
 
-    s = state_getter(key)
+    hourly_key = hour_key("HOURLY", dt)
+    s = state_getter(hourly_key)
     if s is False:
-        return _plan(desired, key, "current_hour_slot")
+        return _plan("HOURLY", hourly_key, "current_hour_slot")
     if s is None:
-        return _plan("NONE", "", "regular_slot_state_unavailable")
+        return _plan("NONE", "", "hourly_state_unavailable")
+
     return _plan("NONE", "", "slot_already_done")
 
 
 def write_github_output(values, path):
     with open(path, "a", encoding="utf-8") as f:
         for key, val in values.items():
-            f.write(f"{key}={val}\n")
+            clean = str(val).replace("\r", " ").replace("\n", " ")
+            f.write(f"{key}={clean}\n")
 
 
 def cmd_plan(args):
@@ -276,6 +272,7 @@ def cmd_plan(args):
         plan = _plan(args.manual, "", "manual_dispatch", scheduled=False)
     else:
         plan = choose_plan(now_tehran())
+
     print(json.dumps(plan, ensure_ascii=False))
     if args.github_output:
         write_github_output(plan, args.github_output)
@@ -284,17 +281,28 @@ def cmd_plan(args):
 def cmd_claim(args):
     out = claim_slot(args.run_key, args.cycle, args.ttl_min)
     print(json.dumps(out, ensure_ascii=False))
+
     if args.github_output:
         write_github_output(out, args.github_output)
 
+    # Fail closed only on actual claim failure.
+    if out.get("claimed") == "ERROR":
+        raise SystemExit(3)
+
 
 def cmd_mark(args):
-    mark_done(args.run_key, args.cycle, args.source)
-    print(args.run_key)
+    out = mark_done(args.run_key, args.cycle, args.lease_token, args.source)
+    print(json.dumps(out, ensure_ascii=False))
+
+    # MARKED and already-DONE are safe terminal states.
+    if out.get("result") not in {"MARKED", "DONE"}:
+        raise SystemExit(4)
 
 
 def main():
-    p = argparse.ArgumentParser(description="ATLAS self-healing scheduler with lease")
+    p = argparse.ArgumentParser(
+        description="ATLAS 3.11.14 self-healing scheduler with atomic Supabase RPC lease"
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("plan")
@@ -303,16 +311,26 @@ def main():
 
     c = sub.add_parser("claim")
     c.add_argument("--run-key", required=True)
-    c.add_argument("--cycle", required=True, choices=["DAILY16", "NIGHTLY23"])
+    c.add_argument(
+        "--cycle",
+        required=True,
+        choices=["HOURLY", "DEEP4H", "DAILY16", "NIGHTLY23"],
+    )
     c.add_argument("--ttl-min", type=int, default=DEFAULT_LEASE_MIN)
     c.add_argument("--github-output")
 
     m = sub.add_parser("mark")
     m.add_argument("--run-key", required=True)
-    m.add_argument("--cycle", required=True, choices=["HOURLY", "DEEP4H", "DAILY16", "NIGHTLY23"])
+    m.add_argument(
+        "--cycle",
+        required=True,
+        choices=["HOURLY", "DEEP4H", "DAILY16", "NIGHTLY23"],
+    )
+    m.add_argument("--lease-token", required=True)
     m.add_argument("--source", default="self-healing")
 
     args = p.parse_args()
+
     if args.cmd == "plan":
         cmd_plan(args)
     elif args.cmd == "claim":
