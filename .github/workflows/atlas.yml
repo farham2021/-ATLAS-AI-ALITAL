@@ -1,8 +1,15 @@
-name: ATLAS AI Phase 3.11.15 Fail-open Reports + RPC Lease
+name: ATLAS AI Phase 3.11.16 Nightly Safety Wake-up + RPC Lease
 
 on:
   schedule:
+    # Existing heartbeat — unchanged. DAILY16 behavior remains exactly as before.
     - cron: "3,13,23,33,43,53 * * * *"
+
+    # Extra NIGHTLY23 safety wake-ups.
+    # GitHub cron is UTC.
+    # 20:05 UTC = 23:35 Tehran
+    # 20:25 UTC = 23:55 Tehran
+    - cron: "5,25 20 * * *"
 
   workflow_dispatch:
     inputs:
@@ -310,7 +317,11 @@ jobs:
           LEASE_TOKEN: ${{ steps.claim.outputs.lease_token }}
         run: |
           set -euo pipefail
-          python atlas_schedule_guard.py mark --run-key "$RUN_KEY" --cycle "$MODE" --lease-token "$LEASE_TOKEN" --source self-healing \
+          python atlas_schedule_guard.py mark \
+            --run-key "$RUN_KEY" \
+            --cycle "$MODE" \
+            --lease-token "$LEASE_TOKEN" \
+            --source self-healing \
           || echo "::warning::Report ran successfully but scheduler mark failed; next heartbeat may retry."
 
       - name: Force-done after fail-open run
