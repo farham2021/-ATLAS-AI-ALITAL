@@ -14270,13 +14270,29 @@ def main():
         # Automatic Summer Book Scan: run on every Deep4H cycle, including DAILY16.
         # It is additive only and does not replace/short-circuit the core ATLAS pipeline.
         # Telegram is sent only when an excellent strict 4H+1D setup exists (default).
+        book_scan_result = None
         if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
             try:
                 with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
-                    run_summer_book_scan_auto()
+                    book_scan_result = run_summer_book_scan_auto()
             except Exception as e:
                 append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
+
+        # DEEP4H visual policy: send the dashboard only when the strict Book Scan
+        # confirms at least one excellent 4H+1D opportunity. DAILY16 keeps its
+        # existing always-on visual dashboard path above; NIGHTLY23 is untouched.
+        if deep_cycle and not daily_cycle and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent"):
+            try:
+                with _AtlasTimer("ATLAS VISUAL DASHBOARD DEEP4H EXCELLENT"):
+                    visual_sent, visual_errors = send_atlas_visual_dashboard(scoped_results, btc_regime=btc_regime)
+                print(f"🖼 DEEP4H excellent visual dashboard: sent={visual_sent}, errors={len(visual_errors)}")
+                if visual_errors:
+                    for _err in visual_errors[:3]:
+                        print(f"⚠️ DEEP4H visual dashboard: {_err}")
+            except Exception as e:
+                append_changelog("VISUAL_DASHBOARD_DEEP4H", None, None, str(e))
+                print(f"⚠️ DEEP4H visual dashboard failed non-fatally: {e}")
 
         print(f"\n{'='*50}")
         print("📊 PHASE 3.11 SUMMARY")
