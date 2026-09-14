@@ -9373,6 +9373,203 @@ def send_atlas_visual_dashboard(results, btc_regime=None):
     return sent, errors
 
 
+
+# ============================================================
+# ATLAS PERSONAL PORTFOLIO DASHBOARDS — MULTI-USER / FAIL-SOFT
+# ============================================================
+# Public market dashboard goes to the bot's main private chat + group.
+# Each Desk user receives only their own portfolio dashboard in private DM.
+# This layer is read-only: it does not calculate/overwrite canonical decisions,
+# Entry/SL/TP, holdings, capital, or scheduler state.
+
+ATLAS_PERSONAL_DASHBOARDS_ENABLED = _parse_bool(
+    os.environ.get("ATLAS_PERSONAL_DASHBOARDS", "1")
+)
+
+
+def _portfolio_result_map(results):
+    out = {}
+    for r in list(results or []):
+        sym = _atlas_visual_label(r)
+        if sym and sym != "?":
+            out[sym] = r
+    return out
+
+
+def build_personal_portfolio_dashboard(user, holdings, results, filename=None):
+    """Render one user's Desk holdings against the already-computed ATLAS state."""
+    if not ENABLE_IMAGE_TABLE or not ATLAS_PERSONAL_DASHBOARDS_ENABLED:
+        return None
+    bag = {str(k).upper(): float(v) for k, v in (holdings or {}).items() if _atlas_visual_num(v, 0.0) > 0}
+    if not bag:
+        return None
+
+    uid = str((user or {}).get("user_id") or "user")
+    if not filename:
+        safe_uid = "".join(ch for ch in uid if ch.isalnum() or ch in ("-", "_"))[:40] or "user"
+        filename = f"atlas_portfolio_{safe_uid}.png"
+
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+        from matplotlib.patches import Rectangle
+
+        if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            fm.fontManager.addfont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            plt.rcParams["font.family"] = "DejaVu Sans"
+
+        result_map = _portfolio_result_map(results)
+        rows = []
+        marked_total = 0.0
+        for coin in sorted(bag):
+            qty = bag[coin]
+            r = result_map.get(coin) or {}
+            price = _atlas_visual_price(r)
+            value = qty * price if price > 0 else 0.0
+            marked_total += value
+            rows.append({
+                "coin": coin,
+                "qty": qty,
+                "price": price,
+                "value": value,
+                "decision": _atlas_visual_decision(r),
+                "confidence": _atlas_visual_num(r.get("confidence"), 0.0),
+                "entry": r.get("entry"),
+                "sl": r.get("sl"),
+                "tp1": r.get("tp1"),
+            })
+
+        equity = _atlas_visual_num((user or {}).get("equity_usdt"), 0.0)
+        risk_usdt = equity * 0.015 if equity > 0 else 0.0
+        dt = now_tehran()
+        first_name = str((user or {}).get("first_name") or "ATLAS User").strip() or "ATLAS User"
+
+        fig = plt.figure(figsize=(15.5, 8.8), facecolor="#081522")
+        gs = fig.add_gridspec(10, 20, left=.035, right=.975, top=.91, bottom=.07, wspace=.7, hspace=.9)
+
+        def panel(spec, title):
+            ax = fig.add_subplot(spec)
+            ax.set_facecolor("#0D2235")
+            for sp in ax.spines.values():
+                sp.set_color("#21445F")
+            ax.tick_params(colors="#B8C7D6")
+            ax.set_title(title, loc="left", color="#EAF4FF", fontsize=12, weight="bold", pad=8)
+            return ax
+
+        fig.text(.035, .958, "ATLAS AI • PERSONAL PORTFOLIO", color="#5DB7FF", fontsize=24, weight="bold", va="top")
+        fig.text(.975, .958, f"{shamsi(dt)} | {dt.strftime('%H:%M')} Tehran", color="#CFE5F7", fontsize=10, ha="right", va="top")
+        fig.text(.035, .925, f"Private Desk for {first_name}", color="#9DB7CC", fontsize=10, va="top")
+
+        ax0 = panel(gs[0:3, 0:20], "PORTFOLIO SUMMARY")
+        ax0.axis("off")
+        cards = [
+            ("Registered capital", f"{equity:,.2f} USDT" if equity > 0 else "Not set"),
+            ("Risk / trade", f"{risk_usdt:,.2f} USDT" if equity > 0 else "-"),
+            ("Holdings", str(len(rows))),
+            ("Marked value", f"{marked_total:,.2f} USDT" if marked_total > 0 else "N/A"),
+        ]
+        for i, (label, value) in enumerate(cards):
+            x = .02 + i * .245
+            ax0.add_patch(Rectangle((x, .22), .225, .56, transform=ax0.transAxes, facecolor="#102C43", edgecolor="#28516D", lw=1.1))
+            ax0.text(x+.02, .62, label, transform=ax0.transAxes, color="#9DB7CC", fontsize=9.5)
+            ax0.text(x+.02, .38, value, transform=ax0.transAxes, color="#EAF4FF", fontsize=15, weight="bold")
+
+        ax1 = panel(gs[3:10, 0:20], "YOUR HOLDINGS • CURRENT ATLAS STATE")
+        ax1.axis("off")
+        headers = ["Asset", "Qty", "Price", "Value", "Decision", "Conf.", "Entry", "SL", "TP1"]
+        table_rows = []
+        for row in rows:
+            table_rows.append([
+                row["coin"],
+                fmtQty(row["qty"]) if "fmtQty" in globals() else f"{row['qty']:.6g}",
+                _fmt_price(row["price"]) if row["price"] > 0 else "-",
+                f"${row['value']:,.2f}" if row["value"] > 0 else "-",
+                row["decision"][:14],
+                f"{row['confidence']:.0f}",
+                fmt(row["entry"]) if row["entry"] is not None else "-",
+                fmt(row["sl"]) if row["sl"] is not None else "-",
+                fmt(row["tp1"]) if row["tp1"] is not None else "-",
+            ])
+
+        tbl = ax1.table(
+            cellText=[headers] + table_rows,
+            loc="center",
+            cellLoc="center",
+            colWidths=[.08,.10,.12,.12,.15,.08,.11,.11,.11],
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1, 1.7)
+        for (ri, cj), cell in tbl.get_celld().items():
+            cell.set_edgecolor("#21445F")
+            if ri == 0:
+                cell.set_facecolor("#17344C")
+                cell.set_text_props(color="white", weight="bold")
+            else:
+                cell.set_facecolor("#0F283C" if ri % 2 else "#102F46")
+                cell.set_text_props(color="#E8F2F8")
+                if cj == 4:
+                    d = table_rows[ri-1][4]
+                    if "BUY" in d or "LONG" in d:
+                        cell.set_facecolor("#145C42")
+                    elif "SELL" in d or "SHORT" in d:
+                        cell.set_facecolor("#6A2930")
+                    elif "WATCH" in d:
+                        cell.set_facecolor("#6A5520")
+
+        fig.text(.035, .025, "Private • holdings from ATLAS Desk • signals are read-only canonical ATLAS state", color="#6F93AD", fontsize=8.5)
+        plt.savefig(filename, dpi=170, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        return filename
+    except Exception as e:
+        print(f"⚠️ Personal portfolio dashboard generation failed for {uid}: {e}")
+        return None
+
+
+def send_all_personal_portfolio_dashboards(results):
+    """Send each Desk user only their own holdings dashboard. Fully fail-soft."""
+    if not ENABLE_IMAGE_TABLE or not ATLAS_PERSONAL_DASHBOARDS_ENABLED:
+        return {"users": 0, "sent": 0, "skipped": 0, "errors": []}
+    try:
+        from atlas_desk import load_users, load_all_holdings
+        users = load_users() or {}
+        all_holdings = load_all_holdings() or {}
+    except Exception as e:
+        return {"users": 0, "sent": 0, "skipped": 0, "errors": [f"desk load: {e}"]}
+
+    sent = 0
+    skipped = 0
+    errors = []
+    eligible = 0
+    for uid, user in users.items():
+        try:
+            chat_id = str((user or {}).get("chat_id") or "").strip()
+            dm_started = bool((user or {}).get("dm_started"))
+            bag = (all_holdings or {}).get(str(uid), {}) or {}
+            if not chat_id or not dm_started or not bag:
+                skipped += 1
+                continue
+            eligible += 1
+            filename = build_personal_portfolio_dashboard(user, bag, results)
+            if not filename:
+                skipped += 1
+                continue
+            caption = f"💼 ATLAS Personal Portfolio | {shamsi(now_tehran())} {now_tehran().strftime('%H:%M')} Tehran"
+            try:
+                if _telegram_send_photo_file(chat_id, filename, caption):
+                    sent += 1
+                else:
+                    errors.append(f"{uid}: send returned false")
+            finally:
+                try:
+                    os.unlink(filename)
+                except Exception:
+                    pass
+        except Exception as e:
+            errors.append(f"{uid}: {e}")
+    return {"users": eligible, "sent": sent, "skipped": skipped, "errors": errors}
+
+
 def _fmt_price(value):
     """فرمت کردن قیمت"""
     if value is None:
@@ -14105,224 +14302,4 @@ def main():
 
         # Atlas Desk: pick up /capital from Telegram before analysis reports fire.
         try:
-            from atlas_desk import ingest_telegram_commands, desk_enabled
-            if desk_enabled():
-                ingest_telegram_commands(sender=telegram_send_one)
-        except Exception as e:
-            print(f"⚠️ Atlas Desk ingest failed non-fatally: {e}")
-
-        print("🔍 Starting scoped ANALYSIS (Top10 + Personal)...")
-        with _AtlasTimer("FULL CORE REPORT()"):
-            text, results, macro, news, market_info, unavailable = report()
-        # Hard safety barrier: even if a dormant legacy path ever returns an
-        # outsider, it is removed before intelligence, persistence or delivery.
-        results = _atlas_exact_scope_results(results, include_metals=False)
-        print(f"✅ Crypto analysis complete: {len(results)} exact-scope results, {unavailable} unavailable")
-
-        with _AtlasTimer("POST-REPORT INTELLIGENCE"):
-            results = [v11_apply_intelligence(r) for r in results]
-            top10, dynamic30 = list(_LAST_TOP10), []
-            btc_regime = btc_market_regime()
-            breadth = market_breadth(results)
-
-        with _AtlasTimer("Evidence + MTF + Risk + Lifecycle"):
-            results = apply_evidence_fusion(results, news)
-            results = apply_mtf_confirmation(results)
-            persist_mtf_snapshots(results)
-            portfolio_risk = build_portfolio_risk_intelligence(results, top10)
-            results = apply_portfolio_risk_context(results, portfolio_risk)
-            lifecycle_events = update_signal_lifecycle(results, top10)
-            results = apply_phase34_research_shadow(results)
-            persist_phase34_research_features(results)
-
-        # Metals keep their existing dedicated analytical pipeline. No crypto
-        # formula is transplanted onto metals; this avoids quality-distorting
-        # cross-asset assumptions while still producing hourly BUY/SELL/WAIT.
-        with _AtlasTimer("PHASE37 METALS"):
-            metal_results = []
-            for metal in ATLAS_METALS:
-                mr = _metal_analysis(metal)
-                try:
-                    mr = v11_apply_intelligence(mr)
-                except Exception as e:
-                    append_changelog("PHASE37_METAL_INTEL", metal, None, str(e))
-                metal_results.append(mr)
-
-        scoped_results = _atlas_exact_scope_results(list(results) + metal_results, include_metals=True)
-
-        # Keep Free Alert detection/persistence for observability, but never send
-        # it to Telegram under Phase 3.7 policy.
-        with _AtlasTimer("FREE ALERT ENGINE STORAGE"):
-            free_alert_events = build_free_alert_events(results)
-            stored_alerts = _p37_store_free_alerts_silently(free_alert_events)
-        print(f"🚨 Free Alert events stored silently: {stored_alerts}")
-
-        with _AtlasTimer("PHASE37 HOURLY SUPABASE"):
-            hourly_count, hourly_ok = persist_phase37_snapshots(scoped_results, top10, deep=False)
-        print(f"🗃 Hourly signal snapshots: {hourly_count}, Supabase OK={hourly_ok}")
-
-        # Rare market-move guard: BTC/ETH/SOL/ADA/ZEC/XRP only. It reuses the
-        # prices already produced above, persists its hourly watch state, and
-        # can send at most one terse alert per cycle under strict guards.
-        with _AtlasTimer("PHASE371 RARE MARKET ALERT"):
-            rare_alert = process_phase38_market_guard(results)
-        print(f"🚨 Rare market alert: {rare_alert}")
-
-        if deep_cycle:
-            with _AtlasTimer("PHASE37 DEEP4H SUPABASE"):
-                deep_count, deep_ok = persist_phase37_snapshots(scoped_results, top10, deep=True)
-            print(f"🧠 Deep 4H snapshots: {deep_count}, Supabase OK={deep_ok}")
-
-        # Preserve internal history/persistence. No Telegram report/file/audio/image.
-        with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
-            _save_snapshot_history(results, now_tehran().isoformat())
-        atlas_flush_persistent_ohlcv()
-        with _AtlasTimer("FINAL PERSISTENCE"):
-            save_context(macro, news, market_liquidity_index(results), market_info)
-            save_run(results, 0, macro, news, unavailable)
-
-        if daily_cycle:
-            try:
-                telegram_preflight()
-            except Exception as e:
-                print(f"⚠️ Telegram preflight failed; daily send will still retry: {e}")
-            with _AtlasTimer("PHASE310 FULL DAILY16 DELIVERY"):
-                sent, errors, parts = _phase310_send_full_daily16(
-                    results, scoped_results, top10, macro, news, btc_regime, portfolio_risk
-                )
-            total_sent += sent
-            all_errors.extend(errors)
-            print(f"📨 FULL Daily16: summary_parts={parts}, total_sent={sent}, errors={len(errors)}")
-            if sent == 0:
-                raise RuntimeError("Daily16 FULL Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
-
-            # Additive visual dashboard. Never allowed to fail DAILY16.
-            try:
-                with _AtlasTimer("ATLAS VISUAL DASHBOARD"):
-                    visual_sent, visual_errors = send_atlas_visual_dashboard(scoped_results, btc_regime=btc_regime)
-                print(f"🖼 ATLAS visual dashboard: sent={visual_sent}, errors={len(visual_errors)}")
-                if visual_errors:
-                    for _err in visual_errors[:3]:
-                        print(f"⚠️ Visual dashboard: {_err}")
-            except Exception as e:
-                append_changelog("VISUAL_DASHBOARD", None, None, str(e))
-                print(f"⚠️ Visual dashboard failed non-fatally: {e}")
-        elif nightly_cycle and ATLAS_NIGHTLY_BRIEF_ENABLED:
-            try:
-                telegram_preflight()
-            except Exception as e:
-                print(f"⚠️ Telegram preflight failed; nightly send will still retry: {e}")
-            with _AtlasTimer("PHASE39 NIGHTLY23 BRIEF"):
-                nightly_text = build_phase39_nightly_brief(scoped_results, btc_regime)
-                parts, sent, errors = send_report(nightly_text)
-            total_sent += sent
-            all_errors.extend(errors)
-            print(f"🌙 Nightly23 brief: parts={parts}, sent={sent}, errors={len(errors)}")
-            if sent == 0:
-                raise RuntimeError("Nightly23 Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
-        else:
-            print("🔕 Storage-only cycle complete; no Telegram message by design.")
-
-        # Execution layer (paper by default). Read-only on canonical decision fields.
-        # Does not mutate Entry/SL/TP or decision_state. Live orders stay dark
-        # unless the triple lock in atlas_execution.live_locks_open() is set.
-        if deep_cycle or daily_cycle:
-            try:
-                with _AtlasTimer("EXECUTION LAYER"):
-                    from atlas_execution import run_execution_cycle
-                    exec_payload = run_execution_cycle(
-                        scoped_results,
-                        backtest_ok=globals().get("_LAST_BACKTEST_OK", True),
-                        sender=telegram_send_one,
-                        send_telegram=bool(daily_cycle),
-                    )
-                    print(
-                        "⚙️ Execution:",
-                        "mode=", exec_payload.get("mode"),
-                        "accepted=", len(exec_payload.get("accepted") or []),
-                        "rejected=", len(exec_payload.get("rejected") or []),
-                        "tg=", exec_payload.get("telegram_sent"),
-                    )
-            except Exception as e:
-                append_changelog("EXECUTION_LAYER", None, None, str(e))
-                print(f"⚠️ Execution layer failed non-fatally: {e}")
-
-        # Atlas Desk: sized entry/exit cards for the personal list using stored USDT capital.
-        try:
-            from atlas_desk import run_desk_cycle
-            with _AtlasTimer("ATLAS DESK"):
-                desk_payload = run_desk_cycle(
-                    scoped_results,
-                    personal_symbols=list(ATLAS_PERSONAL_ASSETS),
-                    sender=telegram_send_one,
-                    send_report=True,
-                )
-            print(
-                "💼 Desk:",
-                "entries=", (desk_payload.get("stats") or {}).get("entries"),
-                "equity=", (desk_payload.get("stats") or {}).get("equity"),
-                "tg=", desk_payload.get("telegram_sent"),
-            )
-        except Exception as e:
-            append_changelog("ATLAS_DESK", None, None, str(e))
-            print(f"⚠️ Atlas Desk failed non-fatally: {e}")
-
-        # Automatic Summer Book Scan: run on every Deep4H cycle, including DAILY16.
-        # It is additive only and does not replace/short-circuit the core ATLAS pipeline.
-        # Telegram is sent only when an excellent strict 4H+1D setup exists (default).
-        book_scan_result = None
-        if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
-            try:
-                with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
-                    book_scan_result = run_summer_book_scan_auto()
-            except Exception as e:
-                append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
-                print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
-
-        # DEEP4H visual policy: send the dashboard only when the strict Book Scan
-        # confirms at least one excellent 4H+1D opportunity. DAILY16 keeps its
-        # existing always-on visual dashboard path above; NIGHTLY23 is untouched.
-        if deep_cycle and not daily_cycle and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent"):
-            try:
-                with _AtlasTimer("ATLAS VISUAL DASHBOARD DEEP4H EXCELLENT"):
-                    visual_sent, visual_errors = send_atlas_visual_dashboard(scoped_results, btc_regime=btc_regime)
-                print(f"🖼 DEEP4H excellent visual dashboard: sent={visual_sent}, errors={len(visual_errors)}")
-                if visual_errors:
-                    for _err in visual_errors[:3]:
-                        print(f"⚠️ DEEP4H visual dashboard: {_err}")
-            except Exception as e:
-                append_changelog("VISUAL_DASHBOARD_DEEP4H", None, None, str(e))
-                print(f"⚠️ DEEP4H visual dashboard failed non-fatally: {e}")
-
-        print(f"\n{'='*50}")
-        print("📊 PHASE 3.11 SUMMARY")
-        print(f"  Scoped assets: {len(scoped_results)}")
-        print(f"  Hourly persisted: {hourly_count}")
-        print(f"  Deep4H cycle: {deep_cycle}")
-        print(f"  Daily16 sent parts: {total_sent}")
-        print(f"  Errors: {len(all_errors)}")
-        print(f"{'='*50}\n")
-        return 0
-    except Exception as e:
-        tb = traceback.format_exc()
-        append_changelog("FATAL", None, None, str(e), {"traceback": tb})
-        print(f"{VERSION} ERROR: {e}")
-        print(tb)
-        # Failure alert is intentionally retained: operational failure is not
-        # a market report and must remain visible for reliability.
-        try:
-            if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
-                for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-                    if destination:
-                        try:
-                            telegram_send_one(destination, alert)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+            from atlas_desk impo
