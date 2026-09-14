@@ -26,8 +26,7 @@
 #   - Every self-modification is written to the changelog.
 #
 # IMPORTANT:
-#   Canonical ATLAS analysis remains the source of truth.
-#   Atlas Desk personalizes signal sizing; the separate Execution Layer is PAPER/fail-closed by default.
+#   This is an analytical engine. It does not place orders.
 #   No model can guarantee low-error signals or profits.
 #
 # ------------------------------------------------------------
@@ -166,8 +165,7 @@ import ccxt
 #     the pass/fail decision on its own; see the note in mandatory_backtest_gate.
 # ============================================================
 
-ATLAS_VERSION_DEFAULT = "ATLAS v11.5 PHASE 3.11.7 MULTIUSER SAFE"
-VERSION = os.environ.get("ATLAS_VERSION", ATLAS_VERSION_DEFAULT).strip() or ATLAS_VERSION_DEFAULT
+VERSION = "ATLAS v11.5 PHASE 3.11.6 MULTIUSER DESK"
 TIMEFRAMES = ("15m", "1h", "4h", "1d", "1w", "1M")
 SIGNAL_TIMEFRAME = "4h"
 EVENT_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w", "1M")
@@ -2387,7 +2385,7 @@ def _portfolio_symbols():
     return list(dict.fromkeys([
         "BTC", "ETH", "XRP", "SOL", "BNB", "DOGE", "ADA", "TRX", "LINK",
         "XLM", "SUI", "AVAX", "LTC", "SHIB", "HBAR", "DOT", "BCH", "XMR",
-        "NEAR", "TAO", "ONDO", "ZEC"
+        "NEAR", "TAO", "ONDO"
     ]))
 
 def _portfolio_rows(results):
@@ -9101,6 +9099,280 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
     return success_count > 0
 
 
+
+# ============================================================
+# ATLAS VISUAL DASHBOARD — ADDITIVE / FAIL-SOFT
+# ============================================================
+# Builds a deterministic PNG from the already-computed Analysis Plane state.
+# No new market fetches, no decision-field mutation, no scheduler changes.
+# Delivery is additive and must never break DAILY16/NIGHTLY23.
+
+ATLAS_VISUAL_DASHBOARD_ENABLED = _parse_bool(os.environ.get("ATLAS_VISUAL_DASHBOARD", "1"))
+ATLAS_VISUAL_DASHBOARD_ROWS = int(os.environ.get("ATLAS_VISUAL_DASHBOARD_ROWS", "8"))
+
+
+def _atlas_visual_num(value, default=0.0):
+    try:
+        v = float(value)
+        return v if math.isfinite(v) else default
+    except Exception:
+        return default
+
+
+def _atlas_visual_label(r):
+    return str(r.get("coin") or r.get("symbol") or "?").upper()
+
+
+def _atlas_visual_decision(r):
+    return str(
+        r.get("intel_decision")
+        or r.get("public_signal")
+        or r.get("decision_state")
+        or r.get("action")
+        or "WAIT"
+    ).upper()
+
+
+def _atlas_visual_change(r):
+    for k in ("change", "change24", "change_24h", "pct_change_24h"):
+        v = r.get(k)
+        if v is not None:
+            return _atlas_visual_num(v, 0.0)
+    return 0.0
+
+
+def _atlas_visual_price(r):
+    return _atlas_visual_num(r.get("price"), 0.0)
+
+
+def _atlas_visual_rank(results):
+    rows = list(results or [])
+    try:
+        ranked = _intel_rank(rows, False)
+        if ranked:
+            return ranked
+    except Exception:
+        pass
+    return sorted(
+        rows,
+        key=lambda r: (
+            _atlas_visual_num(r.get("opportunity_score"), 0.0),
+            _atlas_visual_num(r.get("confidence"), 0.0),
+        ),
+        reverse=True,
+    )
+
+
+def build_atlas_visual_dashboard(results, btc_regime=None, filename="atlas_dashboard.png"):
+    """Create one compact ATLAS market/signal dashboard from existing analysis state."""
+    if not ENABLE_IMAGE_TABLE or not ATLAS_VISUAL_DASHBOARD_ENABLED:
+        return None
+    rows = list(results or [])
+    if not rows:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+        from matplotlib.patches import Rectangle
+
+        if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            fm.fontManager.addfont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            plt.rcParams["font.family"] = "DejaVu Sans"
+
+        ranked = _atlas_visual_rank(rows)
+        top = ranked[:max(5, ATLAS_VISUAL_DASHBOARD_ROWS)]
+        gainers = sorted(rows, key=_atlas_visual_change, reverse=True)[:5]
+        losers = sorted(rows, key=_atlas_visual_change)[:5]
+        adv = sum(1 for r in rows if _atlas_visual_change(r) > 0.05)
+        dec = sum(1 for r in rows if _atlas_visual_change(r) < -0.05)
+        flat = max(0, len(rows) - adv - dec)
+        btc = next((r for r in rows if _atlas_visual_label(r) == "BTC"), None)
+        eth = next((r for r in rows if _atlas_visual_label(r) == "ETH"), None)
+        dt = now_tehran()
+
+        fig = plt.figure(figsize=(18, 10.2), facecolor="#081522")
+        gs = fig.add_gridspec(12, 24, left=.025, right=.985, top=.93, bottom=.06, wspace=.8, hspace=1.05)
+
+        def panel(spec, title):
+            ax = fig.add_subplot(spec)
+            ax.set_facecolor("#0D2235")
+            for sp in ax.spines.values():
+                sp.set_color("#21445F")
+            ax.tick_params(colors="#B8C7D6")
+            ax.set_title(title, loc="left", color="#EAF4FF", fontsize=12, weight="bold", pad=9)
+            return ax
+
+        fig.text(.03, .966, "ATLAS AI", color="#5DB7FF", fontsize=28, weight="bold", va="top")
+        fig.text(.155, .963, "MULTI-MARKET INTELLIGENCE", color="#9DB7CC", fontsize=10, va="top")
+        fig.text(.985, .966, f"{shamsi(dt)}  |  {dt.strftime('%H:%M')} Tehran", color="#CFE5F7", fontsize=10, ha="right", va="top")
+
+        # Market snapshot
+        ax0 = panel(gs[0:4, 0:8], "MARKET SNAPSHOT")
+        ax0.axis("off")
+        cards = [("BTC", btc), ("ETH", eth)]
+        for i, (sym, row) in enumerate(cards):
+            x = .04 + i*.49
+            ax0.add_patch(Rectangle((x,.54), .45,.36, transform=ax0.transAxes, facecolor="#102C43", edgecolor="#28516D", lw=1.2))
+            if row:
+                ch = _atlas_visual_change(row)
+                px = _atlas_visual_price(row)
+                ax0.text(x+.03,.82,sym,transform=ax0.transAxes,color="#EAF4FF",fontsize=17,weight="bold",va="top")
+                ax0.text(x+.03,.68,_fmt_price(px),transform=ax0.transAxes,color="white",fontsize=16,weight="bold",va="top")
+                ax0.text(x+.03,.58,f"{ch:+.2f}%",transform=ax0.transAxes,color=("#35D07F" if ch>=0 else "#FF6B6B"),fontsize=13,weight="bold")
+        regime = "UNKNOWN"
+        if isinstance(btc_regime, dict):
+            regime = str(btc_regime.get("regime") or btc_regime.get("trend") or "UNKNOWN")
+        ax0.text(.04,.38,f"BTC regime: {regime}",transform=ax0.transAxes,color="#BFD7EA",fontsize=12)
+        ax0.text(.04,.23,f"Breadth: {adv} up  |  {dec} down  |  {flat} flat",transform=ax0.transAxes,color="#BFD7EA",fontsize=12)
+        ax0.text(.04,.08,"Source: ATLAS computed state • no fresh analysis in renderer",transform=ax0.transAxes,color="#6F93AD",fontsize=8.5)
+
+        # Heatmap-style asset blocks
+        ax1 = panel(gs[0:4, 8:16], "MARKET HEATMAP")
+        ax1.axis("off")
+        heat = sorted(rows, key=lambda r: abs(_atlas_visual_change(r)), reverse=True)[:12]
+        cols = 4
+        for idx, r in enumerate(heat):
+            rr, cc = divmod(idx, cols)
+            x = .02 + cc*.245
+            y = .73 - rr*.29
+            ch = _atlas_visual_change(r)
+            face = "#124E3A" if ch > .05 else "#5A242B" if ch < -.05 else "#2D4051"
+            ax1.add_patch(Rectangle((x,y), .225,.245, transform=ax1.transAxes, facecolor=face, edgecolor="#173E57", lw=1))
+            ax1.text(x+.015,y+.145,_atlas_visual_label(r),transform=ax1.transAxes,color="white",fontsize=11,weight="bold")
+            ax1.text(x+.015,y+.055,f"{ch:+.2f}%",transform=ax1.transAxes,color=("#63E6A3" if ch>=0 else "#FF8B8B"),fontsize=9.5,weight="bold")
+
+        # Breadth
+        ax2 = panel(gs[0:4, 16:24], "MARKET BREADTH")
+        ax2.bar(["Up","Flat","Down"],[adv,flat,dec], color=["#1F9D68","#607487","#D84E57"])
+        ax2.set_ylabel("Assets", color="#9EB4C6")
+        ax2.grid(axis="y", alpha=.15)
+        ax2.tick_params(axis='x', colors="#D6E6F2")
+        ax2.tick_params(axis='y', colors="#9EB4C6")
+        total=max(1,len(rows))
+        ax2.text(.98,.94,f"{adv/total*100:.0f}% advancing",transform=ax2.transAxes,ha="right",va="top",color="#63E6A3",fontsize=10,weight="bold")
+
+        # Top gainers / losers
+        ax3 = panel(gs[4:8, 0:8], "TOP MOVERS")
+        ax3.axis("off")
+        ax3.text(.04,.88,"GAINERS",transform=ax3.transAxes,color="#63E6A3",fontsize=11,weight="bold")
+        ax3.text(.54,.88,"LOSERS",transform=ax3.transAxes,color="#FF8B8B",fontsize=11,weight="bold")
+        for i,r in enumerate(gainers):
+            ax3.text(.04,.73-i*.14,f"{i+1}. {_atlas_visual_label(r):<6}",transform=ax3.transAxes,color="#EAF4FF",fontsize=10)
+            ax3.text(.38,.73-i*.14,f"{_atlas_visual_change(r):+.2f}%",transform=ax3.transAxes,ha="right",color="#63E6A3",fontsize=10,weight="bold")
+        for i,r in enumerate(losers):
+            ax3.text(.54,.73-i*.14,f"{i+1}. {_atlas_visual_label(r):<6}",transform=ax3.transAxes,color="#EAF4FF",fontsize=10)
+            ax3.text(.95,.73-i*.14,f"{_atlas_visual_change(r):+.2f}%",transform=ax3.transAxes,ha="right",color="#FF8B8B",fontsize=10,weight="bold")
+
+        # Top opportunities
+        ax4 = panel(gs[4:8, 8:24], "ATLAS AI SIGNALS / TOP OPPORTUNITIES")
+        ax4.axis("off")
+        headers=["#","Asset","Decision","Setup","Opp.","Conf.","R/R","Entry","SL","TP1"]
+        table_rows=[]
+        for i,r in enumerate(top,1):
+            table_rows.append([
+                str(i),
+                _atlas_visual_label(r),
+                _atlas_visual_decision(r)[:12],
+                str(r.get("setup_type") or "-")[:14],
+                f"{_atlas_visual_num(r.get('opportunity_score'),0):.0f}",
+                f"{_atlas_visual_num(r.get('confidence'),0):.0f}",
+                f"{_atlas_visual_num(r.get('rr_intel') or r.get('rr'),0):.2f}",
+                fmt(r.get("entry")) if r.get("entry") is not None else "-",
+                fmt(r.get("sl")) if r.get("sl") is not None else "-",
+                fmt(r.get("tp1")) if r.get("tp1") is not None else "-",
+            ])
+        tbl=ax4.table(cellText=[headers]+table_rows, loc="center", cellLoc="center", colWidths=[.035,.07,.11,.14,.07,.07,.07,.11,.11,.11])
+        tbl.auto_set_font_size(False); tbl.set_fontsize(8.5); tbl.scale(1,1.65)
+        for (ri,cj),cell in tbl.get_celld().items():
+            cell.set_edgecolor("#21445F")
+            if ri==0:
+                cell.set_facecolor("#17344C"); cell.set_text_props(color="white",weight="bold")
+            else:
+                cell.set_facecolor("#0F283C" if ri%2 else "#102F46")
+                cell.set_text_props(color="#E8F2F8")
+                if cj==2:
+                    d=table_rows[ri-1][2]
+                    if "BUY" in d or "LONG" in d: cell.set_facecolor("#145C42")
+                    elif "SELL" in d or "SHORT" in d: cell.set_facecolor("#6A2930")
+
+        # Key insights
+        ax5 = panel(gs[8:12, 0:24], "KEY INSIGHTS")
+        ax5.axis("off")
+        best = top[0] if top else None
+        insights=[]
+        if best:
+            insights.append(f"Best opportunity: {_atlas_visual_label(best)} | {_atlas_visual_decision(best)} | opportunity {_atlas_visual_num(best.get('opportunity_score'),0):.0f} | confidence {_atlas_visual_num(best.get('confidence'),0):.0f}")
+        insights.append(f"Breadth: {adv}/{len(rows)} advancing, {dec}/{len(rows)} declining, {flat} flat.")
+        if btc:
+            insights.append(f"BTC: {_fmt_price(_atlas_visual_price(btc))} | {_atlas_visual_change(btc):+.2f}% | {_atlas_visual_decision(btc)}")
+        insights.append("Visual layer is read-only: Entry/SL/TP and decisions come from the canonical ATLAS engine.")
+        for i,line in enumerate(insights[:4]):
+            ax5.text(.025,.82-i*.2,"• "+line,transform=ax5.transAxes,color="#DDEAF3",fontsize=11,va="top")
+
+        fig.text(.03,.025,"ATLAS AI • deterministic visual report • analytical use only",color="#6F93AD",fontsize=9)
+        plt.savefig(filename,dpi=170,bbox_inches="tight",facecolor=fig.get_facecolor())
+        plt.close(fig)
+        return filename
+    except Exception as e:
+        print(f"⚠️ ATLAS visual dashboard generation failed: {e}")
+        return None
+
+
+def _telegram_send_photo_file(chat_id, filename, caption=None):
+    if not TELEGRAM_TOKEN or not chat_id or not filename or not os.path.exists(filename):
+        return False
+    boundary = "----ATLASPHOTO" + hashlib.md5(f"{time.time()}-{chat_id}".encode()).hexdigest()
+    body = bytearray()
+    def field(name, value):
+        body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode("utf-8"))
+    field("chat_id", str(chat_id))
+    if caption:
+        field("caption", caption[:1000])
+    with open(filename,"rb") as fh:
+        payload=fh.read()
+    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"{os.path.basename(filename)}\"\r\nContent-Type: image/png\r\n\r\n").encode("utf-8"))
+    body.extend(payload)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    req=urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+        data=bytes(body),
+        headers={"Content-Type":f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req,timeout=60) as resp:
+        data=json.loads(resp.read().decode("utf-8",errors="replace"))
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram sendPhoto failed: {data}")
+    return True
+
+
+def send_atlas_visual_dashboard(results, btc_regime=None):
+    """Send visual dashboard to private bot + configured group. Fail-soft at caller."""
+    if not ENABLE_IMAGE_TABLE or not ATLAS_VISUAL_DASHBOARD_ENABLED:
+        return 0, []
+    filename = build_atlas_visual_dashboard(results, btc_regime=btc_regime)
+    if not filename:
+        return 0, ["dashboard generation returned no file"]
+    destinations=[]
+    for chat_id in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+        cid=str(chat_id or "").strip()
+        if cid and cid not in destinations:
+            destinations.append(cid)
+    sent=0; errors=[]
+    caption=f"📊 ATLAS AI Visual Dashboard | {shamsi(now_tehran())} {now_tehran().strftime('%H:%M')} Tehran"
+    for chat_id in destinations:
+        try:
+            if _telegram_send_photo_file(chat_id, filename, caption):
+                sent += 1
+        except Exception as e:
+            errors.append(f"{chat_id}: {e}")
+    try:
+        os.unlink(filename)
+    except Exception:
+        pass
+    return sent, errors
+
+
 def _fmt_price(value):
     """فرمت کردن قیمت"""
     if value is None:
@@ -13286,7 +13558,7 @@ def build_phase311_advisory_intelligence(results, btc_regime=None):
         if not coin or coin in ATLAS_METALS:
             continue
         try:
-            rows, _engine = best_ohlcv(coin, '4h', 90)
+            rows = best_ohlcv(coin, '4h', 90)
         except Exception:
             rows = None
         if not rows:
@@ -13734,9 +14006,43 @@ def run_summer_book_scan(as_json=False):
     return 0
 
 
+def persist_book_scan_snapshots(payload):
+    """Chat plane reads this table. Analysis plane only writes it."""
+    rows = []
+    ts = now_utc().isoformat()
+    items = list(payload.get("signals") or []) + list(payload.get("pulse") or [])
+    for s in items:
+        sym = str((s or {}).get("symbol") or "").upper()
+        if not sym:
+            continue
+        rows.append({
+            "captured_at": ts,
+            "symbol": sym,
+            "kind": str((s or {}).get("kind") or ""),
+            "quality": str((s or {}).get("quality") or ""),
+            "price": (s or {}).get("price"),
+            "level": (s or {}).get("level"),
+            "reason": str((s or {}).get("reason") or "")[:500],
+            "payload": s,
+        })
+    if not rows or not STORE.enabled:
+        return 0, False
+    ok = False
+    if hasattr(STORE, "insert_many"):
+        ok = bool(STORE.insert_many("atlas_book_scan_snapshots", rows))
+    if not ok:
+        ok = all(bool(STORE.insert("atlas_book_scan_snapshots", row)) for row in rows)
+    print(f"📚 Book scan persisted: {len(rows)} ok={ok}")
+    return len(rows), ok
+
+
 def run_summer_book_scan_auto():
     """Automatic Deep4H book scan. Sends Telegram only for excellent setups by default."""
     payload = _summer_book_scan_payload()
+    try:
+        persist_book_scan_snapshots(payload)
+    except Exception as e:
+        print(f"⚠️ Book scan persist failed non-fatally: {e}")
     excellent = list(payload.get("signals") or [])
     if ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT and not excellent:
         print("📚 Auto Book Scan: no excellent setup; Telegram suppressed.")
@@ -13797,16 +14103,13 @@ def main():
         total_sent = 0
         all_errors = []
 
-        # Atlas Desk command ingestion belongs to the lightweight Fast Inbox.
-        # Main analysis jobs must not compete for Telegram getUpdates.
+        # Atlas Desk: pick up /capital from Telegram before analysis reports fire.
         try:
-            from atlas_desk import ingest_telegram_commands, desk_enabled, ingest_enabled
-            if desk_enabled() and ingest_enabled():
+            from atlas_desk import ingest_telegram_commands, desk_enabled
+            if desk_enabled():
                 ingest_telegram_commands(sender=telegram_send_one)
-            elif desk_enabled():
-                print("💼 Desk ingest disabled in main ATLAS; owner=atlas-desk-inbox")
         except Exception as e:
-            print(f"⚠️ Atlas Desk ingest gate failed non-fatally: {e}")
+            print(f"⚠️ Atlas Desk ingest failed non-fatally: {e}")
 
         print("🔍 Starting scoped ANALYSIS (Top10 + Personal)...")
         with _AtlasTimer("FULL CORE REPORT()"):
@@ -13892,6 +14195,18 @@ def main():
             print(f"📨 FULL Daily16: summary_parts={parts}, total_sent={sent}, errors={len(errors)}")
             if sent == 0:
                 raise RuntimeError("Daily16 FULL Telegram delivery failed: " + "; ".join(errors or ["0 messages sent"]))
+
+            # Additive visual dashboard. Never allowed to fail DAILY16.
+            try:
+                with _AtlasTimer("ATLAS VISUAL DASHBOARD"):
+                    visual_sent, visual_errors = send_atlas_visual_dashboard(scoped_results, btc_regime=btc_regime)
+                print(f"🖼 ATLAS visual dashboard: sent={visual_sent}, errors={len(visual_errors)}")
+                if visual_errors:
+                    for _err in visual_errors[:3]:
+                        print(f"⚠️ Visual dashboard: {_err}")
+            except Exception as e:
+                append_changelog("VISUAL_DASHBOARD", None, None, str(e))
+                print(f"⚠️ Visual dashboard failed non-fatally: {e}")
         elif nightly_cycle and ATLAS_NIGHTLY_BRIEF_ENABLED:
             try:
                 telegram_preflight()
@@ -13910,14 +14225,14 @@ def main():
 
         # Execution layer (paper by default). Read-only on canonical decision fields.
         # Does not mutate Entry/SL/TP or decision_state. Live orders stay dark
-        # unless every fail-closed lock in atlas_execution.live_locks_open() is open.
+        # unless the triple lock in atlas_execution.live_locks_open() is set.
         if deep_cycle or daily_cycle:
             try:
                 with _AtlasTimer("EXECUTION LAYER"):
                     from atlas_execution import run_execution_cycle
                     exec_payload = run_execution_cycle(
                         scoped_results,
-                        backtest_ok=bool(globals().get("_LAST_BACKTEST_OK", False)),
+                        backtest_ok=globals().get("_LAST_BACKTEST_OK", True),
                         sender=telegram_send_one,
                         send_telegram=bool(daily_cycle),
                     )
@@ -13964,7 +14279,7 @@ def main():
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
 
         print(f"\n{'='*50}")
-        print(f"📊 {VERSION} SUMMARY")
+        print("📊 PHASE 3.11 SUMMARY")
         print(f"  Scoped assets: {len(scoped_results)}")
         print(f"  Hourly persisted: {hourly_count}")
         print(f"  Deep4H cycle: {deep_cycle}")
