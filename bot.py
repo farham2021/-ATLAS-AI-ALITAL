@@ -9184,7 +9184,7 @@ def _atlas_visual_rank(results):
 
 
 def build_atlas_visual_dashboard(results, btc_regime=None, filename="atlas_dashboard.png"):
-    """Create one compact ATLAS market/signal dashboard from existing analysis state."""
+    """Render a dense, read-only ATLAS dashboard from already-computed/cached state only."""
     if not ENABLE_IMAGE_TABLE or not ATLAS_VISUAL_DASHBOARD_ENABLED:
         return None
     rows = list(results or [])
@@ -9200,143 +9200,167 @@ def build_atlas_visual_dashboard(results, btc_regime=None, filename="atlas_dashb
             plt.rcParams["font.family"] = "DejaVu Sans"
 
         ranked = _atlas_visual_rank(rows)
-        top = ranked[:max(5, ATLAS_VISUAL_DASHBOARD_ROWS)]
+        top = ranked[:max(5, min(8, ATLAS_VISUAL_DASHBOARD_ROWS))]
         gainers = sorted(rows, key=_atlas_visual_change, reverse=True)[:5]
         losers = sorted(rows, key=_atlas_visual_change)[:5]
-        adv = sum(1 for r in rows if _atlas_visual_change(r) > 0.05)
-        dec = sum(1 for r in rows if _atlas_visual_change(r) < -0.05)
+        adv = sum(1 for r in rows if _atlas_visual_change(r) > .05)
+        dec = sum(1 for r in rows if _atlas_visual_change(r) < -.05)
         flat = max(0, len(rows) - adv - dec)
         btc = next((r for r in rows if _atlas_visual_label(r) == "BTC"), None)
         eth = next((r for r in rows if _atlas_visual_label(r) == "ETH"), None)
         dt = now_tehran()
+        regime = "UNKNOWN"
+        if isinstance(btc_regime, dict):
+            regime = str(btc_regime.get("regime") or btc_regime.get("trend") or "UNKNOWN").upper()
 
-        fig = plt.figure(figsize=(18, 10.2), facecolor="#081522")
-        gs = fig.add_gridspec(12, 24, left=.025, right=.985, top=.93, bottom=.06, wspace=.8, hspace=1.05)
+        bg, panel_bg, edge = "#061522", "#0B2133", "#1E4D70"
+        fg, muted, green, red, amber, blue = "#EEF7FF", "#91AFC5", "#35D07F", "#FF6670", "#FFB33A", "#43A9FF"
+        fig = plt.figure(figsize=(18, 10.2), facecolor=bg)
+        gs = fig.add_gridspec(20, 30, left=.018, right=.988, top=.91, bottom=.045, wspace=.65, hspace=.85)
 
         def panel(spec, title):
             ax = fig.add_subplot(spec)
-            ax.set_facecolor("#0D2235")
-            for sp in ax.spines.values():
-                sp.set_color("#21445F")
-            ax.tick_params(colors="#B8C7D6")
-            ax.set_title(title, loc="left", color="#EAF4FF", fontsize=12, weight="bold", pad=9)
+            ax.set_facecolor(panel_bg)
+            for sp in ax.spines.values(): sp.set_color(edge)
+            ax.tick_params(colors=muted, labelsize=8)
+            ax.set_title(title, loc="left", color=fg, fontsize=11, weight="bold", pad=7)
             return ax
 
-        fig.text(.03, .966, "ATLAS AI", color="#5DB7FF", fontsize=28, weight="bold", va="top")
-        fig.text(.155, .963, "MULTI-MARKET INTELLIGENCE", color="#9DB7CC", fontsize=10, va="top")
-        fig.text(.985, .966, f"{shamsi(dt)}  |  {dt.strftime('%H:%M')} Tehran", color="#CFE5F7", fontsize=10, ha="right", va="top")
+        # Header
+        fig.text(.025,.968,"ATLAS AI",color=fg,fontsize=27,weight="bold",va="top")
+        fig.text(.135,.964,"MULTI-MARKET INTELLIGENCE",color=muted,fontsize=9,va="top")
+        fig.text(.35,.964,"DATA   ›   ANALYSIS   ›   DISCIPLINE   ›   BETTER DECISIONS",color=blue,fontsize=9,va="top")
+        fig.text(.985,.968,f"{shamsi(dt)}  |  {dt.strftime('%H:%M')} Tehran",color=fg,fontsize=9,ha="right",va="top")
 
-        # Market snapshot
-        ax0 = panel(gs[0:4, 0:8], "MARKET SNAPSHOT")
-        ax0.axis("off")
-        cards = [("BTC", btc), ("ETH", eth)]
-        for i, (sym, row) in enumerate(cards):
-            x = .04 + i*.49
-            ax0.add_patch(Rectangle((x,.54), .45,.36, transform=ax0.transAxes, facecolor="#102C43", edgecolor="#28516D", lw=1.2))
-            if row:
-                ch = _atlas_visual_change(row)
-                px = _atlas_visual_price(row)
-                ax0.text(x+.03,.82,sym,transform=ax0.transAxes,color="#EAF4FF",fontsize=17,weight="bold",va="top")
-                ax0.text(x+.03,.68,_fmt_price(px),transform=ax0.transAxes,color="white",fontsize=16,weight="bold",va="top")
-                ax0.text(x+.03,.58,f"{ch:+.2f}%",transform=ax0.transAxes,color=("#35D07F" if ch>=0 else "#FF6B6B"),fontsize=13,weight="bold")
-        regime = "UNKNOWN"
-        if isinstance(btc_regime, dict):
-            regime = str(btc_regime.get("regime") or btc_regime.get("trend") or "UNKNOWN")
-        ax0.text(.04,.38,f"BTC regime: {regime}",transform=ax0.transAxes,color="#BFD7EA",fontsize=12)
-        ax0.text(.04,.23,f"Breadth: {adv} up  |  {dec} down  |  {flat} flat",transform=ax0.transAxes,color="#BFD7EA",fontsize=12)
-        ax0.text(.04,.08,"Source: ATLAS computed state • no fresh analysis in renderer",transform=ax0.transAxes,color="#6F93AD",fontsize=8.5)
+        # BTC chart from in-run cache only: never fetch here.
+        axc = panel(gs[0:9,0:15], "BTC / USDT   •   ATLAS CACHED MARKET STRUCTURE")
+        candle_rows = None
+        cache = globals().get("_ATLAS_DATA_CACHE", {}).get("ohlcv", {})
+        for tf in ("4h", "4H", "1h", "1H", "15m"):
+            item = cache.get(("BTC", tf))
+            if isinstance(item, dict) and item.get("rows"):
+                candle_rows = list(item["rows"])[-70:]
+                break
+        if candle_rows and len(candle_rows) >= 10:
+            xs = list(range(len(candle_rows)))
+            closes=[]
+            for i,c in enumerate(candle_rows):
+                try: o,h,l,cl = map(float,(c[1],c[2],c[3],c[4])); closes.append(cl)
+                except Exception: continue
+                col = green if cl >= o else red
+                axc.vlines(i,l,h,color=col,linewidth=.7,alpha=.9)
+                body_low=min(o,cl); body_h=max(abs(cl-o), max(abs(h-l)*.008,1e-12))
+                axc.add_patch(Rectangle((i-.31,body_low),.62,body_h,facecolor=col,edgecolor=col,linewidth=.4))
+            if closes:
+                last=closes[-1]
+                axc.axhline(last,color=fg,ls=":",lw=.8,alpha=.55)
+                axc.text(.985,.96,f"BTC  {_fmt_price(last)}",transform=axc.transAxes,ha="right",va="top",color=fg,fontsize=11,weight="bold")
+            axc.grid(alpha=.10); axc.set_xlim(-1,len(candle_rows)); axc.set_xticks([]); axc.yaxis.tick_right()
+        else:
+            axc.axis("off")
+            px=_atlas_visual_price(btc) if btc else 0
+            axc.text(.5,.57,"BTC cached candles unavailable in this cycle",ha="center",va="center",transform=axc.transAxes,color=muted,fontsize=11)
+            axc.text(.5,.42,_fmt_price(px) if px else "N/A",ha="center",va="center",transform=axc.transAxes,color=fg,fontsize=25,weight="bold")
+            axc.text(.5,.28,"Renderer does not perform a fresh market fetch",ha="center",transform=axc.transAxes,color=muted,fontsize=8)
 
-        # Heatmap-style asset blocks
-        ax1 = panel(gs[0:4, 8:16], "MARKET HEATMAP")
-        ax1.axis("off")
-        heat = sorted(rows, key=lambda r: abs(_atlas_visual_change(r)), reverse=True)[:12]
-        cols = 4
-        for idx, r in enumerate(heat):
-            rr, cc = divmod(idx, cols)
-            x = .02 + cc*.245
-            y = .73 - rr*.29
-            ch = _atlas_visual_change(r)
-            face = "#124E3A" if ch > .05 else "#5A242B" if ch < -.05 else "#2D4051"
-            ax1.add_patch(Rectangle((x,y), .225,.245, transform=ax1.transAxes, facecolor=face, edgecolor="#173E57", lw=1))
-            ax1.text(x+.015,y+.145,_atlas_visual_label(r),transform=ax1.transAxes,color="white",fontsize=11,weight="bold")
-            ax1.text(x+.015,y+.055,f"{ch:+.2f}%",transform=ax1.transAxes,color=("#63E6A3" if ch>=0 else "#FF8B8B"),fontsize=9.5,weight="bold")
+        # Market overview
+        axo = panel(gs[0:9,15:22], "MARKET OVERVIEW")
+        axo.axis("off")
+        cards=[("BTC",btc),("ETH",eth)]
+        for i,(sym,r) in enumerate(cards):
+            y=.77-i*.28
+            axo.add_patch(Rectangle((.04,y),.92,.21,transform=axo.transAxes,facecolor="#102D43",edgecolor=edge,lw=1))
+            ch=_atlas_visual_change(r) if r else 0; px=_atlas_visual_price(r) if r else 0
+            axo.text(.08,y+.14,sym,transform=axo.transAxes,color=fg,fontsize=14,weight="bold")
+            axo.text(.08,y+.055,_fmt_price(px) if px else "N/A",transform=axo.transAxes,color=fg,fontsize=13,weight="bold")
+            axo.text(.91,y+.06,f"{ch:+.2f}%",transform=axo.transAxes,ha="right",color=green if ch>=0 else red,fontsize=11,weight="bold")
+        axo.text(.06,.30,"BTC REGIME",transform=axo.transAxes,color=muted,fontsize=8)
+        axo.text(.06,.23,regime,transform=axo.transAxes,color=fg,fontsize=15,weight="bold")
+        axo.text(.06,.12,"MARKET BREADTH",transform=axo.transAxes,color=muted,fontsize=8)
+        axo.text(.06,.05,f"{adv} UP   •   {dec} DOWN   •   {flat} FLAT",transform=axo.transAxes,color=fg,fontsize=10,weight="bold")
 
-        # Breadth
-        ax2 = panel(gs[0:4, 16:24], "MARKET BREADTH")
-        ax2.bar(["Up","Flat","Down"],[adv,flat,dec], color=["#1F9D68","#607487","#D84E57"])
-        ax2.set_ylabel("Assets", color="#9EB4C6")
-        ax2.grid(axis="y", alpha=.15)
-        ax2.tick_params(axis='x', colors="#D6E6F2")
-        ax2.tick_params(axis='y', colors="#9EB4C6")
-        total=max(1,len(rows))
-        ax2.text(.98,.94,f"{adv/total*100:.0f}% advancing",transform=ax2.transAxes,ha="right",va="top",color="#63E6A3",fontsize=10,weight="bold")
+        # Dense heatmap
+        axh=panel(gs[0:9,22:30],"MARKET HEATMAP")
+        axh.axis("off")
+        heat=sorted(rows,key=lambda r:abs(_atlas_visual_change(r)),reverse=True)[:20]
+        cols=4; nrows=5
+        for idx,r in enumerate(heat):
+            rr,cc=divmod(idx,cols); x=.02+cc*.245; y=.80-rr*.19
+            ch=_atlas_visual_change(r); face="#14523D" if ch>.05 else "#642A32" if ch<-.05 else "#314454"
+            axh.add_patch(Rectangle((x,y),.225,.16,transform=axh.transAxes,facecolor=face,edgecolor="#173E57",lw=.8))
+            axh.text(x+.015,y+.092,_atlas_visual_label(r),transform=axh.transAxes,color=fg,fontsize=9,weight="bold")
+            axh.text(x+.015,y+.028,f"{ch:+.2f}%",transform=axh.transAxes,color=green if ch>=0 else red,fontsize=8,weight="bold")
 
-        # Top gainers / losers
-        ax3 = panel(gs[4:8, 0:8], "TOP MOVERS")
-        ax3.axis("off")
-        ax3.text(.04,.88,"GAINERS",transform=ax3.transAxes,color="#63E6A3",fontsize=11,weight="bold")
-        ax3.text(.54,.88,"LOSERS",transform=ax3.transAxes,color="#FF8B8B",fontsize=11,weight="bold")
-        for i,r in enumerate(gainers):
-            ax3.text(.04,.73-i*.14,f"{i+1}. {_atlas_visual_label(r):<6}",transform=ax3.transAxes,color="#EAF4FF",fontsize=10)
-            ax3.text(.38,.73-i*.14,f"{_atlas_visual_change(r):+.2f}%",transform=ax3.transAxes,ha="right",color="#63E6A3",fontsize=10,weight="bold")
-        for i,r in enumerate(losers):
-            ax3.text(.54,.73-i*.14,f"{i+1}. {_atlas_visual_label(r):<6}",transform=ax3.transAxes,color="#EAF4FF",fontsize=10)
-            ax3.text(.95,.73-i*.14,f"{_atlas_visual_change(r):+.2f}%",transform=ax3.transAxes,ha="right",color="#FF8B8B",fontsize=10,weight="bold")
+        # Movers
+        axg=panel(gs[9:14,0:7],"TOP GAINERS (24H)"); axg.axis("off")
+        axl=panel(gs[9:14,7:14],"TOP LOSERS (24H)"); axl.axis("off")
+        for ax,items,col in ((axg,gainers,green),(axl,losers,red)):
+            for i,r in enumerate(items):
+                y=.82-i*.17
+                ax.text(.04,y,f"{i+1}",transform=ax.transAxes,color=muted,fontsize=8)
+                ax.text(.13,y,_atlas_visual_label(r),transform=ax.transAxes,color=fg,fontsize=9,weight="bold")
+                ax.text(.94,y,f"{_atlas_visual_change(r):+.2f}%",transform=ax.transAxes,ha="right",color=col,fontsize=9,weight="bold")
 
-        # Top opportunities
-        ax4 = panel(gs[4:8, 8:24], "ATLAS AI SIGNALS / TOP OPPORTUNITIES")
-        ax4.axis("off")
+        # Market pulse gauge-like panel (derived only from breadth; explicitly labeled)
+        axp=panel(gs[9:14,14:20],"ATLAS MARKET PULSE"); axp.axis("off")
+        pulse=50 + (adv-dec)/max(1,len(rows))*50; pulse=max(0,min(100,pulse))
+        pulse_label="BULLISH" if pulse>=60 else "BEARISH" if pulse<=40 else "NEUTRAL"
+        pulse_col=green if pulse>=60 else red if pulse<=40 else amber
+        axp.text(.5,.62,f"{pulse:.0f}",transform=axp.transAxes,ha="center",color=pulse_col,fontsize=34,weight="bold")
+        axp.text(.5,.43,pulse_label,transform=axp.transAxes,ha="center",color=pulse_col,fontsize=12,weight="bold")
+        axp.text(.5,.20,"Derived from ATLAS breadth",transform=axp.transAxes,ha="center",color=muted,fontsize=8)
+        axp.text(.5,.09,"Not an external Fear & Greed index",transform=axp.transAxes,ha="center",color=muted,fontsize=7)
+
+        # Breadth bar
+        axb=panel(gs[9:14,20:30],"MARKET BREADTH")
+        total=max(1,len(rows)); vals=[adv/total*100,flat/total*100,dec/total*100]
+        axb.barh([0],vals[0],color=green,height=.42)
+        axb.barh([0],vals[1],left=vals[0],color="#607487",height=.42)
+        axb.barh([0],vals[2],left=vals[0]+vals[1],color=red,height=.42)
+        axb.set_xlim(0,100); axb.set_yticks([]); axb.set_xlabel("% of analyzed assets",color=muted,fontsize=8); axb.grid(axis="x",alpha=.10)
+        axb.text(vals[0]/2,0,f"{vals[0]:.0f}%",ha="center",va="center",color=fg,fontsize=9,weight="bold") if vals[0]>8 else None
+        axb.text(100-vals[2]/2,0,f"{vals[2]:.0f}%",ha="center",va="center",color=fg,fontsize=9,weight="bold") if vals[2]>8 else None
+
+        # Signals table
+        axt=panel(gs[14:20,0:20],"ATLAS AI SIGNALS / TOP OPPORTUNITIES"); axt.axis("off")
         headers=["#","Asset","Decision","Setup","Opp.","Conf.","R/R","Entry","SL","TP1"]
         table_rows=[]
         for i,r in enumerate(top,1):
-            table_rows.append([
-                str(i),
-                _atlas_visual_label(r),
-                _atlas_visual_decision(r)[:12],
-                str(r.get("setup_type") or "-")[:14],
-                f"{_atlas_visual_num(r.get('opportunity_score'),0):.0f}",
-                f"{_atlas_visual_num(r.get('confidence'),0):.0f}",
-                f"{_atlas_visual_num(r.get('rr_intel') or r.get('rr'),0):.2f}",
-                fmt(r.get("entry")) if r.get("entry") is not None else "-",
-                fmt(r.get("sl")) if r.get("sl") is not None else "-",
-                fmt(r.get("tp1")) if r.get("tp1") is not None else "-",
-            ])
-        tbl=ax4.table(cellText=[headers]+table_rows, loc="center", cellLoc="center", colWidths=[.035,.07,.11,.14,.07,.07,.07,.11,.11,.11])
-        tbl.auto_set_font_size(False); tbl.set_fontsize(8.5); tbl.scale(1,1.65)
+            table_rows.append([str(i),_atlas_visual_label(r),_atlas_visual_decision(r)[:10],str(r.get("setup_type") or "-")[:13],
+                f"{_atlas_visual_num(r.get('opportunity_score'),0):.0f}",f"{_atlas_visual_num(r.get('confidence'),0):.0f}",
+                f"{_atlas_visual_num(r.get('rr_intel') or r.get('rr'),0):.2f}",fmt(r.get("entry")) if r.get("entry") is not None else "-",
+                fmt(r.get("sl")) if r.get("sl") is not None else "-",fmt(r.get("tp1")) if r.get("tp1") is not None else "-"])
+        tbl=axt.table(cellText=[headers]+table_rows,loc="center",cellLoc="center",colWidths=[.035,.07,.105,.14,.07,.07,.07,.115,.105,.105])
+        tbl.auto_set_font_size(False); tbl.set_fontsize(7.7); tbl.scale(1,1.42)
         for (ri,cj),cell in tbl.get_celld().items():
-            cell.set_edgecolor("#21445F")
-            if ri==0:
-                cell.set_facecolor("#17344C"); cell.set_text_props(color="white",weight="bold")
+            cell.set_edgecolor(edge)
+            if ri==0: cell.set_facecolor("#173A55"); cell.set_text_props(color=fg,weight="bold")
             else:
-                cell.set_facecolor("#0F283C" if ri%2 else "#102F46")
-                cell.set_text_props(color="#E8F2F8")
+                cell.set_facecolor("#0E2A40" if ri%2 else "#103149"); cell.set_text_props(color=fg)
                 if cj==2:
                     d=table_rows[ri-1][2]
                     if "BUY" in d or "LONG" in d: cell.set_facecolor("#145C42")
                     elif "SELL" in d or "SHORT" in d: cell.set_facecolor("#6A2930")
+                    elif "WATCH" in d: cell.set_facecolor("#73531B")
 
         # Key insights
-        ax5 = panel(gs[8:12, 0:24], "KEY INSIGHTS")
-        ax5.axis("off")
-        best = top[0] if top else None
-        insights=[]
-        if best:
-            insights.append(f"Best opportunity: {_atlas_visual_label(best)} | {_atlas_visual_decision(best)} | opportunity {_atlas_visual_num(best.get('opportunity_score'),0):.0f} | confidence {_atlas_visual_num(best.get('confidence'),0):.0f}")
-        insights.append(f"Breadth: {adv}/{len(rows)} advancing, {dec}/{len(rows)} declining, {flat} flat.")
-        if btc:
-            insights.append(f"BTC: {_fmt_price(_atlas_visual_price(btc))} | {_atlas_visual_change(btc):+.2f}% | {_atlas_visual_decision(btc)}")
-        insights.append("Visual layer is read-only: Entry/SL/TP and decisions come from the canonical ATLAS engine.")
-        for i,line in enumerate(insights[:4]):
-            ax5.text(.025,.82-i*.2,"• "+line,transform=ax5.transAxes,color="#DDEAF3",fontsize=11,va="top")
+        axi=panel(gs[14:20,20:30],"KEY INSIGHTS"); axi.axis("off")
+        best=top[0] if top else None; insights=[]
+        if best: insights.append(f"Best: {_atlas_visual_label(best)} • {_atlas_visual_decision(best)} • Opp {_atlas_visual_num(best.get('opportunity_score'),0):.0f} • Conf {_atlas_visual_num(best.get('confidence'),0):.0f}")
+        insights.append(f"Breadth: {adv}/{len(rows)} advancing; {dec}/{len(rows)} declining.")
+        if btc: insights.append(f"BTC: {_fmt_price(_atlas_visual_price(btc))} • {_atlas_visual_change(btc):+.2f}% • {_atlas_visual_decision(btc)}")
+        insights.append(f"BTC regime: {regime}.")
+        insights.append("Entry / SL / TP are canonical ATLAS outputs.")
+        insights.append("Visual renderer is read-only; no fresh analysis.")
+        for i,line in enumerate(insights[:6]): axi.text(.04,.88-i*.145,"• "+line,transform=axi.transAxes,color=fg,fontsize=8.7,va="top",wrap=True)
 
-        fig.text(.03,.025,"ATLAS AI • deterministic visual report • analytical use only",color="#6F93AD",fontsize=9)
-        plt.savefig(filename,dpi=170,bbox_inches="tight",facecolor=fig.get_facecolor())
+        fig.text(.025,.018,"ATLAS AI  |  deterministic read-only visual layer  |  canonical decisions preserved",color=muted,fontsize=8)
+        plt.savefig(filename,dpi=180,bbox_inches="tight",facecolor=fig.get_facecolor())
         plt.close(fig)
         return filename
     except Exception as e:
         print(f"⚠️ ATLAS visual dashboard generation failed: {e}")
         return None
-
 
 def _telegram_send_photo_file(chat_id, filename, caption=None):
     if not TELEGRAM_TOKEN or not chat_id or not filename or not os.path.exists(filename):
