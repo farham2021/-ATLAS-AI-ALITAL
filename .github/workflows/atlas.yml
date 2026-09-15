@@ -1,14 +1,14 @@
-name: ATLAS AI Phase 3.11.16 Nightly Safety Wake-up + RPC Lease
+name: ATLAS AI Phase 3.11.17 All-Cycle Safety Wake-up + RPC Lease
 
 on:
   schedule:
-    # Existing heartbeat — unchanged. DAILY16 behavior remains exactly as before.
+    # Existing heartbeat
     - cron: "3,13,23,33,43,53 * * * *"
 
-    # Extra NIGHTLY23 safety wake-ups.
-    # GitHub cron is UTC.
-    # 20:05 UTC = 23:35 Tehran
-    # 20:25 UTC = 23:55 Tehran
+    # Independent safety wake-ups
+    - cron: "7,27,47 * * * *"
+
+    # Extra NIGHTLY23 safety wake-ups
     - cron: "5,25 20 * * *"
 
   workflow_dispatch:
