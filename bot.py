@@ -14203,24 +14203,44 @@ def run_summer_book_scan(as_json=False):
     return 0
 
 
+def _book_scan_json_safe(value):
+    """Normalize scan payload to strict JSON/PostgREST-safe primitives."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    # numpy/pandas scalar compatibility without adding a dependency here.
+    if hasattr(value, "item"):
+        try:
+            return _book_scan_json_safe(value.item())
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {str(k): _book_scan_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_book_scan_json_safe(v) for v in value]
+    return str(value)
+
+
 def persist_book_scan_snapshots(payload):
     """Chat plane reads this table. Analysis plane only writes it."""
     rows = []
     ts = now_utc().isoformat()
     items = list(payload.get("signals") or []) + list(payload.get("pulse") or [])
     for s in items:
-        sym = str((s or {}).get("symbol") or "").upper()
+        clean = _book_scan_json_safe(s or {})
+        sym = str(clean.get("symbol") or "").upper()
         if not sym:
             continue
         rows.append({
             "captured_at": ts,
             "symbol": sym,
-            "kind": str((s or {}).get("kind") or ""),
-            "quality": str((s or {}).get("quality") or ""),
-            "price": (s or {}).get("price"),
-            "level": (s or {}).get("level"),
-            "reason": str((s or {}).get("reason") or "")[:500],
-            "payload": s,
+            "kind": str(clean.get("kind") or ""),
+            "quality": str(clean.get("quality") or ""),
+            "price": _book_scan_json_safe(clean.get("price")),
+            "level": _book_scan_json_safe(clean.get("level")),
+            "reason": str(clean.get("reason") or "")[:500],
+            "payload": clean,
         })
     if not rows or not STORE.enabled:
         return 0, False
@@ -14228,7 +14248,11 @@ def persist_book_scan_snapshots(payload):
     if hasattr(STORE, "insert_many"):
         ok = bool(STORE.insert_many("atlas_book_scan_snapshots", rows))
     if not ok:
-        ok = all(bool(STORE.insert("atlas_book_scan_snapshots", row)) for row in rows)
+        # Do not short-circuit: attempt every row and report the exact success count.
+        row_results = [bool(STORE.insert("atlas_book_scan_snapshots", row)) for row in rows]
+        ok = all(row_results)
+        if not ok:
+            print(f"⚠️ Book scan row fallback: {sum(row_results)}/{len(row_results)} persisted")
     print(f"📚 Book scan persisted: {len(rows)} ok={ok}")
     return len(rows), ok
 
