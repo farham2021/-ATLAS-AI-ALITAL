@@ -1045,12 +1045,22 @@ class SupabaseStore:
             with urllib.request.urlopen(req, timeout=15):
                 return True
         except Exception as e:
+            detail = str(e)
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                    if body:
+                        detail = f"{detail} | body={body[:1200]}"
+                except Exception:
+                    pass
             if table != "atlas_changelog":
                 try:
                     with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
-                        fh.write(f"{now_utc().isoformat()} | SUPABASE | insert failed: {table}: {e}\n")
+                        fh.write(f"{now_utc().isoformat()} | SUPABASE | insert failed: {table}: {detail}\n")
                 except Exception:
                     pass
+            if table == "atlas_book_scan_snapshots":
+                print(f"⚠️ Book scan Supabase insert error: {detail}")
             return False
 
     def insert_many(self, table, rows):
@@ -1069,15 +1079,25 @@ class SupabaseStore:
             with urllib.request.urlopen(req, timeout=15):
                 return True
         except Exception as e:
+            detail = str(e)
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                    if body:
+                        detail = f"{detail} | body={body[:1200]}"
+                except Exception:
+                    pass
             if table != "atlas_changelog":
                 try:
                     with open(CHANGELOG_FILE, "a", encoding="utf-8") as fh:
                         fh.write(
                             f"{now_utc().isoformat()} | SUPABASE | batch insert failed: "
-                            f"{table}: {e}\n"
+                            f"{table}: {detail}\n"
                         )
                 except Exception:
                     pass
+            if table == "atlas_book_scan_snapshots":
+                print(f"⚠️ Book scan Supabase batch error: {detail}")
             return False
 
     def update(self, table, match, row):
