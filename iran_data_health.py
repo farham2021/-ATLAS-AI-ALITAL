@@ -2,7 +2,7 @@
 import os,json,urllib.parse,urllib.request
 from datetime import datetime,timezone
 SB=os.getenv("SUPABASE_URL","").rstrip("/");KEY=os.getenv("SUPABASE_SERVICE_ROLE_KEY","");STRICT=os.getenv("ATLAS_IRAN_HEALTH_STRICT","0")=="1"
-FUNDS_CONFIGURED=bool(os.getenv("ATLAS_FUNDS_JSON_URL","").strip() or os.getenv("BRSAPI_API_KEY","").strip())
+FUNDS_CONFIGURED=bool(os.getenv("BRSAPI_API_KEY","").strip())
 def fetch(t):
  q=urllib.parse.urlencode({"select":"captured_at,symbol,price,payload","order":"captured_at.desc","limit":"500"});r=urllib.request.Request(f"{SB}/rest/v1/{t}?{q}",headers={"apikey":KEY,"Authorization":f"Bearer {KEY}"})
  with urllib.request.urlopen(r,timeout=20) as x:return json.loads(x.read())
