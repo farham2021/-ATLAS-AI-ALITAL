@@ -1,0 +1,33 @@
+name: ATLAS Iran Data Plane
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+concurrency:
+  group: atlas-iran-data-plane
+  cancel-in-progress: true
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Collect Iran market data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NAVASAN_API_KEY: ${{ secrets.NAVASAN_API_KEY }}
+          ATLAS_FUNDS_JSON_URL: ${{ secrets.ATLAS_FUNDS_JSON_URL }}
+        run: python iran_data_collector_v2.py
+      - name: Validate freshness
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ATLAS_FUNDS_JSON_URL: ${{ secrets.ATLAS_FUNDS_JSON_URL }}
+          ATLAS_IRAN_HEALTH_STRICT: "0"
+        run: python iran_data_health.py
