@@ -1,0 +1,192 @@
+name: ATLAS v12 Multi-Asset Self-Healing
+
+on:
+  schedule:
+    # Primary wake-up: every 10 minutes, offset from the hour.
+    - cron: "3,13,23,33,43,53 * * * *"
+    # Independent safety wake-up. Scheduler guard/lease still selects the real cycle.
+    - cron: "7,27,47 * * * *"
+    # Extra NIGHTLY23 recovery wake-ups: 20:05/20:25 UTC = 23:35/23:55 Tehran.
+    - cron: "5,25 20 * * *"
+  workflow_dispatch:
+    inputs:
+      cycle_mode:
+        description: "Manual ATLAS cycle"
+        required: true
+        default: "HOURLY"
+        type: choice
+        options: [HOURLY, DEEP4H, DAILY16, NIGHTLY23]
+
+permissions:
+  contents: read
+concurrency:
+  group: atlas-bot
+  cancel-in-progress: false
+
+jobs:
+  atlas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Decide Tehran cycle
+        id: plan
+        env:
+          ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python atlas_schedule_guard.py plan --manual "${{ inputs.cycle_mode }}" --github-output "$GITHUB_OUTPUT"
+          else
+            python atlas_schedule_guard.py plan --github-output "$GITHUB_OUTPUT"
+          fi
+
+      - name: Claim slot lease
+        id: claim
+        if: steps.plan.outputs.scheduled == '1' && steps.plan.outputs.mode != 'NONE'
+        # Fail-open only for infrastructure/RPC failure. A successful DENIED claim still skips execution.
+        continue-on-error: true
+        env:
+          ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python atlas_schedule_guard.py claim --run-key "${{ steps.plan.outputs.run_key }}" --cycle "${{ steps.plan.outputs.mode }}" --ttl-min 65 --github-output "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: steps.plan.outputs.mode != 'NONE' && (steps.plan.outputs.scheduled != '1' || steps.claim.outputs.claimed == 'CLAIMED' || steps.claim.outcome == 'failure')
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify release
+        if: steps.plan.outputs.mode != 'NONE' && (steps.plan.outputs.scheduled != '1' || steps.claim.outputs.claimed == 'CLAIMED' || steps.claim.outcome == 'failure')
+        run: |
+          python -m py_compile bot.py iran_data_collector_v2.py iran_data_health.py
+          test -f atlas_schedule_guard.py
+
+      - name: Run ATLAS
+        if: steps.plan.outputs.mode != 'NONE' && (steps.plan.outputs.scheduled != '1' || steps.claim.outputs.claimed == 'CLAIMED' || steps.claim.outcome == 'failure')
+        env:
+          PYTHONUNBUFFERED: "1"
+          ATLAS_VERSION: "ATLAS v12 MULTI-ASSET"
+          ATLAS_ENGINE: BOTH
+          ATLAS_SCHEDULED_CADENCE: workflow
+          ATLAS_RUN_MODE: ANALYSIS
+          SELECTED_MODE: ${{ steps.plan.outputs.mode }}
+
+          ATLAS_IRAN_MULTI_ASSET_ENABLED: "1"
+          ATLAS_IRAN_REPORT_DAILY16: "1"
+          ATLAS_IRAN_REPORT_NIGHTLY23: "1"
+          ATLAS_IRAN_DASHBOARD_ENABLED: "1"
+          ATLAS_IRAN_DASHBOARD_NIGHTLY: "1"
+
+          ATLAS_DESK_ENABLED: "1"
+          ATLAS_DESK_INGEST_ENABLED: "0"
+          ATLAS_DESK_RISK_PCT: "1.5"
+          ATLAS_DESK_HOURLY_PUSH: "1"
+          ATLAS_DESK_ALLOW_DM_ONLY: "0"
+          ATLAS_DESK_SEND_ON_DEEP: "1"
+          ATLAS_DESK_USERS_TABLE: atlas_desk_users
+          ATLAS_DESK_META_TABLE: atlas_desk_meta
+          ATLAS_DESK_DELIVERY_TABLE: atlas_desk_deliveries
+          ATLAS_DESK_HOLDINGS_TABLE: atlas_desk_holdings
+
+          ATLAS_NIGHTLY_BRIEF_ENABLED: "1"
+          ATLAS_DAILY_DELTA_ENABLED: "1"
+          ATLAS_EXPIRED_SIGNALS_ENABLED: "1"
+          ATLAS_SIGNAL_STABILITY_ENABLED: "1"
+          ATLAS_RARE_ALERT_ENABLED: "1"
+          ATLAS_RARE_ALERT_SYMBOLS: BTC,ETH,SOL,ADA,XRP,ZEC
+          ATLAS_RARE_ALERT_THRESHOLD_PCT: "7.5"
+          ATLAS_RARE_ALERT_COOLDOWN_HOURS: "4"
+          ATLAS_RARE_ALERT_MAX_PER_DAY: "6"
+          ATLAS_RARE_ALERT_LOOKBACK_MINUTES: "90"
+
+          ATLAS_EXECUTION_MODE: PAPER
+          ATLAS_LIVE_TRADING: "0"
+          ATLAS_EXEC_REQUIRE_PERSISTENCE: "1"
+          ATLAS_EXEC_REQUIRE_PROTECTIVE: "1"
+          ATLAS_EXEC_ALLOW_SPOT_SELL: "0"
+          ATLAS_EXEC_SYMBOLS: BTC,ETH
+          ATLAS_EXEC_EQUITY_USDT: "10000"
+          ATLAS_EXEC_MAX_LEVERAGE: "3"
+          ATLAS_EXEC_MAX_OPEN: "2"
+          ATLAS_DAILY_KILL_R: "3"
+
+          RISK_PER_TRADE_PCT: "1.5"
+          MAX_PORTFOLIO_OPEN_RISK_PCT: "6.0"
+          ATLAS_MAX_LEVERAGE: "10"
+          ATLAS_MIN_CONFIDENCE: "55"
+          ATLAS_MIN_WATCH_CONFIDENCE: "55"
+          ATLAS_MIN_EXECUTABLE_RR: "2.0"
+          ATLAS_MIN_VOLUME_RATIO: "0.60"
+          ATLAS_H4_FALLBACK_MIN_SCORE: "70"
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+        run: |
+          set -euo pipefail
+          case "$SELECTED_MODE" in
+            HOURLY)
+              export ATLAS_DELIVERY_MODE=STORAGE_ONLY
+              export ATLAS_PHASE37_CYCLE=HOURLY
+              export ATLAS_PHASE37_DEEP_4H=0
+              export ATLAS_PHASE37_DAILY_REPORT=0
+              export ATLAS_PHASE39_NIGHTLY_REPORT=0
+              export ATLAS_BOOK_SCAN_AUTO=0
+              export ATLAS_EXECUTION_ENABLED=0 ;;
+            DEEP4H)
+              export ATLAS_DELIVERY_MODE=STORAGE_ONLY
+              export ATLAS_PHASE37_CYCLE=DEEP4H
+              export ATLAS_PHASE37_DEEP_4H=1
+              export ATLAS_PHASE37_DAILY_REPORT=0
+              export ATLAS_PHASE39_NIGHTLY_REPORT=0
+              export ATLAS_BOOK_SCAN_AUTO=1
+              export ATLAS_EXECUTION_ENABLED=1 ;;
+            DAILY16)
+              export ATLAS_DELIVERY_MODE=FULL
+              export ATLAS_PHASE37_CYCLE=DAILY16
+              export ATLAS_PHASE37_DEEP_4H=1
+              export ATLAS_PHASE37_DAILY_REPORT=1
+              export ATLAS_PHASE39_NIGHTLY_REPORT=0
+              export ATLAS_BOOK_SCAN_AUTO=1
+              export ATLAS_EXECUTION_ENABLED=1 ;;
+            NIGHTLY23)
+              export ATLAS_DELIVERY_MODE=FULL
+              export ATLAS_PHASE37_CYCLE=NIGHTLY23
+              export ATLAS_PHASE37_DEEP_4H=0
+              export ATLAS_PHASE37_DAILY_REPORT=0
+              export ATLAS_PHASE39_NIGHTLY_REPORT=1
+              export ATLAS_BOOK_SCAN_AUTO=0
+              export ATLAS_EXECUTION_ENABLED=0 ;;
+            *) exit 2 ;;
+          esac
+          python bot.py
+
+      - name: Mark slot complete
+        if: success() && steps.plan.outputs.scheduled == '1' && steps.claim.outputs.claimed == 'CLAIMED'
+        continue-on-error: true
+        env:
+          ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python atlas_schedule_guard.py mark --run-key "${{ steps.plan.outputs.run_key }}" --cycle "${{ steps.plan.outputs.mode }}" --lease-token "${{ steps.claim.outputs.lease_token }}" --source self-healing
