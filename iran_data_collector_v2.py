@@ -517,8 +517,21 @@ def main():
                                 if not k.startswith("__")
                             ][:30]
             brsfx=brs_gold_currency_rows(); st["brsapi_gold_currency_rows"]=len(brsfx)
-            existing={r.get("symbol") for r in fx}; additions=[r for r in brsfx if r.get("symbol") not in existing]
-            if additions:st["brsapi_fx_written"]=post("atlas_iran_fx_snapshots",additions);fx=fx+additions
+
+            # BrsApi is authoritative for USDT_IRR.  Do not let an older Navasan/cache
+            # quote win merely because that symbol already exists in this run.
+            brs_usdt=[r for r in brsfx if r.get("symbol")=="USDT_IRR"]
+            if brs_usdt:
+                st["brsapi_usdt_written"]=post("atlas_iran_fx_snapshots",brs_usdt[-1:])
+                fx=[r for r in fx if r.get("symbol")!="USDT_IRR"] + brs_usdt[-1:]
+                st["usdt_provider"]="brsapi"
+
+            # BrsApi still fills any other symbols missing from the quota-aware FX set.
+            existing={r.get("symbol") for r in fx}
+            additions=[r for r in brsfx if r.get("symbol") not in existing]
+            if additions:
+                st["brsapi_fx_written"]=post("atlas_iran_fx_snapshots",additions)
+                fx=fx+additions
         except Exception as e:st["brsapi_gold_currency_error"]=str(e)
     xag=silver_rows(st);fresh_xag=[] if st.get("silver_provider")=="CACHE" else xag;fair=silver_fair(fx,xag)
     try:
