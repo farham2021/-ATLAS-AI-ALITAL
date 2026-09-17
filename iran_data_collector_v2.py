@@ -21,7 +21,6 @@ KEY=os.getenv("SUPABASE_SERVICE_ROLE_KEY","").strip()
 NAV=os.getenv("NAVASAN_API_KEY","").strip()
 ALPHA=os.getenv("ALPHAVANTAGE_API_KEY","").strip()
 BRS=os.getenv("BRSAPI_API_KEY","").strip()
-FUNDS=os.getenv("ATLAS_FUNDS_JSON_URL","").strip()
 TIMEOUT=int(os.getenv("ATLAS_IRAN_HTTP_TIMEOUT","18"))
 NAV_MIN_AGE_H=float(os.getenv("ATLAS_NAVASAN_MIN_REFRESH_HOURS","7.5"))  # ~3 calls/day
 TROY_OZ_GRAMS=31.1034768
@@ -295,19 +294,6 @@ def tsetmc():
     summary={"captured_at":ts,"symbol":"TSE_MARKET","value":tv,"payload":{"provider":"tsetmc","trade_value":tv,"volume":vol,"real_money_flow":rf,"advance":adv,"decline":dec,"unchanged":unch,"breadth":breadth,"leaders":[{"symbol":s,"price":p,"pct":pc,"value":v} for v,s,p,pc in sorted(leaders,reverse=True)[:15]]}}
     return [summary]+sorted(rows,key=lambda r:r.get("value") or 0,reverse=True)[:250]
 
-def funds():
-    if not FUNDS:return []
-    d=http_json(FUNDS,retries=2);items=d.get("data",[]) if isinstance(d,dict) else d
-    if not isinstance(items,list):return []
-    out=[];ts=now()
-    for x in items:
-        if not isinstance(x,dict):continue
-        s=str(x.get("symbol") or "");p=num(x.get("price"));nav=num(x.get("nav"))
-        if not s or not p:continue
-        prem=(p/nav-1)*100 if nav else None;payload={**x,"provider":"configured_fund_feed","price":p,"nav":nav,"premium_pct":prem}
-        out.append({"captured_at":ts,"symbol":s,"name":x.get("name"),"fund_type":x.get("fund_type"),"price":p,"nav":nav,"payload":payload})
-    return out
-
 def main():
     if not SB or not KEY:raise SystemExit("Supabase credentials missing")
     st={"brsapi_key_configured":bool(BRS)}
@@ -340,9 +326,6 @@ def main():
     if BRS and tse:
         try:fundrows=brs_fund_rows(tse);st["fund_provider"]="brsapi_nav"
         except Exception as e:st["brsapi_fund_error"]=str(e)
-    if not fundrows and FUNDS:
-        try:fundrows=funds();st["fund_provider"]="configured_feed"
-        except Exception as e:st["funds_error"]=str(e)
     try:st["funds_written"]=post("atlas_fund_snapshots",fundrows)
     except Exception as e:st["fund_store_error"]=str(e)
     st["collector_status"]="OK_OR_DEGRADED"
