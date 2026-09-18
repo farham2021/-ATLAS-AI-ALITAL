@@ -15340,6 +15340,145 @@ def _daily16_row_metric(r, keys, default=None):
     return default
 
 
+
+# ============================================================
+# ATLAS PERSONAL ALLOCATION ENGINE — Analysis Plane only
+# ============================================================
+# Computes advisory target allocations from persisted Desk holdings + current
+# multi-asset analysis. It never places orders and never runs in the webhook.
+ATLAS_ALLOCATION_ENABLED = os.getenv("ATLAS_ALLOCATION_ENABLED", "1") == "1"
+
+_ALLOC_PROFILES = {
+    "CONSERVATIVE": {"cash": 30.0, "crypto_cap": 20.0, "metal_cap": 35.0, "tse_cap": 30.0, "single_cap": 10.0},
+    "MODERATE":     {"cash": 20.0, "crypto_cap": 35.0, "metal_cap": 30.0, "tse_cap": 35.0, "single_cap": 12.0},
+    "AGGRESSIVE":   {"cash": 10.0, "crypto_cap": 55.0, "metal_cap": 25.0, "tse_cap": 40.0, "single_cap": 15.0},
+}
+
+def _alloc_num(x, default=0.0):
+    v=safe_float(x)
+    return default if v is None else float(v)
+
+def _alloc_profile(uid):
+    try:
+        rows=STORE.select("atlas_desk_allocation_preferences", {
+            "select":"risk_profile", "user_id":f"eq.{uid}", "limit":"1"
+        })
+        x=str((rows[0] if rows else {}).get("risk_profile") or "MODERATE").upper()
+        return x if x in _ALLOC_PROFILES else "MODERATE"
+    except Exception:
+        return "MODERATE"
+
+def _alloc_candidates(scoped_results):
+    """Cross-asset candidates. Scores are allocation scores, not win probabilities."""
+    out=[]
+    seen=set()
+    # Canonical crypto/metals analysis rows: use existing opportunity/confidence/action.
+    for r in list(scoped_results or []):
+        sym=_aio_symbol(r).upper()
+        if not sym or sym in seen: continue
+        sig=_atlas_public_signal(r)
+        opp=max(_alloc_num(r.get("opportunity_score")), _alloc_num(r.get("score")))
+        conf=max(_alloc_num(r.get("confidence")), _alloc_num(r.get("decision_confidence")))
+        chg=max(-20.0,min(20.0,_atlas_visual_change(r)))
+        score=0.52*opp + 0.28*conf + 0.20*(50.0+2.5*chg)
+        if sig=="BUY": score+=8
+        elif sig=="SELL": score-=25
+        if bool(r.get("executable")) and sig=="BUY": score+=5
+        group="METALS" if sym in {"XAUUSD","XAGUSD","COPPER","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"} else "CRYPTO"
+        if score>=48 and sig!="SELL":
+            out.append({"symbol":sym,"group":group,"score":round(max(0,min(100,score)),2),"signal":sig,"confidence":conf,"opportunity":opp})
+            seen.add(sym)
+
+    # TSE: use only observable market evidence; label is ALLOCATE/WATCH, never BUY.
+    try:
+        tse=_iran_dash_latest(_v3_rows("tse",800))
+        for sym,row in tse.items():
+            if sym=="TSE_MARKET" or not row or sym.upper() in seen: continue
+            p=row.get("payload") if isinstance(row.get("payload"),dict) else {}
+            pct=_alloc_num(row.get("change_pct", row.get("pct", p.get("change_pct",0))))
+            bp=_alloc_num(p.get("real_buyer_power", row.get("real_buyer_power")),1.0)
+            flow=_alloc_num(p.get("real_net_volume", row.get("real_net_volume")),0.0)
+            value=_alloc_num(row.get("value",p.get("value")),0.0)
+            # bounded evidence score: momentum + real-money buyer power + positive flow + liquidity proxy.
+            score=50 + max(-12,min(12,pct*3.0)) + max(-10,min(10,(bp-1.0)*12.0))
+            score += 6 if flow>0 else (-4 if flow<0 else 0)
+            if value>0: score += 2
+            if score>=56:
+                out.append({"symbol":str(sym).upper(),"group":"TSE","score":round(min(85,score),2),"signal":"ALLOCATE/WATCH","confidence":None,"opportunity":None})
+                seen.add(str(sym).upper())
+    except Exception as e:
+        print(f"⚠️ allocation TSE candidates: {e}")
+    return sorted(out,key=lambda x:x["score"],reverse=True)
+
+def _alloc_weights(cands, profile):
+    cfg=_ALLOC_PROFILES[profile]
+    cash=cfg["cash"]
+    investable=100.0-cash
+    groups={"CRYPTO":[],"METALS":[],"TSE":[]}
+    for c in cands:
+        if c["group"] in groups: groups[c["group"]].append(c)
+    # Evidence-driven class strength with profile hard caps.
+    strengths={g:sum(max(1.0,c["score"]-45.0) for c in rows[:8]) for g,rows in groups.items()}
+    caps={"CRYPTO":cfg["crypto_cap"],"METALS":cfg["metal_cap"],"TSE":cfg["tse_cap"]}
+    total=sum(strengths.values()) or 1.0
+    budgets={g:min(caps[g],investable*strengths[g]/total) for g in strengths}
+    # redistribute unused budget into groups with remaining cap, strongest first.
+    rem=investable-sum(budgets.values())
+    for g in sorted(strengths,key=strengths.get,reverse=True):
+        add=min(rem,max(0,caps[g]-budgets[g])); budgets[g]+=add; rem-=add
+        if rem<=1e-9: break
+    cash+=max(0,rem)
+    rows=[]
+    for g,items in groups.items():
+        if not items or budgets[g]<=0: continue
+        den=sum(max(1,c["score"]-45) for c in items[:8])
+        left=budgets[g]
+        for c in items[:8]:
+            w=min(cfg["single_cap"], budgets[g]*max(1,c["score"]-45)/den)
+            if w>=1.0:
+                rows.append(dict(c,target_pct=round(w,2))); left-=w
+        cash+=max(0,left)
+    # normalize rounding exactly to 100 via cash.
+    used=sum(r["target_pct"] for r in rows)
+    cash=max(0,round(100.0-used,2))
+    return rows,cash
+
+def _alloc_snapshot_for_user(uid, user, bag, scoped_results):
+    profile=_alloc_profile(uid)
+    candidates=_alloc_candidates(scoped_results)
+    targets,cash_pct=_alloc_weights(candidates,profile)
+    # Registered cash is informational. Do not fabricate conversions when a rate is unavailable.
+    cash_holdings={k:float(v) for k,v in (bag or {}).items() if str(k).upper() in {"IRR","USD_IRR","USDT_IRR","EUR","THB"}}
+    payload={
+        "version":VERSION,"risk_profile":profile,"cash_target_pct":cash_pct,
+        "targets":targets,"registered_cash":cash_holdings,
+        "method":"cross_asset_evidence_capped_allocation",
+        "note":"Advisory target allocation; no automatic execution. TSE allocation score is evidence-based, not a canonical BUY signal.",
+    }
+    row={"user_id":str(uid),"chat_id":str((user or {}).get("chat_id") or ""),"risk_profile":profile,
+         "cash_target_pct":cash_pct,"payload":payload,"generated_at":now_utc().isoformat()}
+    return row
+
+def run_personal_allocation_cycle(scoped_results):
+    """Generate latest per-user advisory allocation snapshots in Supabase."""
+    if not ATLAS_ALLOCATION_ENABLED: return {"users":0,"written":0,"errors":[]}
+    try:
+        from atlas_desk import load_users, load_all_holdings
+        users=load_users() or {}; bags=load_all_holdings() or {}
+    except Exception as e:
+        return {"users":0,"written":0,"errors":[f"desk load: {e}"]}
+    written=0; errors=[]; eligible=0
+    for uid,user in users.items():
+        bag=(bags or {}).get(str(uid),{}) or {}
+        if not bag or not bool((user or {}).get("dm_started")): continue
+        eligible+=1
+        try:
+            row=_alloc_snapshot_for_user(uid,user,bag,scoped_results)
+            if STORE.upsert("atlas_desk_allocation_snapshots",row,"user_id"): written+=1
+            else: errors.append(f"{uid}: snapshot upsert failed")
+        except Exception as e: errors.append(f"{uid}: {e}")
+    return {"users":eligible,"written":written,"errors":errors}
+
 def _daily16_management_png(kind, results, scoped_results, portfolio_risk=None, filename=None):
     """Dense DAILY16 decision PNGs.
 
@@ -16862,6 +17001,16 @@ def main():
             except Exception as e:
                 append_changelog("IRAN_VISUAL_DASHBOARD", None, None, str(e))
                 print(f"⚠️ Iran dashboard failed non-fatally: {e}")
+
+            # Per-user cross-asset allocation snapshots: Analysis Plane computes; webhook only reads.
+            try:
+                with _AtlasTimer("ATLAS PERSONAL ALLOCATION ENGINE"):
+                    _alloc = run_personal_allocation_cycle(scoped_results)
+                print("🧠 Personal allocation:", "users=", _alloc.get("users"), "written=", _alloc.get("written"), "errors=", len(_alloc.get("errors") or []))
+                for _err in (_alloc.get("errors") or [])[:3]: print(f"⚠️ Personal allocation: {_err}")
+            except Exception as e:
+                append_changelog("PERSONAL_ALLOCATION", None, None, str(e))
+                print(f"⚠️ Personal allocation failed non-fatally: {e}")
 
             # Per-user portfolio images: each Desk user receives only their own DM.
             # This is additive and must never fail or delay the canonical DAILY16 report.
