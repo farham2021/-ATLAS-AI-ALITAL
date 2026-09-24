@@ -16982,6 +16982,185 @@ def send_iran_visual_dashboard():
 
 # =============================================================================
 
+
+# ============================================================
+# ATLAS MULTI-ASSET SENIOR RESEARCH MANDATE — SHADOW V2
+# Crypto + Tehran equities/funds + metals. Research-only.
+# This layer follows a strict FACT / ANALYSIS / UNKNOWN contract and never
+# mutates canonical action, executable, confidence, Entry/SL/TP or sizing.
+# ============================================================
+ATLAS_MULTI_ASSET_RESEARCH_V2_ENABLED = os.environ.get(
+    "ATLAS_MULTI_ASSET_RESEARCH_V2_ENABLED", "1"
+).strip().lower() not in ("0", "false", "no", "off")
+
+ATLAS_MULTI_ASSET_RESEARCH_MANDATE = {
+    "role": "Senior Multi-Asset Analyst",
+    "as_of_policy": "Use only fresh observed data; never present stale/unavailable data as current.",
+    "markets": {
+        "CRYPTO": [
+            "trader_attention", "whale_flow", "institutional_interest", "derivatives",
+            "fundamentals", "liquidity_security_regulatory_risk", "relative_to_btc_eth",
+        ],
+        "EQUITIES": [
+            "institutional_smart_money", "price_volume_momentum", "fundamentals",
+            "catalysts", "sentiment_short_interest", "sector_rotation", "macro_regulatory_risk",
+        ],
+        "METALS": [
+            "physical_industrial_demand", "inventory_supply", "etf_futures_positioning",
+            "dxy_real_yields_inflation", "gold_silver_gold_oil_ratios", "china_recession_fed_risk",
+        ],
+    },
+    "taxonomy": {
+        "crypto": ["L1", "L2", "DEFI", "AI", "RWA", "MEME", "OTHER"],
+        "metals": ["PRECIOUS", "INDUSTRIAL"],
+        "equities": ["TEHRAN", "US", "EUROPE", "EMERGING"],
+    },
+    "required_output": [
+        "executive_summary_7", "top_assets_by_market", "bull_bear_scenarios",
+        "entry_method_invalidation", "allocation_range_advisory", "correlation_diversification",
+        "avoid_list", "sources_and_timestamps", "missing_data",
+    ],
+    "truth_contract": [
+        "FACT != ANALYSIS != HYPOTHESIS",
+        "missing data must be labelled unavailable",
+        "no profit promise",
+        "WATCH/WAIT is never executable allocation",
+        "physical metal != ETF != futures",
+        "ranking is not permission to trade",
+    ],
+}
+
+
+def _ma2_freshness(ts, max_hours):
+    try:
+        dt=datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        age=max(0.0,(now_utc()-dt.astimezone(timezone.utc)).total_seconds()/3600.0)
+        return {"age_hours":round(age,2),"fresh":age<=max_hours}
+    except Exception:
+        return {"age_hours":None,"fresh":False}
+
+
+def _ma2_crypto_rows(results):
+    out=[]
+    for r in results or []:
+        sym=_aio_symbol(r)
+        src=r.get("multi_source") or r.get("sources") or {}
+        research=r.get("research_evidence_families_shadow") or {}
+        signal=_atlas_public_signal(r) if "_atlas_public_signal" in globals() else "WAIT"
+        executable=bool(r.get("executable")) and signal in ("BUY","SELL")
+        score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")),_aio_num(r.get("confidence")))
+        out.append({
+            "symbol":sym,"market":"CRYPTO","category":(r.get("symbol_profile_shadow") or {}).get("group") or "OTHER",
+            "signal":signal,"executable":executable,"score_1_10":round(max(0,min(10,score/10.0)),1),
+            "direction":r.get("direction"),"risk_main":r.get("gate_reason") or r.get("why_not_trade") or r.get("reason"),
+            "derivatives":r.get("regime_derivatives"),"evidence_agreement":r.get("evidence_agreement"),
+            "mtf_agreement_pct":r.get("mtf_agreement_pct"),"rr":r.get("rr"),
+            "entry":r.get("entry") if executable else None,"sl":r.get("sl") if executable else None,
+            "tp1":r.get("tp1") if executable else None,
+            "research_families":research,
+            "source_status":src if isinstance(src,dict) else {},
+            "fact_analysis_label":"FACT+ANALYSIS",
+        })
+    return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
+
+
+def _ma2_tse_rows(limit=500):
+    rows=_v3_rows("tse",limit)
+    latest={}
+    for row in rows or []:
+        pay=row.get("payload") if isinstance(row.get("payload"),dict) else {}
+        sym=str(row.get("symbol") or pay.get("symbol") or "").strip()
+        if sym and sym not in latest: latest[sym]=row
+    vals=[]
+    for sym,row in latest.items():
+        pay=row.get("payload") if isinstance(row.get("payload"),dict) else {}
+        pct=safe_float(pay.get("pct") if pay.get("pct") is not None else pay.get("change_pct")) or 0.0
+        bp=safe_float(pay.get("buyer_power"))
+        flow=safe_float(pay.get("real_money_net_volume") if pay.get("real_money_net_volume") is not None else pay.get("net_real_volume"))
+        vol=safe_float(pay.get("volume") if pay.get("volume") is not None else row.get("volume")) or 0.0
+        score=5.0 + max(-1.5,min(1.5,pct/4.0))
+        if bp is not None: score += max(-1.0,min(1.0,(bp-1.0)*1.5))
+        if flow is not None: score += 0.7 if flow>0 else -0.7 if flow<0 else 0
+        score=max(0.0,min(10.0,score))
+        fresh=_ma2_freshness(row.get("captured_at"),6)
+        vals.append({
+            "symbol":sym,"market":"TSE","sector":pay.get("sector") or pay.get("industry"),
+            "score_1_10":round(score,1),"momentum_pct":round(pct,2),"buyer_power":bp,
+            "real_money_net_volume":flow,"volume":vol,"freshness":fresh,
+            "signal":"WATCH","executable":False,
+            "catalyst":None,"fundamentals":None,
+            "risk_main":"Fundamental/catalyst fields unavailable in current Iran collector" if not pay.get("fundamentals") else None,
+            "fact_analysis_label":"FACT+ANALYSIS",
+        })
+    return sorted(vals,key=lambda x:x["score_1_10"],reverse=True)
+
+
+def _ma2_metal_rows(metal_results):
+    out=[]
+    for r in metal_results or []:
+        sym=_aio_symbol(r)
+        signal=_atlas_public_signal(r) if "_atlas_public_signal" in globals() else str(r.get("action") or "WAIT").upper()
+        score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")),_aio_num(r.get("confidence")),50.0)
+        out.append({
+            "symbol":sym,"market":"METALS","type":"PRECIOUS" if sym in ("GOLD","SILVER","XAUUSD","XAGUSD") else "INDUSTRIAL",
+            "signal":signal,"executable":bool(r.get("executable")) and signal in ("BUY","SELL"),
+            "score_1_10":round(max(0,min(10,score/10.0)),1),"trend":r.get("regime_trend") or r.get("trend"),
+            "demand":None,"inventory_supply":None,"etf_cot":None,"real_yields_dxy":None,
+            "risk_main":"Physical demand/inventory/ETF-COT macro feeds not available in current production collector",
+            "fact_analysis_label":"ANALYSIS_WITH_MISSING_FUNDAMENTAL_FEEDS",
+        })
+    return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
+
+
+def build_multi_asset_research_v2(results, metal_results):
+    """Create an auditable multi-asset research snapshot without changing live decisions."""
+    crypto=_ma2_crypto_rows(results)
+    tse=_ma2_tse_rows()
+    metals=_ma2_metal_rows(metal_results)
+    missing=[]
+    # Explicitly disclose requested research feeds that this production runtime does not currently own.
+    missing += [
+        "Glassnode/Nansen/Arkham/Dune direct on-chain feeds",
+        "LunarCrush/Santiment/Google Trends/X/Reddit direct social feeds",
+        "SEC 13F/WhaleWisdom/Unusual Whales/Quiver direct institutional feeds",
+        "LME/COMEX inventory + COT + WGC/Silver Institute direct fundamental feeds",
+        "Platinum/Palladium/Aluminium/Lithium/Uranium production coverage",
+        "US/European/emerging-market equity production coverage",
+    ]
+    # Seven-point executive layer is descriptive and fail-closed; it does not invent unavailable evidence.
+    ctop=crypto[:3]; ttop=tse[:3]; mtop=metals[:3]
+    summary=[
+        {"topic":"crypto_state","fact":"ATLAS canonical crypto scope analyzed","analysis":"Top research ranks are shadow evidence, not automatic trades","leaders":[x["symbol"] for x in ctop]},
+        {"topic":"equity_state","fact":"Current production equity feed is Tehran market snapshots","analysis":"Ranking uses momentum/real-money/buyer-power where available; fundamentals remain missing","leaders":[x["symbol"] for x in ttop]},
+        {"topic":"metals_state","fact":"Current canonical production metals scope is GOLD/SILVER/COPPER","analysis":"Technical state is available; physical/inventory/COT macro confirmation is incomplete","leaders":[x["symbol"] for x in mtop]},
+        {"topic":"trader_focus","fact":"Derived only from observed ATLAS market/derivatives evidence","analysis":"No social-source claim is made without a live feed"},
+        {"topic":"whales_smart_money","fact":"TSE real-money fields may be observed; direct crypto whale feeds are not currently connected","analysis":"Unknown is preserved as unknown"},
+        {"topic":"institutional_interest","fact":"No direct 13F/ETF/on-chain institutional feed is asserted by this layer","analysis":"Requires dedicated provider evidence before scoring"},
+        {"topic":"profile_fit","fact":"Risk profile is handled by Personal Allocation Engine when registered","analysis":"WAIT/WATCH receives zero executable allocation; ranking and allocation remain separate"},
+    ]
+    return {
+        "schema_version":"MULTI_ASSET_RESEARCH_V2",
+        "generated_at":now_utc().isoformat(),"tehran_date":now_tehran().strftime("%Y-%m-%d %H:%M"),
+        "mandate":ATLAS_MULTI_ASSET_RESEARCH_MANDATE,
+        "executive_summary_7":summary,
+        "crypto":crypto,"equities_tse":tse,"metals":metals,
+        "top3":{"crypto":[x["symbol"] for x in ctop],"tse":[x["symbol"] for x in ttop],"metals":[x["symbol"] for x in mtop]},
+        "missing_data":missing,
+        "policy":{"shadow_only":True,"promotion_gate":"WALK_FORWARD+ABLATION+OOS+COSTS","financial_advice":False,
+                  "wait_watch_executable_pct":0,"fact_analysis_hypothesis_separated":True},
+    }
+
+
+def persist_multi_asset_research_v2(results, metal_results, cycle):
+    if not ATLAS_MULTI_ASSET_RESEARCH_V2_ENABLED:
+        return {"enabled":False,"written":False}
+    payload=build_multi_asset_research_v2(results,metal_results)
+    row={"captured_at":now_utc().isoformat(),"cycle":str(cycle or "HOURLY"),"model_version":VERSION,
+         "research_version":"MULTI_ASSET_RESEARCH_V2","payload":payload}
+    ok=STORE.insert("atlas_multi_asset_research_snapshots",row)
+    return {"enabled":True,"written":bool(ok),"crypto":len(payload["crypto"]),"tse":len(payload["equities_tse"]),"metals":len(payload["metals"]),"missing":len(payload["missing_data"])}
+
 def main():
     # Summer strict book scan (does not run full ATLAS pipeline)
     if (
@@ -17068,6 +17247,17 @@ def main():
                 except Exception as e:
                     append_changelog("PHASE37_METAL_INTEL", metal, None, str(e))
                 metal_results.append(mr)
+
+        # Multi-asset senior research mandate V2 — shadow/storage only.
+        # Never mutates canonical crypto/metals decisions or execution geometry.
+        try:
+            _ma_cycle = "DAILY16" if daily_cycle else "NIGHTLY23" if nightly_cycle else "DEEP4H" if deep_cycle else "HOURLY"
+            with _AtlasTimer("MULTI-ASSET RESEARCH V2 SHADOW"):
+                _ma2 = persist_multi_asset_research_v2(results, metal_results, _ma_cycle)
+            print("🌐 Multi-Asset Research V2:", _ma2)
+        except Exception as e:
+            append_changelog("MULTI_ASSET_RESEARCH_V2", None, None, str(e))
+            print(f"⚠️ Multi-Asset Research V2 failed non-fatally: {e}")
 
         # Intelligence v2 FULL-report history marker. Stored inside the existing
         # hourly snapshot payload; no Supabase schema/table migration required.
