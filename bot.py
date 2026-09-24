@@ -15673,6 +15673,53 @@ def _mai_crypto_category(sym):
     return "OTHER"
 
 
+def _mai_iso_timestamp(value):
+    """Normalize stored epoch/ISO timestamps for human-readable research output."""
+    if value in (None, ""):
+        return now_utc().isoformat()
+    try:
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+            n=float(value)
+            if n > 1e12: n /= 1000.0
+            elif n > 1e10: n /= 1000.0
+            return datetime.fromtimestamp(n, tz=timezone.utc).isoformat()
+    except Exception:
+        pass
+    return str(value)
+
+
+def _mai_derivatives_evidence(r):
+    """Expose only derivatives evidence already persisted by the Analysis Plane."""
+    src=r.get("source_validation") or r.get("multi_source_validation") or {}
+    cg=src.get("coinglass") if isinstance(src,dict) else {}
+    cg=cg if isinstance(cg,dict) else {}
+    funding=r.get("coinglass_funding_rate", cg.get("funding_rate"))
+    oi=r.get("coinglass_open_interest", cg.get("open_interest"))
+    regime=r.get("regime_derivatives") or ((r.get("regime") or {}).get("derivatives") if isinstance(r.get("regime"),dict) else None)
+    # These fields are intentionally schema-tolerant: if a future provider adapter
+    # persists them, Research can display them without pretending they exist today.
+    oi_delta=r.get("open_interest_change") or r.get("oi_change") or cg.get("open_interest_change") or cg.get("oi_change")
+    long_short=r.get("long_short_ratio") or cg.get("long_short_ratio")
+    top_traders=r.get("top_trader_ratio") or r.get("top_traders_long_short") or cg.get("top_trader_ratio")
+    taker=r.get("taker_buy_sell_ratio") or r.get("taker_flow") or cg.get("taker_buy_sell_ratio")
+    return {"funding_rate":funding,"open_interest":oi,"open_interest_delta":oi_delta,
+            "long_short_ratio":long_short,"top_traders":top_traders,"taker_flow":taker,
+            "regime":regime}
+
+
+def _mai_tse_fund_symbols():
+    """Symbols present in the canonical fund table must not be relabelled as TSE stocks."""
+    out=set()
+    try:
+        for row in _v3_rows("funds",1200) or []:
+            p=row.get("payload") if isinstance(row.get("payload"),dict) else {}
+            for v in (row.get("symbol"), row.get("name"), p.get("symbol"), p.get("name"), p.get("ticker")):
+                if v not in (None,""): out.add(str(v).strip())
+    except Exception:
+        pass
+    return out
+
+
 def _mai_user_preferences(uid):
     out={"capital_usd":None,"capital_irr":None,"crypto_pct":None,"stocks_pct":None,"metals_pct":None,
          "horizon":None,"goal":None,"excluded_markets":[],"platforms":[],"equity_scope":"TSE"}
@@ -15685,8 +15732,17 @@ def _mai_user_preferences(uid):
     except Exception:
         pass
     out["risk_profile"]=_alloc_profile(uid)
-    required=("horizon","goal")
-    out["profile_complete"]=all(out.get(k) not in (None,"") for k in required)
+    for k in ("excluded_markets","platforms"):
+        if not isinstance(out.get(k),list): out[k]=[]
+    split=[safe_float(out.get("crypto_pct")),safe_float(out.get("stocks_pct")),safe_float(out.get("metals_pct"))]
+    split_ok=all(x is not None and 0 <= x <= 100 for x in split) and abs(sum(split)-100.0) <= 0.01
+    capital_ok=(_alloc_num(out.get("capital_usd"),0)>0 or _alloc_num(out.get("capital_irr"),0)>0)
+    out["profile_complete"]=bool(out.get("horizon") and out.get("goal") and split_ok and capital_ok)
+    out["profile_missing"]=[]
+    if not out.get("horizon"): out["profile_missing"].append("horizon")
+    if not out.get("goal"): out["profile_missing"].append("goal")
+    if not capital_ok: out["profile_missing"].append("capital")
+    if not split_ok: out["profile_missing"].append("split")
     return out
 
 
@@ -15703,7 +15759,7 @@ def _mai_crypto_rows(scoped_results, pref):
     rows=[]
     for r in scoped_results or []:
         sym=_aio_symbol(r).upper()
-        if not sym or sym in {"XAUUSD","XAGUSD","COPPER","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"}:
+        if not sym or sym in ({str(x).upper() for x in ATLAS_METALS} | {"XAUUSD","XAGUSD","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"}):
             continue
         sig=_atlas_public_signal(r)
         opp=max(_alloc_num(r.get("opportunity_score")),_alloc_num(r.get("score")))
@@ -15712,11 +15768,12 @@ def _mai_crypto_rows(scoped_results, pref):
         score=max(1.0,min(10.0,(0.45*opp+0.35*conf+0.20*(50+2.5*chg))/10.0))
         fam=r.get("research_evidence_families_shadow") or {}
         src=r.get("source_validation") or r.get("multi_source_validation") or {}
+        deriv=_mai_derivatives_evidence(r)
         whale="N/A"
         inst="N/A"
         trader=f"{sig}; conf {conf:.0f}" if conf else sig
-        if isinstance(src,dict):
-            if src.get("coinglass") or src.get("derivatives"): trader += "; derivatives observed"
+        observed=[k for k,v in deriv.items() if k!="regime" and v not in (None,"")]
+        if observed: trader += "; derivatives: " + ", ".join(observed)
         risk="High volatility / token-specific risk" if _mai_crypto_category(sym) in {"MEME","OTHER"} else "Crypto market/regulatory volatility"
         entry="WAIT — trigger not confirmed"
         invalid="Canonical invalidation unavailable"
@@ -15734,8 +15791,8 @@ def _mai_crypto_rows(scoped_results, pref):
             "bear_case":"Structure invalidates or liquidity/momentum deteriorates",
             "entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
             "correlation_note":"Likely positively correlated with broad crypto beta; verify rolling correlation before sizing",
-            "facts":{"opportunity_score":opp,"confidence":conf,"change_metric":chg,"research_families":fam},
-            "source":{"provider":"ATLAS exchange/market-data + stored evidence","timestamp":r.get("signal_candle_ts") or now_utc().isoformat()},
+            "facts":{"opportunity_score":opp,"confidence":conf,"change_metric":chg,"research_families":fam,"derivatives":deriv},
+            "source":{"provider":"ATLAS exchange/market-data + stored evidence","timestamp":_mai_iso_timestamp(r.get("signal_candle_ts"))},
         })
     return sorted(rows,key=lambda x:x["score_1_10"],reverse=True)
 
@@ -15744,9 +15801,10 @@ def _mai_tse_rows(pref):
     out=[]
     try:
         tse=_iran_dash_latest(_v3_rows("tse",1500))
+        fund_symbols=_mai_tse_fund_symbols()
         raw=[]
         for sym,row in tse.items():
-            if sym=="TSE_MARKET" or not row: continue
+            if sym=="TSE_MARKET" or not row or str(sym).strip() in fund_symbols: continue
             p=row.get("payload") if isinstance(row.get("payload"),dict) else {}
             pct=_alloc_num(p.get("pct",p.get("change_pct",0)))
             bp=_alloc_num(p.get("real_buyer_power"),1.0)
@@ -15781,14 +15839,14 @@ def _mai_tse_rows(pref):
 
 
 def _mai_metal_rows(scoped_results, pref):
-    metals={"XAUUSD":"GOLD","XAGUSD":"SILVER","COPPER":"COPPER","GOLD18":"GOLD18","SILVER999":"SILVER999","SILVER999_FAIR":"SILVER999_FAIR","COIN_EMAMI":"COIN_EMAMI"}
+    metals={"GOLD":"GOLD","SILVER":"SILVER","COPPER":"COPPER","XAUUSD":"GOLD","XAGUSD":"SILVER","GOLD18":"GOLD18","SILVER999":"SILVER999","SILVER999_FAIR":"SILVER999_FAIR","COIN_EMAMI":"COIN_EMAMI"}
     out=[]
     for r in scoped_results or []:
         sym=_aio_symbol(r).upper()
         if sym not in metals: continue
         sig=_atlas_public_signal(r); opp=max(_alloc_num(r.get("opportunity_score")),_alloc_num(r.get("score"))); conf=max(_alloc_num(r.get("confidence")),_alloc_num(r.get("decision_confidence")))
         score=max(1.0,min(10.0,(0.55*opp+0.45*conf)/10.0 if max(opp,conf)>0 else 5.0))
-        kind="گران‌بها" if sym in {"XAUUSD","XAGUSD","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"} else "صنعتی"
+        kind="گران‌بها" if sym in {"GOLD","SILVER","XAUUSD","XAGUSD","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"} else "صنعتی"
         entry="WAIT — trigger not confirmed"; invalid="Canonical invalidation unavailable"; alloc="0% now"
         if bool(r.get("executable")) and sig=="BUY":
             entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"
@@ -15805,7 +15863,7 @@ def _mai_metal_rows(scoped_results, pref):
             "correlation_note":"Gold can diversify risk assets; silver/copper carry more cyclical beta. Verify rolling correlation.",
             "instrument_note":"Physical, ETF and futures have different custody, tracking, leverage and roll risks.",
             "facts":{"opportunity_score":opp,"confidence":conf,"price":r.get("price")},
-            "source":{"provider":"ATLAS stored metals market data","timestamp":r.get("signal_candle_ts") or now_utc().isoformat()},
+            "source":{"provider":"ATLAS stored metals market data","timestamp":_mai_iso_timestamp(r.get("signal_candle_ts"))},
         })
     return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
 
@@ -15826,7 +15884,7 @@ def _mai_build_payload(uid, user, bag, scoped_results):
         "Dedicated LME/COMEX inventories, WGC/Silver Institute, COT, lithium/uranium/aluminum/platinum/palladium feeds are not currently guaranteed; missing values remain N/A.",
     ]
     if not pref.get("profile_complete"):
-        gaps.append("Personal profile is incomplete (horizon/goal missing); suitability stays conditional rather than definitive.")
+        gaps.append("Personal profile is incomplete (missing: " + ", ".join(pref.get("profile_missing") or ["required fields"]) + "); suitability stays conditional rather than definitive.")
     summary=[
         f"کریپتو: {topc[0]['symbol']+' leads current evidence ranking' if topc else 'داده کافی در دسترس نیست'}.",
         f"بورس: {'TSE smart-money/momentum watchlist is available; no canonical executable stock signal is produced' if tse else 'داده کافی در دسترس نیست'}.",
@@ -15865,6 +15923,10 @@ def _mai_build_payload(uid, user, bag, scoped_results):
         "executive_summary_7":summary,"facts":facts,
         "top_assets":{"crypto":topc,"stocks_tse":tops,"metals":topm},
         "tables":{"crypto":crypto[:10],"stocks_tse":tse[:10],"metals":metals[:10]},
+        "no_trade":{"crypto":[x for x in crypto if x["signal"]=="SELL" or x["score_1_10"]<4.0][:8],
+                    "stocks_tse":[x for x in tse if x["smart_money"]=="outflow" and x["momentum"]<0][:8],
+                    "metals":[x for x in metals if x["signal"]=="SELL" or x["score_1_10"]<4.0][:8]},
+        # Backward-compatible alias for older Edge readers; semantics are NO-TRADE, not a personal prohibition.
         "avoid":{"crypto":[x for x in crypto if x["signal"]=="SELL" or x["score_1_10"]<4.0][:8],
                  "stocks_tse":[x for x in tse if x["smart_money"]=="outflow" and x["momentum"]<0][:8],
                  "metals":[x for x in metals if x["signal"]=="SELL" or x["score_1_10"]<4.0][:8]},
@@ -15902,14 +15964,17 @@ def _mai_render_text(payload):
         for x in (payload.get("top_assets") or {}).get(key,[])[:3]:
             nm=x.get("symbol") or x.get("metal")
             lines.append(f"• {nm}: صعودی={x.get('bull_case')} | نزولی={x.get('bear_case')} | ورود={x.get('entry_method')} | ابطال={x.get('invalidation')} | سهم={x.get('allocation_range')} | همبستگی={x.get('correlation_note')}")
-    lines += ["","د) دارایی‌هایی که باید از آن‌ها دوری کنم و چرا"]
-    avoid=payload.get("avoid") or {}
+    lines += ["","د) NO-TRADE / شواهد ناکافی یا وضعیت نامطلوب"]
+    no_trade=payload.get("no_trade") or payload.get("avoid") or {}
     for label,key in (("کریپتو","crypto"),("بورس تهران","stocks_tse"),("فلزات","metals")):
-        vals=avoid.get(key) or []
+        vals=no_trade.get(key) or []
         if vals:
-            lines.append(label+": "+", ".join(str(v.get("symbol") or v.get("metal")) for v in vals))
+            for v in vals:
+                nm=str(v.get("symbol") or v.get("metal"))
+                why="SELL state" if v.get("signal")=="SELL" else ("خروج پول + مومنتوم منفی" if key=="stocks_tse" else "امتیاز شواهد پایین")
+                lines.append(f"• {label} | {nm}: {why}; این برچسب توصیه شخصی به فروش/اجتناب دائمی نیست.")
         else:
-            lines.append(label+": مورد قطعی بر اساس داده فعلی شناسایی نشد؛ نبود داده معادل امن‌بودن نیست.")
+            lines.append(label+": NO-TRADE قطعی بر اساس داده فعلی شناسایی نشد؛ نبود داده معادل امن‌بودن نیست.")
     div=payload.get("correlation_diversification") or {}
     lines += ["","ه) همبستگی و تنوع‌بخشی",f"• {div.get('high_correlation_warning')}",f"• {div.get('inflation_growth_recession_framework')}",f"• {div.get('method_note')}","","و) منابع دقیق و تاریخ هر داده"]
     for src in payload.get("sources") or []:
