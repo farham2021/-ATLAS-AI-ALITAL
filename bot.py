@@ -15836,9 +15836,32 @@ def _mai_build_payload(uid, user, bag, scoped_results):
         "علاقه نهادی فقط وقتی منبع نهادی واقعی در state وجود داشته باشد گزارش می‌شود؛ در غیر این صورت N/A است.",
         "گزینه‌های برتر هر بازار در جداول زیر رتبه‌بندی پژوهشی‌اند؛ فقط BUY+executable=true می‌تواند وارد Allocation V6 شود.",
     ]
+    _profile_complete = bool(pref.get("profile_complete"))
+    _status = "READY" if _profile_complete else "NEEDS_PROFILE"
+    _risk_profile = str(pref.get("risk_profile") or "MODERATE").upper()
+    _generated_at = now_utc().isoformat()
+    _data_coverage = {
+        "crypto_assets": len(crypto),
+        "tse_symbols": len(tse),
+        "metals_assets": len(metals),
+        "crypto_executable_buys": sum(1 for x in crypto if x.get("executable") and x.get("signal") == "BUY"),
+        "tse_executable_signals": sum(1 for x in tse if x.get("executable")),
+        "metals_executable_buys": sum(1 for x in metals if x.get("executable") and x.get("signal") == "BUY"),
+    }
     return {
-        "engine":"ATLAS_MULTI_ASSET_INTELLIGENCE_V2","generated_at":now_utc().isoformat(),"today_tehran":now_tehran().date().isoformat(),
-        "user_id":str(uid),"profile":pref,"profile_status":"COMPLETE" if pref.get("profile_complete") else "NEEDS_PROFILE",
+        # Stable root-level metadata contract for Supabase/Edge consumers.
+        # Keep these fields at payload root so SQL queries never need to infer nested paths.
+        "engine_version":"MULTI_ASSET_V2",
+        "engine":"ATLAS_MULTI_ASSET_INTELLIGENCE_V2",
+        "status":_status,
+        "risk_profile":_risk_profile,
+        "profile_complete":_profile_complete,
+        "generated_at":_generated_at,
+        "today_tehran":now_tehran().date().isoformat(),
+        "user_id":str(uid),
+        "profile":pref,
+        "profile_status":"COMPLETE" if _profile_complete else "NEEDS_PROFILE",
+        "data_coverage":_data_coverage,
         "executive_summary_7":summary,"facts":facts,
         "top_assets":{"crypto":topc,"stocks_tse":tops,"metals":topm},
         "tables":{"crypto":crypto[:10],"stocks_tse":tse[:10],"metals":metals[:10]},
