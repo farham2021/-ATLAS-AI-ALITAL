@@ -15377,81 +15377,91 @@ def _alloc_pct_rank(values, x):
     return max(0.0,min(1.0,i/len(vals)))
 
 def _alloc_candidates(scoped_results):
-    """Cross-asset candidates with quality gates. Scores are allocation scores, not win probabilities."""
+    """V6 cross-asset candidates. Ranking != permission to allocate.
+
+    Only canonical BUY + executable=True may receive current capital. WAIT/WATCH
+    rows are retained as research/watch candidates with target_pct=0.
+    """
     out=[]
     seen=set()
 
-    # Canonical crypto/metals analysis rows. WAIT is allowed only when evidence is strong;
-    # SELL is never allocated. A weak class is allowed to stay in cash rather than being force-filled.
     for r in list(scoped_results or []):
         sym=_aio_symbol(r).upper()
-        if not sym or sym in seen: continue
+        if not sym or sym in seen:
+            continue
         sig=_atlas_public_signal(r)
         opp=max(_alloc_num(r.get("opportunity_score")), _alloc_num(r.get("score")))
         conf=max(_alloc_num(r.get("confidence")), _alloc_num(r.get("decision_confidence")))
         chg=max(-20.0,min(20.0,_atlas_visual_change(r)))
         score=0.52*opp + 0.28*conf + 0.20*(50.0+2.5*chg)
-        if sig=="BUY": score+=8
-        elif sig=="SELL": score-=25
-        if bool(r.get("executable")) and sig=="BUY": score+=5
+        canonical_exec=bool(r.get("executable")) and sig=="BUY"
+        if canonical_exec:
+            score+=13
+        elif sig=="BUY":
+            score+=6
+        elif sig=="SELL":
+            score-=25
         score=max(0.0,min(100.0,score))
         group="METALS" if sym in {"XAUUSD","XAGUSD","COPPER","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"} else "CRYPTO"
 
-        # Quality gates: confirmed BUY gets priority; WAIT requires materially stronger evidence.
-        if sig=="SELL": continue
-        if sig=="BUY":
-            gate=52.0
-            factor=1.30 if bool(r.get("executable")) else 1.15
+        if sig=="SELL":
+            continue
+        if canonical_exec:
+            gate=52.0; factor=1.30
+        elif sig=="BUY":
+            gate=55.0; factor=1.00
         else:
             gate=58.0 if group=="METALS" else 60.0
             factor=0.68 if group=="METALS" else 0.74
-            if max(conf,opp) < 55.0: continue
-        if score < gate: continue
+            if max(conf,opp) < 55.0:
+                continue
+        if score < gate:
+            continue
 
         out.append({
             "symbol":sym,"group":group,"score":round(score,2),"signal":sig,
             "confidence":round(conf,2),"opportunity":round(opp,2),
-            "gate":gate,"quality_factor":factor,
+            "gate":gate,"quality_factor":factor,"executable":canonical_exec,
+            "source_state":"CANONICAL" if canonical_exec else "WATCH",
         })
         seen.add(sym)
 
-    # TSE: cross-sectional evidence ranking. Use the collector's canonical payload keys
-    # (pct, volume, trade_value, real_net_volume, real_buyer_power) and never call it BUY.
+    # TSE is research/watch only until a separate canonical TSE decision engine exists.
     try:
         tse=_iran_dash_latest(_v3_rows("tse",1200))
         raw=[]
         for sym,row in tse.items():
-            if sym=="TSE_MARKET" or not row or str(sym).upper() in seen: continue
+            if sym=="TSE_MARKET" or not row or str(sym).upper() in seen:
+                continue
             p=row.get("payload") if isinstance(row.get("payload"),dict) else {}
             pct=_alloc_num(p.get("pct", p.get("change_pct",0.0)))
             bp=_alloc_num(p.get("real_buyer_power"),1.0)
             flow=_alloc_num(p.get("real_net_volume"),0.0)
             volume=_alloc_num(p.get("volume"),0.0)
             value=_alloc_num(row.get("value",p.get("trade_value")),0.0)
-            if value<=0 or abs(pct)>20.0: continue
+            if value<=0 or abs(pct)>20.0:
+                continue
             flow_ratio=(flow/volume) if volume>0 else 0.0
             raw.append((str(sym).upper(),pct,bp,flow,flow_ratio,value))
 
         values=[x[5] for x in raw]
         flows=[x[4] for x in raw]
         for sym,pct,bp,flow,flow_ratio,value in raw:
-            # 50 neutral. Momentum ±10, buyer-power ±10, signed real-flow ±9,
-            # liquidity 0..6. This deliberately prevents the old identical-score fallback.
             momentum=max(-10.0,min(10.0,pct*2.5))
             bp_term=max(-10.0,min(10.0,(bp-1.0)*10.0))
             flow_rank=_alloc_pct_rank(flows,flow_ratio)
             flow_term=(flow_rank-0.5)*18.0
-            if flow<0: flow_term=min(flow_term,0.0)
+            if flow<0:
+                flow_term=min(flow_term,0.0)
             liq_term=_alloc_pct_rank(values,value)*6.0
             score=max(0.0,min(88.0,50.0+momentum+bp_term+flow_term+liq_term))
-
-            # Require meaningful positive evidence; WATCH alone must not consume a class budget.
-            if score < 58.0: continue
-            if pct <= 0 and flow <= 0 and bp <= 1.0: continue
+            if score < 58.0 or (pct <= 0 and flow <= 0 and bp <= 1.0):
+                continue
             out.append({
                 "symbol":sym,"group":"TSE","score":round(score,2),
-                "signal":"ALLOCATE/WATCH","confidence":None,"opportunity":None,
-                "gate":58.0,"quality_factor":0.82,
+                "signal":"WATCH","confidence":None,"opportunity":None,
+                "gate":58.0,"quality_factor":0.82,"executable":False,
+                "source_state":"FLOW_WATCH",
                 "evidence":{"pct":round(pct,2),"buyer_power":round(bp,2),"flow_ratio":round(flow_ratio,4)},
             })
             seen.add(sym)
@@ -15459,77 +15469,80 @@ def _alloc_candidates(scoped_results):
         print(f"⚠️ allocation TSE candidates: {e}")
     return sorted(out,key=lambda x:x["score"],reverse=True)
 
+
 def _alloc_weights(cands, profile):
-    """Dynamic-cash, cross-asset allocation. Never force-fills weak opportunities."""
+    """V6 fail-closed allocation: only executable canonical BUY consumes capital."""
     cfg=_ALLOC_PROFILES[profile]
-    max_investable=100.0-cfg["cash"]  # profile cash is a floor, not a fixed target
-    groups={"CRYPTO":[],"METALS":[],"TSE":[]}
-    for c in cands:
-        if c.get("group") in groups: groups[c["group"]].append(c)
+    max_investable=100.0-cfg["cash"]
+    executable=[c for c in cands if c.get("executable") is True and str(c.get("signal") or "").upper()=="BUY"]
+    watch=[c for c in cands if c not in executable]
 
-    ranked=sorted(cands,key=lambda x:x.get("score",0),reverse=True)
-    top=ranked[:min(6,len(ranked))]
-    if not top:
-        return [],100.0,{"readiness":0.0,"deploy_target_pct":0.0,"top_avg_score":None}
+    # Watchlist is informational only. It never reduces current cash.
+    watchlist=[]
+    for c in watch[:12]:
+        reserve=min(float(cfg.get("wait_single_cap",5.0)), max(0.0,(float(c.get("score",0))-50.0)/6.0))
+        w=dict(c)
+        w["target_pct"]=0.0
+        w["reserve_pct"]=round(reserve,2)
+        w["executable"]=False
+        watchlist.append(w)
 
-    # Market readiness controls how much of the maximum risk budget is actually deployed.
-    # With WAIT-only / mediocre evidence, cash rises automatically.
+    if not executable:
+        return [],100.0,{"readiness":0.0,"actionable_quality_pct":0.0,"deploy_target_pct":0.0,
+                        "top_avg_score":None,"confirmed_buy_count":0,"watchlist":watchlist}
+
+    top=sorted(executable,key=lambda x:x.get("score",0),reverse=True)[:6]
     top_avg=sum(float(c["score"]) for c in top)/len(top)
-    raw_readiness=max(0.0,min(1.0,(top_avg-55.0)/25.0))
-    confirmed=sum(1 for c in ranked if c.get("signal")=="BUY")
-    raw_readiness=min(1.0,raw_readiness + min(0.22,confirmed*0.055))
-    # WATCH/WAIT-only markets are not 90%+ actionable. Keep the semantic distinction
-    # between data quality and actual investability. Confirmed canonical BUYs lift the cap.
-    actionable=min(raw_readiness, 0.70 if confirmed==0 else min(1.0,0.70+0.075*confirmed))
-    readiness=actionable
-    deploy_target=max_investable*actionable
+    readiness=max(0.0,min(1.0,(top_avg-52.0)/28.0))
+    readiness=min(1.0,readiness + min(0.25,len(executable)*0.055))
+    deploy_target=max_investable*readiness
 
+    groups={"CRYPTO":[],"METALS":[],"TSE":[]}
+    for c in executable:
+        if c.get("group") in groups:
+            groups[c["group"]].append(c)
     caps={"CRYPTO":cfg["crypto_cap"],"METALS":cfg["metal_cap"],"TSE":cfg["tse_cap"]}
-    strengths={}
-    for g,items in groups.items():
-        strengths[g]=sum(
-            max(0.0,float(c["score"])-float(c.get("gate",55.0))) * float(c.get("quality_factor",1.0))
-            for c in items[:6 if g=="TSE" else 10]
-        )
+    strengths={g:sum(max(0.0,float(c["score"])-float(c.get("gate",52.0)))*float(c.get("quality_factor",1.0)) for c in items[:10]) for g,items in groups.items()}
     total_strength=sum(strengths.values())
     if total_strength<=0:
-        return [],100.0,{"readiness":round(readiness,3),"deploy_target_pct":0.0,"top_avg_score":round(top_avg,2)}
+        return [],100.0,{"readiness":round(readiness,3),"actionable_quality_pct":round(readiness*100,1),
+                        "deploy_target_pct":0.0,"top_avg_score":round(top_avg,2),"confirmed_buy_count":len(executable),"watchlist":watchlist}
 
     budgets={g:min(caps[g],deploy_target*strengths[g]/total_strength) for g in groups}
-    # Redistribute only within the deployment target, never to force 100-cash deployment.
     rem=max(0.0,deploy_target-sum(budgets.values()))
     for g in sorted(groups,key=lambda z:strengths[z],reverse=True):
-        if strengths[g]<=0: continue
+        if strengths[g]<=0:
+            continue
         add=min(rem,max(0.0,caps[g]-budgets[g])); budgets[g]+=add; rem-=add
-        if rem<=1e-9: break
+        if rem<=1e-9:
+            break
 
     rows=[]
     for g,items in groups.items():
-        if not items or budgets[g]<=0: continue
-        # TSE concentration guard: a personal allocation should not become an index-like
-        # basket of many near-identical WATCH names. Keep only the strongest six.
-        active=items[:6] if g=="TSE" else items[:10]
-        weights=[max(0.0,float(c["score"])-float(c.get("gate",55.0)))*float(c.get("quality_factor",1.0)) for c in active]
+        if not items or budgets[g]<=0:
+            continue
+        active=sorted(items,key=lambda x:x.get("score",0),reverse=True)[:10]
+        weights=[max(0.0,float(c["score"])-float(c.get("gate",52.0)))*float(c.get("quality_factor",1.0)) for c in active]
         den=sum(weights)
-        if den<=0: continue
-        allocated=0.0
+        if den<=0:
+            continue
         for c,raw in zip(active,weights):
-            asset_cap = cfg["wait_single_cap"] if c.get("signal") == "WAIT" else cfg["single_cap"]
-            w=min(asset_cap,budgets[g]*raw/den)
+            w=min(float(cfg["single_cap"]),budgets[g]*raw/den)
             if w>=0.75:
                 rows.append(dict(c,target_pct=round(w,2)))
-                allocated+=w
-        # budget omitted by min-row/single caps simply stays cash
 
     used=sum(float(r["target_pct"]) for r in rows)
     cash=max(float(cfg["cash"]),round(100.0-used,2))
-    # If rounding/caps pushed total above 100, scale rows down proportionally.
     if used+cash>100.0001 and used>0:
         scale=(100.0-cash)/used
-        for r in rows: r["target_pct"]=round(float(r["target_pct"])*scale,2)
+        for r in rows:
+            r["target_pct"]=round(float(r["target_pct"])*scale,2)
         used=sum(float(r["target_pct"]) for r in rows)
         cash=round(100.0-used,2)
-    return rows,cash,{"readiness":round(readiness,3),"actionable_quality_pct":round(actionable*100.0,1),"deploy_target_pct":round(deploy_target,2),"top_avg_score":round(top_avg,2),"confirmed_buy_count":confirmed}
+    return rows,cash,{"readiness":round(readiness,3),"actionable_quality_pct":round(readiness*100.0,1),
+                      "deploy_target_pct":round(deploy_target,2),"top_avg_score":round(top_avg,2),
+                      "confirmed_buy_count":len(executable),"watchlist":watchlist}
+
 
 def _alloc_cash_state(bag):
     """Normalize registered cash and value only what ATLAS can price from stored state."""
@@ -15538,7 +15551,6 @@ def _alloc_cash_state(bag):
     for k,v in bag.items():
         key=str(k).upper(); qty=float(v or 0)
         if qty<=0: continue
-        # Legacy Chat Plane stored /hold USD and /hold USDT under their rate-symbol keys.
         if key=="USD_IRR": key="USD"
         elif key=="USDT_IRR": key="USDT"
         if key in {"IRR","USD","USDT","EUR","THB"}:
@@ -15556,8 +15568,6 @@ def _alloc_cash_state(bag):
             elif "TOMAN" in ur or "تومان" in str(pay.get("unit_raw") or pay.get("unit") or ""): rate=p*10.0
             elif "IRR" in ur: rate=p
             else: rate=p if p>=1_000_000 else p*10.0
-            # Allocation must not silently value cash with an old FX cache. Collector is hourly;
-            # >4h is treated unavailable rather than presenting a stale number as current.
             ts=r.get("captured_at"); age_h=None
             try:
                 dt=datetime.fromisoformat(str(ts).replace("Z","+00:00"))
@@ -15576,15 +15586,14 @@ def _alloc_cash_state(bag):
         "IRR":{"rate":1.0,"source":"identity","captured_at":None,"age_h":0.0,"symbol":"IRR"},
     }
     rates={k:(v.get("rate") if isinstance(v,dict) else None) for k,v in infos.items()}
-    values={}
-    total=0.0
+    values={}; total=0.0
     for cur,qty in cash.items():
-        rate=rates.get(cur)
-        val=(qty*rate) if rate is not None else None
+        rate=rates.get(cur); val=(qty*rate) if rate is not None else None
         info=infos.get(cur) if isinstance(infos.get(cur),dict) else {}
         values[cur]={"qty":qty,"rate_irr":rate,"value_irr":val,"source":info.get("source"),"captured_at":info.get("captured_at"),"age_h":info.get("age_h")}
         if val is not None: total+=val
     return cash,values,total
+
 
 def _alloc_snapshot_for_user(uid, user, bag, scoped_results):
     profile=_alloc_profile(uid)
@@ -15593,11 +15602,10 @@ def _alloc_snapshot_for_user(uid, user, bag, scoped_results):
     scoped=list(scoped_results or [])
     covered=sum(1 for r in scoped if safe_float((r or {}).get("price")) is not None)
     diag["data_coverage_pct"]=round(100.0*covered/len(scoped),1) if scoped else 0.0
-    diag["tse_max_positions"]=6
-    diag["wait_single_cap_pct"]=_alloc_cfg(profile).get("wait_single_cap")
+    diag["tse_max_positions"]=0  # TSE stays WATCH until canonical executable signals exist.
+    diag["wait_single_cap_pct"]=_ALLOC_PROFILES[profile].get("wait_single_cap")
     registered_cash,cash_values,deployable_irr=_alloc_cash_state(bag)
 
-    # Amounts are based only on cash ATLAS can value from stored state; no synthetic FX conversion.
     if deployable_irr>0:
         for t in targets:
             t["target_irr"]=round(deployable_irr*float(t.get("target_pct",0))/100.0)
@@ -15607,18 +15615,17 @@ def _alloc_snapshot_for_user(uid, user, bag, scoped_results):
 
     payload={
         "version":VERSION,"risk_profile":profile,"cash_target_pct":cash_pct,
-        "targets":targets,"registered_cash":registered_cash,
-        "registered_cash_valuation":cash_values,
+        "targets":targets,"watchlist":diag.get("watchlist") or [],
+        "registered_cash":registered_cash,"registered_cash_valuation":cash_values,
         "deployable_cash_irr":round(deployable_irr) if deployable_irr>0 else None,
-        "cash_target_irr":cash_target_irr,
-        "diagnostics":diag,
-        "method":"quality_gate_cross_asset_dynamic_cash_v5_strict_free_fx_diversification",
-        "allocation_engine_version":"V5",
-        "note":"Advisory target allocation; no automatic execution. Weak/WAIT opportunities are not force-filled; unallocated risk budget stays cash. TSE ALLOCATE/WATCH is evidence-based, not canonical BUY.",
+        "cash_target_irr":cash_target_irr,"diagnostics":diag,
+        "method":"executable_only_cross_asset_dynamic_cash_v6_fail_closed",
+        "allocation_engine_version":"V6",
+        "note":"Advisory only. Current capital is allocated only to canonical BUY with executable=true. WAIT/WATCH/PRE_TRIGGER remain 0% and any reserve_pct is informational only.",
     }
-    row={"user_id":str(uid),"chat_id":str((user or {}).get("chat_id") or ""),"risk_profile":profile,
-         "cash_target_pct":cash_pct,"payload":payload,"generated_at":now_utc().isoformat()}
-    return row
+    return {"user_id":str(uid),"chat_id":str((user or {}).get("chat_id") or ""),"risk_profile":profile,
+            "cash_target_pct":cash_pct,"payload":payload,"generated_at":now_utc().isoformat()}
+
 
 def run_personal_allocation_cycle(scoped_results):
     """Generate latest per-user advisory allocation snapshots in Supabase."""
@@ -15639,6 +15646,287 @@ def run_personal_allocation_cycle(scoped_results):
             else: errors.append(f"{uid}: snapshot upsert failed")
         except Exception as e: errors.append(f"{uid}: {e}")
     return {"users":eligible,"written":written,"errors":errors}
+
+
+# ============================================================
+# ATLAS MULTI-ASSET INTELLIGENCE V2 — Crypto + TSE + Metals
+# ============================================================
+# Implements the user's multi-asset research brief as a structured, auditable
+# Analysis-Plane product. It never invents missing providers and never promotes
+# WATCH to executable. US/EU equities and unavailable metals/providers are
+# reported as data gaps instead of silently substituted with stale/general data.
+ATLAS_MULTI_ASSET_INTELLIGENCE_ENABLED = os.getenv("ATLAS_MULTI_ASSET_INTELLIGENCE_ENABLED", "1") == "1"
+
+
+def _mai_crypto_category(sym):
+    s=str(sym or "").upper()
+    groups={
+        "L1":{"BTC","ETH","SOL","BNB","ADA","AVAX","SUI","TON","DOT","NEAR","TRX"},
+        "L2":{"ARB","OP","MATIC","POL"},
+        "DEFI":{"AAVE","UNI","LINK","MKR","CRV","LDO"},
+        "AI":{"FET","RENDER","RNDR","TAO","WLD"},
+        "RWA":{"ONDO","MKR","LINK"},
+        "MEME":{"DOGE","SHIB","PEPE","BONK","WIF","FLOKI"},
+    }
+    for k,v in groups.items():
+        if s in v: return k
+    return "OTHER"
+
+
+def _mai_user_preferences(uid):
+    out={"capital_usd":None,"capital_irr":None,"crypto_pct":None,"stocks_pct":None,"metals_pct":None,
+         "horizon":None,"goal":None,"excluded_markets":[],"platforms":[],"equity_scope":"TSE"}
+    try:
+        rows=STORE.select("atlas_desk_multiasset_preferences",{"select":"*","user_id":f"eq.{uid}","limit":"1"})
+        if rows:
+            r=rows[0]
+            for k in out:
+                if r.get(k) is not None: out[k]=r.get(k)
+    except Exception:
+        pass
+    out["risk_profile"]=_alloc_profile(uid)
+    required=("horizon","goal")
+    out["profile_complete"]=all(out.get(k) not in (None,"") for k in required)
+    return out
+
+
+def _mai_fit_label(pref, group, symbol):
+    if not pref.get("profile_complete"):
+        return "نیاز به تکمیل پروفایل"
+    excluded={str(x).upper() for x in (pref.get("excluded_markets") or [])}
+    if group.upper() in excluded or str(symbol).upper() in excluded:
+        return "خیر"
+    return "مشروط"
+
+
+def _mai_crypto_rows(scoped_results, pref):
+    rows=[]
+    for r in scoped_results or []:
+        sym=_aio_symbol(r).upper()
+        if not sym or sym in {"XAUUSD","XAGUSD","COPPER","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"}:
+            continue
+        sig=_atlas_public_signal(r)
+        opp=max(_alloc_num(r.get("opportunity_score")),_alloc_num(r.get("score")))
+        conf=max(_alloc_num(r.get("confidence")),_alloc_num(r.get("decision_confidence")))
+        chg=max(-20.0,min(20.0,_atlas_visual_change(r)))
+        score=max(1.0,min(10.0,(0.45*opp+0.35*conf+0.20*(50+2.5*chg))/10.0))
+        fam=r.get("research_evidence_families_shadow") or {}
+        src=r.get("source_validation") or r.get("multi_source_validation") or {}
+        whale="N/A"
+        inst="N/A"
+        trader=f"{sig}; conf {conf:.0f}" if conf else sig
+        if isinstance(src,dict):
+            if src.get("coinglass") or src.get("derivatives"): trader += "; derivatives observed"
+        risk="High volatility / token-specific risk" if _mai_crypto_category(sym) in {"MEME","OTHER"} else "Crypto market/regulatory volatility"
+        entry="WAIT — trigger not confirmed"
+        invalid="Canonical invalidation unavailable"
+        alloc="0% now"
+        if bool(r.get("executable")) and sig=="BUY":
+            entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"
+            invalid=f"SL {r.get('sl')}" if r.get("sl") is not None else "Canonical BUY invalidation"
+            alloc="1–5% range; bounded by risk profile"
+        rows.append({
+            "symbol":sym,"category":_mai_crypto_category(sym),"trader_attention":trader,
+            "whale_attention":whale,"institutional_attention":inst,"risk":risk,
+            "fit":_mai_fit_label(pref,"CRYPTO",sym),"score_1_10":round(score,1),
+            "signal":sig,"executable":bool(r.get("executable")),"price":r.get("price"),
+            "bull_case":"Trend/structure and momentum continue with confirmation" if sig!="SELL" else "Requires reversal of current bearish state",
+            "bear_case":"Structure invalidates or liquidity/momentum deteriorates",
+            "entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
+            "correlation_note":"Likely positively correlated with broad crypto beta; verify rolling correlation before sizing",
+            "facts":{"opportunity_score":opp,"confidence":conf,"change_metric":chg,"research_families":fam},
+            "source":{"provider":"ATLAS exchange/market-data + stored evidence","timestamp":r.get("signal_candle_ts") or now_utc().isoformat()},
+        })
+    return sorted(rows,key=lambda x:x["score_1_10"],reverse=True)
+
+
+def _mai_tse_rows(pref):
+    out=[]
+    try:
+        tse=_iran_dash_latest(_v3_rows("tse",1500))
+        raw=[]
+        for sym,row in tse.items():
+            if sym=="TSE_MARKET" or not row: continue
+            p=row.get("payload") if isinstance(row.get("payload"),dict) else {}
+            pct=_alloc_num(p.get("pct",p.get("change_pct",0)))
+            bp=_alloc_num(p.get("real_buyer_power"),1.0)
+            flow=_alloc_num(p.get("real_net_volume"),0.0)
+            vol=_alloc_num(p.get("volume"),0.0)
+            value=_alloc_num(row.get("value",p.get("trade_value")),0.0)
+            if value<=0 or abs(pct)>20: continue
+            fr=flow/vol if vol>0 else 0.0
+            raw.append((sym,row,p,pct,bp,flow,fr,value))
+        vals=[x[7] for x in raw]; flows=[x[6] for x in raw]
+        for sym,row,p,pct,bp,flow,fr,value in raw:
+            score=50 + max(-10,min(10,pct*2.5)) + max(-10,min(10,(bp-1)*10)) + (_alloc_pct_rank(flows,fr)-0.5)*18 + _alloc_pct_rank(vals,value)*6
+            score=max(1.0,min(10.0,score/10.0))
+            money="inflow" if flow>0 else "outflow" if flow<0 else "neutral"
+            out.append({
+                "symbol":str(sym),"sector":p.get("sector") or "N/A","smart_money":money,
+                "momentum":round(pct,2),"catalyst":"N/A — no verified catalyst feed in current TSE Data Plane",
+                "risk":"TSE liquidity/regulatory/macro risk","fit":_mai_fit_label(pref,"TSE",sym),
+                "score_1_10":round(score,1),"signal":"WATCH","executable":False,
+                "bull_case":"Positive real-money flow/buyer power persists with price confirmation",
+                "bear_case":"Real-money flow reverses or buyer power weakens",
+                "entry_method":"WATCH only — no canonical TSE BUY engine, so no executable entry",
+                "invalidation":"Flow/momentum thesis invalidates; no fabricated price stop",
+                "allocation_range":"0% now until a canonical executable TSE signal exists",
+                "correlation_note":"Sector and Tehran-market beta can dominate; diversify by sector and macro exposure",
+                "facts":{"pct":pct,"buyer_power":bp,"real_net_volume":flow,"trade_value":value},
+                "source":{"provider":str(p.get("provider") or "BRSAPI/TSE Data Plane"),"timestamp":row.get("captured_at")},
+            })
+    except Exception as e:
+        print(f"⚠️ multi-asset TSE rows: {e}")
+    return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
+
+
+def _mai_metal_rows(scoped_results, pref):
+    metals={"XAUUSD":"GOLD","XAGUSD":"SILVER","COPPER":"COPPER","GOLD18":"GOLD18","SILVER999":"SILVER999","SILVER999_FAIR":"SILVER999_FAIR","COIN_EMAMI":"COIN_EMAMI"}
+    out=[]
+    for r in scoped_results or []:
+        sym=_aio_symbol(r).upper()
+        if sym not in metals: continue
+        sig=_atlas_public_signal(r); opp=max(_alloc_num(r.get("opportunity_score")),_alloc_num(r.get("score"))); conf=max(_alloc_num(r.get("confidence")),_alloc_num(r.get("decision_confidence")))
+        score=max(1.0,min(10.0,(0.55*opp+0.45*conf)/10.0 if max(opp,conf)>0 else 5.0))
+        kind="گران‌بها" if sym in {"XAUUSD","XAGUSD","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"} else "صنعتی"
+        entry="WAIT — trigger not confirmed"; invalid="Canonical invalidation unavailable"; alloc="0% now"
+        if bool(r.get("executable")) and sig=="BUY":
+            entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"
+            invalid=f"SL {r.get('sl')}" if r.get("sl") is not None else "Canonical BUY invalidation"
+            alloc="2–8% range; physical/ETF/futures instrument changes risk"
+        out.append({
+            "metal":metals[sym],"symbol":sym,"type":kind,"demand":"N/A — dedicated physical/industrial demand feed not connected",
+            "supply":"N/A — LME/COMEX/WGC/Silver Institute inventory feed not connected","futures_trend":sig,
+            "risk":"Real yields/USD for precious metals; China/industrial cycle for copper",
+            "fit":_mai_fit_label(pref,"METALS",sym),"score_1_10":round(score,1),"signal":sig,"executable":bool(r.get("executable")),
+            "bull_case":"Macro/technical trend remains supportive and confirmation persists",
+            "bear_case":"USD/real-yield or industrial-demand regime turns adverse; structure invalidates",
+            "entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
+            "correlation_note":"Gold can diversify risk assets; silver/copper carry more cyclical beta. Verify rolling correlation.",
+            "instrument_note":"Physical, ETF and futures have different custody, tracking, leverage and roll risks.",
+            "facts":{"opportunity_score":opp,"confidence":conf,"price":r.get("price")},
+            "source":{"provider":"ATLAS stored metals market data","timestamp":r.get("signal_candle_ts") or now_utc().isoformat()},
+        })
+    return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
+
+
+def _mai_build_payload(uid, user, bag, scoped_results):
+    pref=_mai_user_preferences(uid)
+    crypto=_mai_crypto_rows(scoped_results,pref)
+    tse=_mai_tse_rows(pref)
+    metals=_mai_metal_rows(scoped_results,pref)
+    topc=crypto[:3]; tops=tse[:3]; topm=metals[:3]
+    facts=[]
+    if crypto: facts.append(f"Crypto coverage: {len(crypto)} ATLAS assets; canonical executable BUYs: {sum(1 for x in crypto if x['executable'] and x['signal']=='BUY')}")
+    if tse: facts.append(f"TSE coverage: {len(tse)} liquid/quality-filtered symbols; TSE is WATCH-only in this engine")
+    if metals: facts.append(f"Metals coverage: {', '.join(x['symbol'] for x in metals)}")
+    gaps=[
+        "US/EU equities, 13F, Unusual Whales, WhaleWisdom, ETF.com, Bloomberg/Koyfin are not connected to this runtime; no current claims are made from them.",
+        "Glassnode, CryptoQuant, Nansen, Arkham, Dune, LunarCrush and Santiment are not assumed available unless their data is explicitly persisted by ATLAS.",
+        "Dedicated LME/COMEX inventories, WGC/Silver Institute, COT, lithium/uranium/aluminum/platinum/palladium feeds are not currently guaranteed; missing values remain N/A.",
+    ]
+    if not pref.get("profile_complete"):
+        gaps.append("Personal profile is incomplete (horizon/goal missing); suitability stays conditional rather than definitive.")
+    summary=[
+        f"کریپتو: {topc[0]['symbol']+' leads current evidence ranking' if topc else 'داده کافی در دسترس نیست'}.",
+        f"بورس: {'TSE smart-money/momentum watchlist is available; no canonical executable stock signal is produced' if tse else 'داده کافی در دسترس نیست'}.",
+        f"فلزات: {topm[0]['metal']+' leads currently available metals evidence' if topm else 'داده کافی در دسترس نیست'}.",
+        "تمرکز تریدرها از امتیاز/مومنتوم/سیگنال‌های ذخیره‌شده ATLAS استخراج می‌شود؛ داده اجتماعیِ تأییدنشده به‌جای آن جعل نمی‌شود.",
+        "نهنگ/پول هوشمند: برای TSE از جریان پول حقیقی/قدرت خریدار استفاده می‌شود؛ برای کریپتو فقط در صورت وجود داده مشتقات/آنچین ذخیره‌شده نتیجه‌گیری می‌شود.",
+        "علاقه نهادی فقط وقتی منبع نهادی واقعی در state وجود داشته باشد گزارش می‌شود؛ در غیر این صورت N/A است.",
+        "گزینه‌های برتر هر بازار در جداول زیر رتبه‌بندی پژوهشی‌اند؛ فقط BUY+executable=true می‌تواند وارد Allocation V6 شود.",
+    ]
+    return {
+        "engine":"ATLAS_MULTI_ASSET_INTELLIGENCE_V2","generated_at":now_utc().isoformat(),"today_tehran":now_tehran().date().isoformat(),
+        "user_id":str(uid),"profile":pref,"profile_status":"COMPLETE" if pref.get("profile_complete") else "NEEDS_PROFILE",
+        "executive_summary_7":summary,"facts":facts,
+        "top_assets":{"crypto":topc,"stocks_tse":tops,"metals":topm},
+        "tables":{"crypto":crypto[:10],"stocks_tse":tse[:10],"metals":metals[:10]},
+        "avoid":{"crypto":[x for x in crypto if x["signal"]=="SELL" or x["score_1_10"]<4.0][:8],
+                 "stocks_tse":[x for x in tse if x["smart_money"]=="outflow" and x["momentum"]<0][:8],
+                 "metals":[x for x in metals if x["signal"]=="SELL" or x["score_1_10"]<4.0][:8]},
+        "correlation_diversification":{
+            "high_correlation_warning":"Do not treat multiple high-beta crypto assets as independent diversification. TSE names in the same sector may share macro/sector beta.",
+            "inflation_growth_recession_framework":"Precious metals may hedge some inflation/stress regimes; copper is more growth-sensitive; cash remains the residual when executable evidence is absent.",
+            "method_note":"These are structural heuristics unless rolling correlation data is explicitly computed; they are not presented as measured current correlations.",
+        },
+        "sources":[x.get("source") for x in (topc+tops+topm) if x.get("source")],
+        "data_gaps":gaps,
+        "disclaimer":"Research/advisory only; not a promise of profit or automatic financial advice. Facts, analysis and unavailable data are kept separate.",
+    }
+
+
+def _mai_render_text(payload):
+    """Human-readable Persian brief matching the requested a–f structure."""
+    def top_line(x, market):
+        if market=="crypto":
+            return f"{x.get('symbol')} | {x.get('category')} | تریدر: {x.get('trader_attention')} | نهنگ: {x.get('whale_attention')} | نهادی: {x.get('institutional_attention')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} | امتیاز {x.get('score_1_10')}/10"
+        if market=="stocks":
+            return f"{x.get('symbol')} | {x.get('sector')} | پول هوشمند: {x.get('smart_money')} | مومنتوم: {x.get('momentum')}% | کاتالیست: {x.get('catalyst')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} | امتیاز {x.get('score_1_10')}/10"
+        return f"{x.get('metal')} | {x.get('type')} | تقاضا: {x.get('demand')} | عرضه: {x.get('supply')} | روند: {x.get('futures_trend')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} | امتیاز {x.get('score_1_10')}/10"
+    lines=["🌐 ATLAS | تحلیل چنددارایی",f"تاریخ: {payload.get('today_tehran')}",""]
+    lines.append("الف) خلاصه مدیریتی در ۷ بولت")
+    for x in payload.get("executive_summary_7") or []: lines.append(f"• {x}")
+    lines += ["","ب) جدول دارایی‌های برتر","کریپتو:"]
+    for x in (payload.get("tables") or {}).get("crypto",[])[:10]: lines.append("• "+top_line(x,"crypto"))
+    lines.append("بورس تهران:")
+    for x in (payload.get("tables") or {}).get("stocks_tse",[])[:10]: lines.append("• "+top_line(x,"stocks"))
+    lines.append("فلزات:")
+    for x in (payload.get("tables") or {}).get("metals",[])[:10]: lines.append("• "+top_line(x,"metals"))
+    lines += ["","ج) برای هر دارایی برتر"]
+    for market,key in (("کریپتو","crypto"),("بورس تهران","stocks_tse"),("فلزات","metals")):
+        lines.append(market+":")
+        for x in (payload.get("top_assets") or {}).get(key,[])[:3]:
+            nm=x.get("symbol") or x.get("metal")
+            lines.append(f"• {nm}: صعودی={x.get('bull_case')} | نزولی={x.get('bear_case')} | ورود={x.get('entry_method')} | ابطال={x.get('invalidation')} | سهم={x.get('allocation_range')} | همبستگی={x.get('correlation_note')}")
+    lines += ["","د) دارایی‌هایی که باید از آن‌ها دوری کنم و چرا"]
+    avoid=payload.get("avoid") or {}
+    for label,key in (("کریپتو","crypto"),("بورس تهران","stocks_tse"),("فلزات","metals")):
+        vals=avoid.get(key) or []
+        if vals:
+            lines.append(label+": "+", ".join(str(v.get("symbol") or v.get("metal")) for v in vals))
+        else:
+            lines.append(label+": مورد قطعی بر اساس داده فعلی شناسایی نشد؛ نبود داده معادل امن‌بودن نیست.")
+    div=payload.get("correlation_diversification") or {}
+    lines += ["","ه) همبستگی و تنوع‌بخشی",f"• {div.get('high_correlation_warning')}",f"• {div.get('inflation_growth_recession_framework')}",f"• {div.get('method_note')}","","و) منابع دقیق و تاریخ هر داده"]
+    for src in payload.get("sources") or []:
+        lines.append(f"• {src.get('provider')} | {src.get('timestamp')}")
+    if payload.get("data_gaps"):
+        lines.append("داده‌های در دسترس نبود:")
+        for g in payload["data_gaps"]: lines.append(f"• {g}")
+    lines += ["","تفکیک معرفتی:","• واقعیت: مقادیر داخل facts/source که مستقیماً از state ذخیره‌شده آمده‌اند.","• تحلیل: رتبه‌بندی، سناریو و مناسب‌بودن مشروط.","• حدس: در این گزارش به‌عنوان وضعیت فعلی استفاده نمی‌شود؛ داده مفقود N/A می‌ماند.","",str(payload.get("disclaimer") or "")]
+    return "\n".join(lines)
+
+
+def run_multiasset_intelligence_cycle(scoped_results):
+    """Persist per-user multi-asset research snapshots. Storage-first, non-fatal."""
+    if not ATLAS_MULTI_ASSET_INTELLIGENCE_ENABLED:
+        return {"users":0,"written":0,"history":0,"errors":[]}
+    try:
+        from atlas_desk import load_users, load_all_holdings
+        users=load_users() or {}; bags=load_all_holdings() or {}
+    except Exception as e:
+        return {"users":0,"written":0,"history":0,"errors":[f"desk load: {e}"]}
+    written=0; hist=0; errors=[]; eligible=0
+    for uid,user in users.items():
+        if not bool((user or {}).get("dm_started")):
+            continue
+        eligible+=1
+        try:
+            payload=_mai_build_payload(uid,user,(bags or {}).get(str(uid),{}) or {},scoped_results)
+            payload["rendered_text"]=_mai_render_text(payload)
+            row={"user_id":str(uid),"chat_id":str((user or {}).get("chat_id") or ""),"payload":payload,"generated_at":payload["generated_at"]}
+            if STORE.upsert("atlas_multiasset_intelligence_latest",row,"user_id"):
+                written+=1
+            else:
+                errors.append(f"{uid}: latest upsert failed")
+            h={"user_id":str(uid),"chat_id":row["chat_id"],"payload":payload,"generated_at":payload["generated_at"]}
+            if STORE.insert("atlas_multiasset_intelligence_history",h):
+                hist+=1
+        except Exception as e:
+            errors.append(f"{uid}: {e}")
+    return {"users":eligible,"written":written,"history":hist,"errors":errors}
+
 
 def _daily16_management_png(kind, results, scoped_results, portfolio_risk=None, filename=None):
     """Dense DAILY16 decision PNGs.
@@ -16982,185 +17270,6 @@ def send_iran_visual_dashboard():
 
 # =============================================================================
 
-
-# ============================================================
-# ATLAS MULTI-ASSET SENIOR RESEARCH MANDATE — SHADOW V2
-# Crypto + Tehran equities/funds + metals. Research-only.
-# This layer follows a strict FACT / ANALYSIS / UNKNOWN contract and never
-# mutates canonical action, executable, confidence, Entry/SL/TP or sizing.
-# ============================================================
-ATLAS_MULTI_ASSET_RESEARCH_V2_ENABLED = os.environ.get(
-    "ATLAS_MULTI_ASSET_RESEARCH_V2_ENABLED", "1"
-).strip().lower() not in ("0", "false", "no", "off")
-
-ATLAS_MULTI_ASSET_RESEARCH_MANDATE = {
-    "role": "Senior Multi-Asset Analyst",
-    "as_of_policy": "Use only fresh observed data; never present stale/unavailable data as current.",
-    "markets": {
-        "CRYPTO": [
-            "trader_attention", "whale_flow", "institutional_interest", "derivatives",
-            "fundamentals", "liquidity_security_regulatory_risk", "relative_to_btc_eth",
-        ],
-        "EQUITIES": [
-            "institutional_smart_money", "price_volume_momentum", "fundamentals",
-            "catalysts", "sentiment_short_interest", "sector_rotation", "macro_regulatory_risk",
-        ],
-        "METALS": [
-            "physical_industrial_demand", "inventory_supply", "etf_futures_positioning",
-            "dxy_real_yields_inflation", "gold_silver_gold_oil_ratios", "china_recession_fed_risk",
-        ],
-    },
-    "taxonomy": {
-        "crypto": ["L1", "L2", "DEFI", "AI", "RWA", "MEME", "OTHER"],
-        "metals": ["PRECIOUS", "INDUSTRIAL"],
-        "equities": ["TEHRAN", "US", "EUROPE", "EMERGING"],
-    },
-    "required_output": [
-        "executive_summary_7", "top_assets_by_market", "bull_bear_scenarios",
-        "entry_method_invalidation", "allocation_range_advisory", "correlation_diversification",
-        "avoid_list", "sources_and_timestamps", "missing_data",
-    ],
-    "truth_contract": [
-        "FACT != ANALYSIS != HYPOTHESIS",
-        "missing data must be labelled unavailable",
-        "no profit promise",
-        "WATCH/WAIT is never executable allocation",
-        "physical metal != ETF != futures",
-        "ranking is not permission to trade",
-    ],
-}
-
-
-def _ma2_freshness(ts, max_hours):
-    try:
-        dt=datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
-        age=max(0.0,(now_utc()-dt.astimezone(timezone.utc)).total_seconds()/3600.0)
-        return {"age_hours":round(age,2),"fresh":age<=max_hours}
-    except Exception:
-        return {"age_hours":None,"fresh":False}
-
-
-def _ma2_crypto_rows(results):
-    out=[]
-    for r in results or []:
-        sym=_aio_symbol(r)
-        src=r.get("multi_source") or r.get("sources") or {}
-        research=r.get("research_evidence_families_shadow") or {}
-        signal=_atlas_public_signal(r) if "_atlas_public_signal" in globals() else "WAIT"
-        executable=bool(r.get("executable")) and signal in ("BUY","SELL")
-        score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")),_aio_num(r.get("confidence")))
-        out.append({
-            "symbol":sym,"market":"CRYPTO","category":(r.get("symbol_profile_shadow") or {}).get("group") or "OTHER",
-            "signal":signal,"executable":executable,"score_1_10":round(max(0,min(10,score/10.0)),1),
-            "direction":r.get("direction"),"risk_main":r.get("gate_reason") or r.get("why_not_trade") or r.get("reason"),
-            "derivatives":r.get("regime_derivatives"),"evidence_agreement":r.get("evidence_agreement"),
-            "mtf_agreement_pct":r.get("mtf_agreement_pct"),"rr":r.get("rr"),
-            "entry":r.get("entry") if executable else None,"sl":r.get("sl") if executable else None,
-            "tp1":r.get("tp1") if executable else None,
-            "research_families":research,
-            "source_status":src if isinstance(src,dict) else {},
-            "fact_analysis_label":"FACT+ANALYSIS",
-        })
-    return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
-
-
-def _ma2_tse_rows(limit=500):
-    rows=_v3_rows("tse",limit)
-    latest={}
-    for row in rows or []:
-        pay=row.get("payload") if isinstance(row.get("payload"),dict) else {}
-        sym=str(row.get("symbol") or pay.get("symbol") or "").strip()
-        if sym and sym not in latest: latest[sym]=row
-    vals=[]
-    for sym,row in latest.items():
-        pay=row.get("payload") if isinstance(row.get("payload"),dict) else {}
-        pct=safe_float(pay.get("pct") if pay.get("pct") is not None else pay.get("change_pct")) or 0.0
-        bp=safe_float(pay.get("buyer_power"))
-        flow=safe_float(pay.get("real_money_net_volume") if pay.get("real_money_net_volume") is not None else pay.get("net_real_volume"))
-        vol=safe_float(pay.get("volume") if pay.get("volume") is not None else row.get("volume")) or 0.0
-        score=5.0 + max(-1.5,min(1.5,pct/4.0))
-        if bp is not None: score += max(-1.0,min(1.0,(bp-1.0)*1.5))
-        if flow is not None: score += 0.7 if flow>0 else -0.7 if flow<0 else 0
-        score=max(0.0,min(10.0,score))
-        fresh=_ma2_freshness(row.get("captured_at"),6)
-        vals.append({
-            "symbol":sym,"market":"TSE","sector":pay.get("sector") or pay.get("industry"),
-            "score_1_10":round(score,1),"momentum_pct":round(pct,2),"buyer_power":bp,
-            "real_money_net_volume":flow,"volume":vol,"freshness":fresh,
-            "signal":"WATCH","executable":False,
-            "catalyst":None,"fundamentals":None,
-            "risk_main":"Fundamental/catalyst fields unavailable in current Iran collector" if not pay.get("fundamentals") else None,
-            "fact_analysis_label":"FACT+ANALYSIS",
-        })
-    return sorted(vals,key=lambda x:x["score_1_10"],reverse=True)
-
-
-def _ma2_metal_rows(metal_results):
-    out=[]
-    for r in metal_results or []:
-        sym=_aio_symbol(r)
-        signal=_atlas_public_signal(r) if "_atlas_public_signal" in globals() else str(r.get("action") or "WAIT").upper()
-        score=max(_aio_num(r.get("decision_support_score")),_aio_num(r.get("opportunity_score")),_aio_num(r.get("confidence")),50.0)
-        out.append({
-            "symbol":sym,"market":"METALS","type":"PRECIOUS" if sym in ("GOLD","SILVER","XAUUSD","XAGUSD") else "INDUSTRIAL",
-            "signal":signal,"executable":bool(r.get("executable")) and signal in ("BUY","SELL"),
-            "score_1_10":round(max(0,min(10,score/10.0)),1),"trend":r.get("regime_trend") or r.get("trend"),
-            "demand":None,"inventory_supply":None,"etf_cot":None,"real_yields_dxy":None,
-            "risk_main":"Physical demand/inventory/ETF-COT macro feeds not available in current production collector",
-            "fact_analysis_label":"ANALYSIS_WITH_MISSING_FUNDAMENTAL_FEEDS",
-        })
-    return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
-
-
-def build_multi_asset_research_v2(results, metal_results):
-    """Create an auditable multi-asset research snapshot without changing live decisions."""
-    crypto=_ma2_crypto_rows(results)
-    tse=_ma2_tse_rows()
-    metals=_ma2_metal_rows(metal_results)
-    missing=[]
-    # Explicitly disclose requested research feeds that this production runtime does not currently own.
-    missing += [
-        "Glassnode/Nansen/Arkham/Dune direct on-chain feeds",
-        "LunarCrush/Santiment/Google Trends/X/Reddit direct social feeds",
-        "SEC 13F/WhaleWisdom/Unusual Whales/Quiver direct institutional feeds",
-        "LME/COMEX inventory + COT + WGC/Silver Institute direct fundamental feeds",
-        "Platinum/Palladium/Aluminium/Lithium/Uranium production coverage",
-        "US/European/emerging-market equity production coverage",
-    ]
-    # Seven-point executive layer is descriptive and fail-closed; it does not invent unavailable evidence.
-    ctop=crypto[:3]; ttop=tse[:3]; mtop=metals[:3]
-    summary=[
-        {"topic":"crypto_state","fact":"ATLAS canonical crypto scope analyzed","analysis":"Top research ranks are shadow evidence, not automatic trades","leaders":[x["symbol"] for x in ctop]},
-        {"topic":"equity_state","fact":"Current production equity feed is Tehran market snapshots","analysis":"Ranking uses momentum/real-money/buyer-power where available; fundamentals remain missing","leaders":[x["symbol"] for x in ttop]},
-        {"topic":"metals_state","fact":"Current canonical production metals scope is GOLD/SILVER/COPPER","analysis":"Technical state is available; physical/inventory/COT macro confirmation is incomplete","leaders":[x["symbol"] for x in mtop]},
-        {"topic":"trader_focus","fact":"Derived only from observed ATLAS market/derivatives evidence","analysis":"No social-source claim is made without a live feed"},
-        {"topic":"whales_smart_money","fact":"TSE real-money fields may be observed; direct crypto whale feeds are not currently connected","analysis":"Unknown is preserved as unknown"},
-        {"topic":"institutional_interest","fact":"No direct 13F/ETF/on-chain institutional feed is asserted by this layer","analysis":"Requires dedicated provider evidence before scoring"},
-        {"topic":"profile_fit","fact":"Risk profile is handled by Personal Allocation Engine when registered","analysis":"WAIT/WATCH receives zero executable allocation; ranking and allocation remain separate"},
-    ]
-    return {
-        "schema_version":"MULTI_ASSET_RESEARCH_V2",
-        "generated_at":now_utc().isoformat(),"tehran_date":now_tehran().strftime("%Y-%m-%d %H:%M"),
-        "mandate":ATLAS_MULTI_ASSET_RESEARCH_MANDATE,
-        "executive_summary_7":summary,
-        "crypto":crypto,"equities_tse":tse,"metals":metals,
-        "top3":{"crypto":[x["symbol"] for x in ctop],"tse":[x["symbol"] for x in ttop],"metals":[x["symbol"] for x in mtop]},
-        "missing_data":missing,
-        "policy":{"shadow_only":True,"promotion_gate":"WALK_FORWARD+ABLATION+OOS+COSTS","financial_advice":False,
-                  "wait_watch_executable_pct":0,"fact_analysis_hypothesis_separated":True},
-    }
-
-
-def persist_multi_asset_research_v2(results, metal_results, cycle):
-    if not ATLAS_MULTI_ASSET_RESEARCH_V2_ENABLED:
-        return {"enabled":False,"written":False}
-    payload=build_multi_asset_research_v2(results,metal_results)
-    row={"captured_at":now_utc().isoformat(),"cycle":str(cycle or "HOURLY"),"model_version":VERSION,
-         "research_version":"MULTI_ASSET_RESEARCH_V2","payload":payload}
-    ok=STORE.insert("atlas_multi_asset_research_snapshots",row)
-    return {"enabled":True,"written":bool(ok),"crypto":len(payload["crypto"]),"tse":len(payload["equities_tse"]),"metals":len(payload["metals"]),"missing":len(payload["missing_data"])}
-
 def main():
     # Summer strict book scan (does not run full ATLAS pipeline)
     if (
@@ -17247,17 +17356,6 @@ def main():
                 except Exception as e:
                     append_changelog("PHASE37_METAL_INTEL", metal, None, str(e))
                 metal_results.append(mr)
-
-        # Multi-asset senior research mandate V2 — shadow/storage only.
-        # Never mutates canonical crypto/metals decisions or execution geometry.
-        try:
-            _ma_cycle = "DAILY16" if daily_cycle else "NIGHTLY23" if nightly_cycle else "DEEP4H" if deep_cycle else "HOURLY"
-            with _AtlasTimer("MULTI-ASSET RESEARCH V2 SHADOW"):
-                _ma2 = persist_multi_asset_research_v2(results, metal_results, _ma_cycle)
-            print("🌐 Multi-Asset Research V2:", _ma2)
-        except Exception as e:
-            append_changelog("MULTI_ASSET_RESEARCH_V2", None, None, str(e))
-            print(f"⚠️ Multi-Asset Research V2 failed non-fatally: {e}")
 
         # Intelligence v2 FULL-report history marker. Stored inside the existing
         # hourly snapshot payload; no Supabase schema/table migration required.
@@ -17362,6 +17460,16 @@ def main():
             except Exception as e:
                 append_changelog("PERSONAL_ALLOCATION", None, None, str(e))
                 print(f"⚠️ Personal allocation failed non-fatally: {e}")
+
+            # Structured multi-asset research brief: crypto + TSE + metals.
+            try:
+                with _AtlasTimer("ATLAS MULTI-ASSET INTELLIGENCE V2"):
+                    _mai = run_multiasset_intelligence_cycle(scoped_results)
+                print("🌐 Multi-asset intelligence:", "users=", _mai.get("users"), "written=", _mai.get("written"), "history=", _mai.get("history"), "errors=", len(_mai.get("errors") or []))
+                for _err in (_mai.get("errors") or [])[:3]: print(f"⚠️ Multi-asset intelligence: {_err}")
+            except Exception as e:
+                append_changelog("MULTI_ASSET_INTELLIGENCE", None, None, str(e))
+                print(f"⚠️ Multi-asset intelligence failed non-fatally: {e}")
 
             # Per-user portfolio images: each Desk user receives only their own DM.
             # This is additive and must never fail or delay the canonical DAILY16 report.
@@ -17482,6 +17590,15 @@ def main():
             except Exception as e:
                 append_changelog("PERSONAL_ALLOCATION_DEEP4H", None, None, str(e))
                 print(f"⚠️ Personal allocation DEEP4H failed non-fatally: {e}")
+
+            try:
+                with _AtlasTimer("ATLAS MULTI-ASSET INTELLIGENCE V2 DEEP4H"):
+                    _mai = run_multiasset_intelligence_cycle(scoped_results)
+                print("🌐 Multi-asset intelligence DEEP4H:", "users=", _mai.get("users"), "written=", _mai.get("written"), "history=", _mai.get("history"), "errors=", len(_mai.get("errors") or []))
+                for _err in (_mai.get("errors") or [])[:3]: print(f"⚠️ Multi-asset intelligence DEEP4H: {_err}")
+            except Exception as e:
+                append_changelog("MULTI_ASSET_INTELLIGENCE_DEEP4H", None, None, str(e))
+                print(f"⚠️ Multi-asset intelligence DEEP4H failed non-fatally: {e}")
 
         # DEEP4H visual policy: send the dashboard only when the strict Book Scan
         # confirms at least one excellent 4H+1D opportunity. DAILY16 keeps its
