@@ -15686,17 +15686,47 @@ def _mai_user_preferences(uid):
         pass
     out["risk_profile"]=_alloc_profile(uid)
     required=("horizon","goal")
-    out["profile_complete"]=all(out.get(k) not in (None,"") for k in required)
+    split_vals=[out.get("crypto_pct"),out.get("stocks_pct"),out.get("metals_pct")]
+    split_ok=all(v is not None for v in split_vals) and abs(sum(_alloc_num(v) for v in split_vals)-100.0)<0.01
+    capital_ok=_alloc_num(out.get("capital_usd"))>0 or _alloc_num(out.get("capital_irr"))>0
+    out["profile_complete"]=all(out.get(k) not in (None,"") for k in required) and split_ok and capital_ok
+    out["profile_validation"]={"split_ok":split_ok,"capital_ok":capital_ok}
     return out
 
 
-def _mai_fit_label(pref, group, symbol):
+def _mai_profile_fit(pref, group, symbol, category=None):
+    """Profile-aware suitability explanation. Never upgrades canonical signal state."""
     if not pref.get("profile_complete"):
-        return "نیاز به تکمیل پروفایل"
-    excluded={str(x).upper() for x in (pref.get("excluded_markets") or [])}
-    if group.upper() in excluded or str(symbol).upper() in excluded:
-        return "خیر"
-    return "مشروط"
+        return {"label":"نیاز به تکمیل پروفایل","reason":"پروفایل سرمایه‌گذار کامل نیست","hard_block":False}
+    excluded={str(x).strip().upper() for x in (pref.get("excluded_markets") or [])}
+    g=str(group or "").upper(); s=str(symbol or "").upper(); cat=str(category or "").upper()
+    if g in excluded or s in excluded or (cat and cat in excluded):
+        blocked=s if s in excluded else (cat if cat in excluded else g)
+        return {"label":"نامناسب","reason":f"با محدودیت ثبت‌شده کاربر ({blocked}) تعارض دارد","hard_block":True}
+    risk=str(pref.get("risk_profile") or "MODERATE").upper()
+    horizon=str(pref.get("horizon") or "").upper()
+    goal=str(pref.get("goal") or "").upper()
+    reasons=[f"ریسک={risk}",f"افق={horizon}",f"هدف={goal}"]
+    if g=="CRYPTO":
+        reasons.append("بتای کریپتو بالاست")
+    elif g=="METALS":
+        reasons.append("نوع فلز و نقش تنوع‌بخشی/چرخه کلان باید لحاظ شود")
+    elif g=="TSE":
+        reasons.append("ریسک نقدشوندگی و کلان بورس تهران باقی است")
+    return {"label":"مشروط","reason":"؛ ".join(reasons),"hard_block":False}
+
+
+def _mai_fit_label(pref, group, symbol):
+    return _mai_profile_fit(pref,group,symbol).get("label","مشروط")
+
+
+def _mai_profile_budget(pref, market):
+    key={"CRYPTO":"crypto_pct","TSE":"stocks_pct","METALS":"metals_pct"}.get(str(market or "").upper())
+    pct=_alloc_num(pref.get(key)) if key else 0.0
+    cap_usd=_alloc_num(pref.get("capital_usd")); cap_irr=_alloc_num(pref.get("capital_irr"))
+    return {"target_pct":pct,
+            "target_usd":round(cap_usd*pct/100.0,2) if cap_usd>0 else None,
+            "target_irr":round(cap_irr*pct/100.0,2) if cap_irr>0 else None}
 
 
 def _mai_iso_timestamp(value):
@@ -15716,36 +15746,61 @@ def _mai_iso_timestamp(value):
     return str(value)
 
 
-def _mai_derivatives_summary(r):
-    """Expose only derivatives fields actually persisted in the canonical result."""
+def _mai_walk_dicts(obj, depth=0):
+    if depth>5: return []
+    out=[]
+    if isinstance(obj,dict):
+        out.append(obj)
+        for v in obj.values(): out.extend(_mai_walk_dicts(v,depth+1))
+    elif isinstance(obj,(list,tuple)):
+        for v in obj[:30]: out.extend(_mai_walk_dicts(v,depth+1))
+    return out
+
+
+def _mai_first_persisted_metric(r, aliases):
+    keys={str(x).lower().replace("-","_").replace(" ","_") for x in aliases}
+    for d in _mai_walk_dicts(r):
+        for k,v in d.items():
+            nk=str(k).lower().replace("-","_").replace(" ","_")
+            if nk in keys and v not in (None,"","N/A",[],{}):
+                return v
+    return None
+
+
+def _mai_derivatives_evidence(r):
+    """One shadow evidence family; reads persisted metrics only and never fetches/fabricates."""
+    aliases={
+        "funding_rate":["funding_rate","funding","fundingrate","weighted_funding","oi_weighted_funding"],
+        "open_interest":["open_interest","openinterest","oi","oi_usd"],
+        "oi_change":["open_interest_change","oi_change","delta_oi","oi_delta","oi_change_pct"],
+        "long_short_ratio":["long_short_ratio","longshortratio","ls_ratio","global_long_short_ratio"],
+        "top_trader_ratio":["top_trader_long_short_ratio","top_trader_ratio","top_long_short_ratio"],
+        "taker_flow":["taker_buy_sell_ratio","taker_ratio","taker_flow","taker_buy_sell_volume"],
+        "basis":["basis","futures_basis","basis_pct"],
+        "liquidations":["liquidations","liquidation_volume","liq_volume"],
+    }
+    metrics={k:_mai_first_persisted_metric(r,a) for k,a in aliases.items()}
+    metrics={k:v for k,v in metrics.items() if v not in (None,"","N/A",[],{})}
     src=r.get("source_validation") or r.get("multi_source_validation") or {}
-    if not isinstance(src,dict):
-        return ""
-    cg=src.get("coinglass") if isinstance(src.get("coinglass"),dict) else {}
-    der=src.get("derivatives") if isinstance(src.get("derivatives"),dict) else {}
-    merged={**der, **cg}
+    observed=bool(metrics)
+    if isinstance(src,dict):
+        observed=observed or bool(src.get("coinglass") or src.get("derivatives") or src.get("futures"))
+    labels={"funding_rate":"Funding","open_interest":"OI","oi_change":"ΔOI","long_short_ratio":"L/S",
+            "top_trader_ratio":"TopTraders","taker_flow":"Taker","basis":"Basis","liquidations":"Liq"}
     parts=[]
-    mapping=(
-        ("funding_rate","funding"),("open_interest","OI"),("open_interest_change","ΔOI"),
-        ("oi_change","ΔOI"),("long_short_ratio","L/S"),("top_trader_long_short_ratio","top-trader L/S"),
-        ("taker_buy_sell_ratio","taker B/S"),("taker_buy_sell_volume","taker flow"),
-    )
-    seen=set()
-    for key,label in mapping:
-        val=merged.get(key)
-        if val in (None, "", "N/A") or label in seen: continue
-        seen.add(label)
-        try:
-            fv=float(val)
-            if key=="funding_rate": parts.append(f"{label} {fv:.5f}")
-            else: parts.append(f"{label} {fv:.3g}")
-        except Exception:
-            parts.append(f"{label} {val}")
-    if parts:
-        return "; "+"; ".join(parts)
-    if cg or der or src.get("coinglass") or src.get("derivatives"):
-        return "; derivatives observed (metrics unavailable)"
-    return ""
+    for k,v in metrics.items():
+        try: vv=f"{float(v):.6g}"
+        except Exception: vv=str(v)
+        parts.append(f"{labels[k]}={vv}")
+    return {"family":"DERIVATIVES","observed":observed,"metrics":metrics,
+            "summary":"; ".join(parts) if parts else ("derivatives observed (metrics unavailable)" if observed else "N/A"),
+            "shadow_only":True,"promotion_gate":"WALK_FORWARD+ABLATION+OOS+COSTS",
+            "promotion_status":"SHADOW_ONLY_NOT_PROMOTED"}
+
+
+def _mai_derivatives_summary(r):
+    d=_mai_derivatives_evidence(r)
+    return ("; "+d["summary"]) if d.get("observed") else ""
 
 
 def _mai_metal_symbol(sym):
@@ -15772,18 +15827,23 @@ def _mai_crypto_rows(scoped_results, pref):
         score=max(1.0,min(10.0,(0.45*opp+0.35*conf+0.20*(50+2.5*chg))/10.0))
         fam=r.get("research_evidence_families_shadow") or {}
         whale="N/A"; inst="N/A"
+        category=_mai_crypto_category(sym)
+        deriv=_mai_derivatives_evidence(r)
         trader=f"{sig}; conf {conf:.0f}" if conf else sig
-        trader += _mai_derivatives_summary(r)
-        risk="High volatility / token-specific risk" if _mai_crypto_category(sym) in {"MEME","OTHER"} else "Crypto market/regulatory volatility"
+        if deriv.get("observed"): trader += "; "+str(deriv.get("summary"))
+        risk="High volatility / token-specific risk" if category in {"MEME","OTHER"} else "Crypto market/regulatory volatility"
+        fitx=_mai_profile_fit(pref,"CRYPTO",sym,category)
         entry="WAIT — trigger not confirmed"; invalid="Canonical invalidation unavailable"; alloc="0% now"
         if bool(r.get("executable")) and sig=="BUY":
             entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"
             invalid=f"SL {r.get('sl')}" if r.get("sl") is not None else "Canonical BUY invalidation"
             alloc="1–5% range; bounded by risk profile"
         rows.append({
-            "symbol":sym,"category":_mai_crypto_category(sym),"trader_attention":trader,
+            "symbol":sym,"category":category,"trader_attention":trader,
             "whale_attention":whale,"institutional_attention":inst,"risk":risk,
-            "fit":_mai_fit_label(pref,"CRYPTO",sym),"score_1_10":round(score,1),
+            "fit":fitx["label"],"fit_reason":fitx["reason"],"profile_hard_block":fitx["hard_block"],
+            "profile_budget":_mai_profile_budget(pref,"CRYPTO"),"score_1_10":round(score,1),
+            "derivatives_evidence":deriv,
             "signal":sig,"executable":bool(r.get("executable")),"price":r.get("price"),
             "bull_case":"Trend/structure and momentum continue with confirmation" if sig!="SELL" else "Requires reversal of current bearish state",
             "bear_case":"Structure invalidates or liquidity/momentum deteriorates",
@@ -15817,7 +15877,11 @@ def _mai_tse_rows(pref):
             out.append({
                 "symbol":str(sym),"sector":p.get("sector") or "N/A","smart_money":money,"momentum":round(pct,2),
                 "catalyst":"N/A — no verified catalyst feed in current TSE Data Plane","risk":"TSE liquidity/regulatory/macro risk",
-                "fit":_mai_fit_label(pref,"TSE",sym),"score_1_10":round(score,1),"signal":"WATCH","executable":False,
+                "fit":_mai_profile_fit(pref,"TSE",sym,p.get("sector"))["label"],
+                "fit_reason":_mai_profile_fit(pref,"TSE",sym,p.get("sector"))["reason"],
+                "profile_hard_block":_mai_profile_fit(pref,"TSE",sym,p.get("sector"))["hard_block"],
+                "profile_budget":_mai_profile_budget(pref,"TSE"),
+                "score_1_10":round(score,1),"signal":"WATCH","executable":False,
                 "bull_case":"Positive real-money flow/buyer power persists with price confirmation","bear_case":"Real-money flow reverses or buyer power weakens",
                 "entry_method":"WATCH only — no canonical TSE BUY engine, so no executable entry","invalidation":"Flow/momentum thesis invalidates; no fabricated price stop",
                 "allocation_range":"0% now until a canonical executable TSE signal exists","correlation_note":"Sector and Tehran-market beta can dominate; diversify by sector and macro exposure",
@@ -15843,7 +15907,11 @@ def _mai_metal_rows(scoped_results, pref):
         out.append({
             "metal":metal,"symbol":metal,"source_symbol":raw,"type":kind,"demand":"N/A — dedicated physical/industrial demand feed not connected",
             "supply":"N/A — LME/COMEX/WGC/Silver Institute inventory feed not connected","futures_trend":sig,
-            "risk":"Real yields/USD for precious metals; China/industrial cycle for copper","fit":_mai_fit_label(pref,"METALS",metal),
+            "risk":"Real yields/USD for precious metals; China/industrial cycle for copper",
+            "fit":_mai_profile_fit(pref,"METALS",metal,kind)["label"],
+            "fit_reason":_mai_profile_fit(pref,"METALS",metal,kind)["reason"],
+            "profile_hard_block":_mai_profile_fit(pref,"METALS",metal,kind)["hard_block"],
+            "profile_budget":_mai_profile_budget(pref,"METALS"),
             "score_1_10":round(score,1),"signal":sig,"executable":bool(r.get("executable")),"bull_case":"Macro/technical trend remains supportive and confirmation persists",
             "bear_case":"USD/real-yield or industrial-demand regime turns adverse; structure invalidates","entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
             "correlation_note":"Gold can diversify risk assets; silver/copper carry more cyclical beta. Verify rolling correlation.","instrument_note":"Physical, ETF and futures have different custody, tracking, leverage and roll risks.",
@@ -15892,8 +15960,8 @@ def _mai_build_payload(uid, user, bag, scoped_results):
     return {
         # Stable root-level metadata contract for Supabase/Edge consumers.
         # Keep these fields at payload root so SQL queries never need to infer nested paths.
-        "engine_version":"MULTI_ASSET_V2",
-        "engine":"ATLAS_MULTI_ASSET_INTELLIGENCE_V2",
+        "engine_version":"MULTI_ASSET_V2_1",
+        "engine":"ATLAS_MULTI_ASSET_INTELLIGENCE_V2_1",
         "status":_status,
         "risk_profile":_risk_profile,
         "profile_complete":_profile_complete,
@@ -15903,6 +15971,15 @@ def _mai_build_payload(uid, user, bag, scoped_results):
         "profile":pref,
         "profile_status":"COMPLETE" if _profile_complete else "NEEDS_PROFILE",
         "data_coverage":_data_coverage,
+        "profile_policy":{"risk_profile":_risk_profile,"horizon":pref.get("horizon"),"goal":pref.get("goal"),
+                          "excluded_markets":pref.get("excluded_markets") or [],"platforms":pref.get("platforms") or [],
+                          "market_budgets":{"crypto":_mai_profile_budget(pref,"CRYPTO"),
+                                            "tse":_mai_profile_budget(pref,"TSE"),
+                                            "metals":_mai_profile_budget(pref,"METALS")}},
+        "derivatives_policy":{"mode":"SHADOW_ONLY","family":"DERIVATIVES",
+                              "double_count_guard":"multiple providers/metrics are one evidence family",
+                              "promotion_gate":"WALK_FORWARD+ABLATION+OOS+COSTS",
+                              "canonical_signal_impact":"NONE_UNTIL_PROMOTED"},
         "executive_summary_7":summary,"facts":facts,
         "top_assets":{"crypto":topc,"stocks_tse":tops,"metals":topm},
         "tables":{"crypto":crypto[:10],"stocks_tse":tse[:10],"metals":metals[:10]},
@@ -15924,10 +16001,10 @@ def _mai_render_text(payload):
     """Human-readable Persian brief matching the requested a–f structure."""
     def top_line(x, market):
         if market=="crypto":
-            return f"{x.get('symbol')} | {x.get('category')} | تریدر: {x.get('trader_attention')} | نهنگ: {x.get('whale_attention')} | نهادی: {x.get('institutional_attention')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} | امتیاز {x.get('score_1_10')}/10"
+            return f"{x.get('symbol')} | {x.get('category')} | تریدر: {x.get('trader_attention')} | نهنگ: {x.get('whale_attention')} | نهادی: {x.get('institutional_attention')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} — {x.get('fit_reason','')} | Research Evidence Score {x.get('score_1_10')}/10"
         if market=="stocks":
-            return f"{x.get('symbol')} | {x.get('sector')} | پول هوشمند: {x.get('smart_money')} | مومنتوم: {x.get('momentum')}% | کاتالیست: {x.get('catalyst')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} | امتیاز {x.get('score_1_10')}/10"
-        return f"{x.get('metal')} | {x.get('type')} | تقاضا: {x.get('demand')} | عرضه: {x.get('supply')} | روند: {x.get('futures_trend')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} | امتیاز {x.get('score_1_10')}/10"
+            return f"{x.get('symbol')} | {x.get('sector')} | پول هوشمند: {x.get('smart_money')} | مومنتوم: {x.get('momentum')}% | کاتالیست: {x.get('catalyst')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} — {x.get('fit_reason','')} | Research Evidence Score {x.get('score_1_10')}/10"
+        return f"{x.get('metal')} | {x.get('type')} | تقاضا: {x.get('demand')} | عرضه: {x.get('supply')} | روند: {x.get('futures_trend')} | ریسک: {x.get('risk')} | مناسب من؟ {x.get('fit')} — {x.get('fit_reason','')} | Research Evidence Score {x.get('score_1_10')}/10"
     lines=["🌐 ATLAS | تحلیل چنددارایی",f"تاریخ: {payload.get('today_tehran')}",""]
     lines.append("الف) خلاصه مدیریتی در ۷ بولت")
     for x in payload.get("executive_summary_7") or []: lines.append(f"• {x}")
@@ -15958,7 +16035,12 @@ def _mai_render_text(payload):
         else:
             lines.append(label+": NO-TRADE قطعی از داده فعلی استخراج نشد؛ نبود داده معادل امن‌بودن نیست.")
     div=payload.get("correlation_diversification") or {}
-    lines += ["","ه) همبستگی و تنوع‌بخشی",f"• {div.get('high_correlation_warning')}",f"• {div.get('inflation_growth_recession_framework')}",f"• {div.get('method_note')}","","و) منابع دقیق و تاریخ هر داده"]
+    lines += ["","ه) همبستگی و تنوع‌بخشی",f"• {div.get('high_correlation_warning')}",f"• {div.get('inflation_growth_recession_framework')}",f"• {div.get('method_note')}"]
+    dp=payload.get("derivatives_policy") or {}; pp=payload.get("profile_policy") or {}
+    lines += ["","سیاست V2.1:",
+              f"• مشتقات: {dp.get('mode')}؛ تا عبور از {dp.get('promotion_gate')} روی BUY/SELL canonical اثر ندارد.",
+              f"• پروفایل: Risk={pp.get('risk_profile')} | Horizon={pp.get('horizon')} | Goal={pp.get('goal')} | Excluded={', '.join(pp.get('excluded_markets') or []) or 'هیچ'}",
+              "","و) منابع دقیق و تاریخ هر داده"]
     for src in payload.get("sources") or []:
         lines.append(f"• {src.get('provider')} | {src.get('timestamp')}")
     if payload.get("data_gaps"):
