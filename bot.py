@@ -15699,11 +15699,71 @@ def _mai_fit_label(pref, group, symbol):
     return "مشروط"
 
 
+def _mai_iso_timestamp(value):
+    """Normalize stored timestamps for human-readable research output."""
+    if value in (None, ""):
+        return now_utc().isoformat()
+    try:
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+            n=float(value)
+            if n > 1e12:
+                n /= 1000.0
+            elif n > 1e10:
+                n /= 1000.0
+            return datetime.fromtimestamp(n, tz=timezone.utc).isoformat()
+    except Exception:
+        pass
+    return str(value)
+
+
+def _mai_derivatives_summary(r):
+    """Expose only derivatives fields actually persisted in the canonical result."""
+    src=r.get("source_validation") or r.get("multi_source_validation") or {}
+    if not isinstance(src,dict):
+        return ""
+    cg=src.get("coinglass") if isinstance(src.get("coinglass"),dict) else {}
+    der=src.get("derivatives") if isinstance(src.get("derivatives"),dict) else {}
+    merged={**der, **cg}
+    parts=[]
+    mapping=(
+        ("funding_rate","funding"),("open_interest","OI"),("open_interest_change","ΔOI"),
+        ("oi_change","ΔOI"),("long_short_ratio","L/S"),("top_trader_long_short_ratio","top-trader L/S"),
+        ("taker_buy_sell_ratio","taker B/S"),("taker_buy_sell_volume","taker flow"),
+    )
+    seen=set()
+    for key,label in mapping:
+        val=merged.get(key)
+        if val in (None, "", "N/A") or label in seen: continue
+        seen.add(label)
+        try:
+            fv=float(val)
+            if key=="funding_rate": parts.append(f"{label} {fv:.5f}")
+            else: parts.append(f"{label} {fv:.3g}")
+        except Exception:
+            parts.append(f"{label} {val}")
+    if parts:
+        return "; "+"; ".join(parts)
+    if cg or der or src.get("coinglass") or src.get("derivatives"):
+        return "; derivatives observed (metrics unavailable)"
+    return ""
+
+
+def _mai_metal_symbol(sym):
+    s=str(sym or "").upper().strip()
+    aliases={
+        "GOLD":"GOLD", "XAU":"GOLD", "XAUUSD":"GOLD", "GOLD18":"GOLD18", "COIN_EMAMI":"COIN_EMAMI",
+        "SILVER":"SILVER", "XAG":"SILVER", "XAGUSD":"SILVER", "SILVER999":"SILVER999", "SILVER999_FAIR":"SILVER999_FAIR",
+        "COPPER":"COPPER", "HG":"COPPER", "XCUUSD":"COPPER",
+    }
+    return aliases.get(s)
+
+
 def _mai_crypto_rows(scoped_results, pref):
     rows=[]
     for r in scoped_results or []:
         sym=_aio_symbol(r).upper()
-        if not sym or sym in {"XAUUSD","XAGUSD","COPPER","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"}:
+        # Hard asset-class boundary: metals must never leak into Crypto Research.
+        if not sym or _mai_metal_symbol(sym) is not None:
             continue
         sig=_atlas_public_signal(r)
         opp=max(_alloc_num(r.get("opportunity_score")),_alloc_num(r.get("score")))
@@ -15711,16 +15771,11 @@ def _mai_crypto_rows(scoped_results, pref):
         chg=max(-20.0,min(20.0,_atlas_visual_change(r)))
         score=max(1.0,min(10.0,(0.45*opp+0.35*conf+0.20*(50+2.5*chg))/10.0))
         fam=r.get("research_evidence_families_shadow") or {}
-        src=r.get("source_validation") or r.get("multi_source_validation") or {}
-        whale="N/A"
-        inst="N/A"
+        whale="N/A"; inst="N/A"
         trader=f"{sig}; conf {conf:.0f}" if conf else sig
-        if isinstance(src,dict):
-            if src.get("coinglass") or src.get("derivatives"): trader += "; derivatives observed"
+        trader += _mai_derivatives_summary(r)
         risk="High volatility / token-specific risk" if _mai_crypto_category(sym) in {"MEME","OTHER"} else "Crypto market/regulatory volatility"
-        entry="WAIT — trigger not confirmed"
-        invalid="Canonical invalidation unavailable"
-        alloc="0% now"
+        entry="WAIT — trigger not confirmed"; invalid="Canonical invalidation unavailable"; alloc="0% now"
         if bool(r.get("executable")) and sig=="BUY":
             entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"
             invalid=f"SL {r.get('sl')}" if r.get("sl") is not None else "Canonical BUY invalidation"
@@ -15735,23 +15790,22 @@ def _mai_crypto_rows(scoped_results, pref):
             "entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
             "correlation_note":"Likely positively correlated with broad crypto beta; verify rolling correlation before sizing",
             "facts":{"opportunity_score":opp,"confidence":conf,"change_metric":chg,"research_families":fam},
-            "source":{"provider":"ATLAS exchange/market-data + stored evidence","timestamp":r.get("signal_candle_ts") or now_utc().isoformat()},
+            "source":{"provider":"ATLAS exchange/market-data + stored evidence","timestamp":_mai_iso_timestamp(r.get("signal_candle_ts") or now_utc().isoformat())},
         })
     return sorted(rows,key=lambda x:x["score_1_10"],reverse=True)
-
 
 def _mai_tse_rows(pref):
     out=[]
     try:
         tse=_iran_dash_latest(_v3_rows("tse",1500))
+        # Funds/commodity ETFs have their own canonical table and must not be ranked as ordinary TSE equities.
+        fund_symbols={str(x.get("symbol") or "").strip() for x in _v3_funds() if isinstance(x,dict)}
         raw=[]
         for sym,row in tse.items():
-            if sym=="TSE_MARKET" or not row: continue
+            if sym=="TSE_MARKET" or not row or str(sym).strip() in fund_symbols: continue
             p=row.get("payload") if isinstance(row.get("payload"),dict) else {}
-            pct=_alloc_num(p.get("pct",p.get("change_pct",0)))
-            bp=_alloc_num(p.get("real_buyer_power"),1.0)
-            flow=_alloc_num(p.get("real_net_volume"),0.0)
-            vol=_alloc_num(p.get("volume"),0.0)
+            pct=_alloc_num(p.get("pct",p.get("change_pct",0))); bp=_alloc_num(p.get("real_buyer_power"),1.0)
+            flow=_alloc_num(p.get("real_net_volume"),0.0); vol=_alloc_num(p.get("volume"),0.0)
             value=_alloc_num(row.get("value",p.get("trade_value")),0.0)
             if value<=0 or abs(pct)>20: continue
             fr=flow/vol if vol>0 else 0.0
@@ -15759,56 +15813,43 @@ def _mai_tse_rows(pref):
         vals=[x[7] for x in raw]; flows=[x[6] for x in raw]
         for sym,row,p,pct,bp,flow,fr,value in raw:
             score=50 + max(-10,min(10,pct*2.5)) + max(-10,min(10,(bp-1)*10)) + (_alloc_pct_rank(flows,fr)-0.5)*18 + _alloc_pct_rank(vals,value)*6
-            score=max(1.0,min(10.0,score/10.0))
-            money="inflow" if flow>0 else "outflow" if flow<0 else "neutral"
+            score=max(1.0,min(10.0,score/10.0)); money="inflow" if flow>0 else "outflow" if flow<0 else "neutral"
             out.append({
-                "symbol":str(sym),"sector":p.get("sector") or "N/A","smart_money":money,
-                "momentum":round(pct,2),"catalyst":"N/A — no verified catalyst feed in current TSE Data Plane",
-                "risk":"TSE liquidity/regulatory/macro risk","fit":_mai_fit_label(pref,"TSE",sym),
-                "score_1_10":round(score,1),"signal":"WATCH","executable":False,
-                "bull_case":"Positive real-money flow/buyer power persists with price confirmation",
-                "bear_case":"Real-money flow reverses or buyer power weakens",
-                "entry_method":"WATCH only — no canonical TSE BUY engine, so no executable entry",
-                "invalidation":"Flow/momentum thesis invalidates; no fabricated price stop",
-                "allocation_range":"0% now until a canonical executable TSE signal exists",
-                "correlation_note":"Sector and Tehran-market beta can dominate; diversify by sector and macro exposure",
+                "symbol":str(sym),"sector":p.get("sector") or "N/A","smart_money":money,"momentum":round(pct,2),
+                "catalyst":"N/A — no verified catalyst feed in current TSE Data Plane","risk":"TSE liquidity/regulatory/macro risk",
+                "fit":_mai_fit_label(pref,"TSE",sym),"score_1_10":round(score,1),"signal":"WATCH","executable":False,
+                "bull_case":"Positive real-money flow/buyer power persists with price confirmation","bear_case":"Real-money flow reverses or buyer power weakens",
+                "entry_method":"WATCH only — no canonical TSE BUY engine, so no executable entry","invalidation":"Flow/momentum thesis invalidates; no fabricated price stop",
+                "allocation_range":"0% now until a canonical executable TSE signal exists","correlation_note":"Sector and Tehran-market beta can dominate; diversify by sector and macro exposure",
                 "facts":{"pct":pct,"buyer_power":bp,"real_net_volume":flow,"trade_value":value},
-                "source":{"provider":str(p.get("provider") or "BRSAPI/TSE Data Plane"),"timestamp":row.get("captured_at")},
+                "source":{"provider":str(p.get("provider") or "BRSAPI/TSE Data Plane"),"timestamp":_mai_iso_timestamp(row.get("captured_at"))},
             })
-    except Exception as e:
-        print(f"⚠️ multi-asset TSE rows: {e}")
+    except Exception as e: print(f"⚠️ multi-asset TSE rows: {e}")
     return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
-
 
 def _mai_metal_rows(scoped_results, pref):
-    metals={"XAUUSD":"GOLD","XAGUSD":"SILVER","COPPER":"COPPER","GOLD18":"GOLD18","SILVER999":"SILVER999","SILVER999_FAIR":"SILVER999_FAIR","COIN_EMAMI":"COIN_EMAMI"}
-    out=[]
+    out=[]; seen=set()
     for r in scoped_results or []:
-        sym=_aio_symbol(r).upper()
-        if sym not in metals: continue
+        raw=_aio_symbol(r).upper(); metal=_mai_metal_symbol(raw)
+        if metal not in {"GOLD","SILVER","COPPER"}: continue
+        # Exact ATLAS scope is 3 global metals; normalize aliases and keep one row per metal.
+        if metal in seen: continue
+        seen.add(metal)
         sig=_atlas_public_signal(r); opp=max(_alloc_num(r.get("opportunity_score")),_alloc_num(r.get("score"))); conf=max(_alloc_num(r.get("confidence")),_alloc_num(r.get("decision_confidence")))
-        score=max(1.0,min(10.0,(0.55*opp+0.45*conf)/10.0 if max(opp,conf)>0 else 5.0))
-        kind="گران‌بها" if sym in {"XAUUSD","XAGUSD","GOLD18","SILVER999","SILVER999_FAIR","COIN_EMAMI"} else "صنعتی"
+        score=max(1.0,min(10.0,(0.55*opp+0.45*conf)/10.0 if max(opp,conf)>0 else 5.0)); kind="گران‌بها" if metal in {"GOLD","SILVER"} else "صنعتی"
         entry="WAIT — trigger not confirmed"; invalid="Canonical invalidation unavailable"; alloc="0% now"
         if bool(r.get("executable")) and sig=="BUY":
-            entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"
-            invalid=f"SL {r.get('sl')}" if r.get("sl") is not None else "Canonical BUY invalidation"
-            alloc="2–8% range; physical/ETF/futures instrument changes risk"
+            entry=f"Entry {r.get('entry')}" if r.get("entry") is not None else "Canonical BUY; staged entry"; invalid=f"SL {r.get('sl')}" if r.get("sl") is not None else "Canonical BUY invalidation"; alloc="2–8% range; physical/ETF/futures instrument changes risk"
         out.append({
-            "metal":metals[sym],"symbol":sym,"type":kind,"demand":"N/A — dedicated physical/industrial demand feed not connected",
+            "metal":metal,"symbol":metal,"source_symbol":raw,"type":kind,"demand":"N/A — dedicated physical/industrial demand feed not connected",
             "supply":"N/A — LME/COMEX/WGC/Silver Institute inventory feed not connected","futures_trend":sig,
-            "risk":"Real yields/USD for precious metals; China/industrial cycle for copper",
-            "fit":_mai_fit_label(pref,"METALS",sym),"score_1_10":round(score,1),"signal":sig,"executable":bool(r.get("executable")),
-            "bull_case":"Macro/technical trend remains supportive and confirmation persists",
-            "bear_case":"USD/real-yield or industrial-demand regime turns adverse; structure invalidates",
-            "entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
-            "correlation_note":"Gold can diversify risk assets; silver/copper carry more cyclical beta. Verify rolling correlation.",
-            "instrument_note":"Physical, ETF and futures have different custody, tracking, leverage and roll risks.",
-            "facts":{"opportunity_score":opp,"confidence":conf,"price":r.get("price")},
-            "source":{"provider":"ATLAS stored metals market data","timestamp":r.get("signal_candle_ts") or now_utc().isoformat()},
+            "risk":"Real yields/USD for precious metals; China/industrial cycle for copper","fit":_mai_fit_label(pref,"METALS",metal),
+            "score_1_10":round(score,1),"signal":sig,"executable":bool(r.get("executable")),"bull_case":"Macro/technical trend remains supportive and confirmation persists",
+            "bear_case":"USD/real-yield or industrial-demand regime turns adverse; structure invalidates","entry_method":entry,"invalidation":invalid,"allocation_range":alloc,
+            "correlation_note":"Gold can diversify risk assets; silver/copper carry more cyclical beta. Verify rolling correlation.","instrument_note":"Physical, ETF and futures have different custody, tracking, leverage and roll risks.",
+            "facts":{"opportunity_score":opp,"confidence":conf,"price":r.get("price")},"source":{"provider":"ATLAS stored metals market data","timestamp":_mai_iso_timestamp(r.get("signal_candle_ts") or now_utc().isoformat())},
         })
     return sorted(out,key=lambda x:x["score_1_10"],reverse=True)
-
 
 def _mai_build_payload(uid, user, bag, scoped_results):
     pref=_mai_user_preferences(uid)
@@ -15902,14 +15943,20 @@ def _mai_render_text(payload):
         for x in (payload.get("top_assets") or {}).get(key,[])[:3]:
             nm=x.get("symbol") or x.get("metal")
             lines.append(f"• {nm}: صعودی={x.get('bull_case')} | نزولی={x.get('bear_case')} | ورود={x.get('entry_method')} | ابطال={x.get('invalidation')} | سهم={x.get('allocation_range')} | همبستگی={x.get('correlation_note')}")
-    lines += ["","د) دارایی‌هایی که باید از آن‌ها دوری کنم و چرا"]
+    lines += ["","د) NO-TRADE / شواهد ناکافی / وضعیت نامطلوب"]
     avoid=payload.get("avoid") or {}
     for label,key in (("کریپتو","crypto"),("بورس تهران","stocks_tse"),("فلزات","metals")):
         vals=avoid.get(key) or []
         if vals:
-            lines.append(label+": "+", ".join(str(v.get("symbol") or v.get("metal")) for v in vals))
+            lines.append(label+":")
+            for v in vals:
+                nm=str(v.get("symbol") or v.get("metal"))
+                if v.get("signal")=="SELL": reason="canonical SELL / bearish state"
+                elif v.get("smart_money")=="outflow" and _alloc_num(v.get("momentum"))<0: reason="real-money outflow + negative momentum"
+                else: reason=f"insufficient evidence / low research score {v.get('score_1_10')}"
+                lines.append(f"• {nm} — NO-TRADE: {reason}")
         else:
-            lines.append(label+": مورد قطعی بر اساس داده فعلی شناسایی نشد؛ نبود داده معادل امن‌بودن نیست.")
+            lines.append(label+": NO-TRADE قطعی از داده فعلی استخراج نشد؛ نبود داده معادل امن‌بودن نیست.")
     div=payload.get("correlation_diversification") or {}
     lines += ["","ه) همبستگی و تنوع‌بخشی",f"• {div.get('high_correlation_warning')}",f"• {div.get('inflation_growth_recession_framework')}",f"• {div.get('method_note')}","","و) منابع دقیق و تاریخ هر داده"]
     for src in payload.get("sources") or []:
