@@ -15402,15 +15402,22 @@ def _alloc_num(x, default=0.0):
     v=safe_float(x)
     return default if v is None else float(v)
 
+_ALLOC_PROFILE_RUN_CACHE={}
+
 def _alloc_profile(uid):
+    key=str(uid)
+    if key in _ALLOC_PROFILE_RUN_CACHE:
+        return _ALLOC_PROFILE_RUN_CACHE[key]
     try:
         rows=STORE.select("atlas_desk_allocation_preferences", {
             "select":"risk_profile", "user_id":f"eq.{uid}", "limit":"1"
         })
         x=str((rows[0] if rows else {}).get("risk_profile") or "MODERATE").upper()
-        return x if x in _ALLOC_PROFILES else "MODERATE"
+        x=x if x in _ALLOC_PROFILES else "MODERATE"
     except Exception:
-        return "MODERATE"
+        x="MODERATE"
+    _ALLOC_PROFILE_RUN_CACHE[key]=x
+    return x
 
 def _alloc_pct_rank(values, x):
     vals=sorted(float(v) for v in values if v is not None and math.isfinite(float(v)))
@@ -15717,7 +15724,17 @@ def _mai_crypto_category(sym):
     return "OTHER"
 
 
+_MAI_PREF_RUN_CACHE={}
+
 def _mai_user_preferences(uid):
+    key=str(uid)
+    cached=_MAI_PREF_RUN_CACHE.get(key)
+    if cached is not None:
+        out=dict(cached)
+        out["excluded_markets"]=list(cached.get("excluded_markets") or [])
+        out["platforms"]=list(cached.get("platforms") or [])
+        out["profile_validation"]=dict(cached.get("profile_validation") or {})
+        return out
     out={"capital_usd":None,"capital_irr":None,"crypto_pct":None,"stocks_pct":None,"metals_pct":None,
          "horizon":None,"goal":None,"excluded_markets":[],"platforms":[],"equity_scope":"TSE"}
     try:
@@ -15735,6 +15752,11 @@ def _mai_user_preferences(uid):
     capital_ok=_alloc_num(out.get("capital_usd"))>0 or _alloc_num(out.get("capital_irr"))>0
     out["profile_complete"]=all(out.get(k) not in (None,"") for k in required) and split_ok and capital_ok
     out["profile_validation"]={"split_ok":split_ok,"capital_ok":capital_ok}
+    saved=dict(out)
+    saved["excluded_markets"]=list(out.get("excluded_markets") or [])
+    saved["platforms"]=list(out.get("platforms") or [])
+    saved["profile_validation"]=dict(out.get("profile_validation") or {})
+    _MAI_PREF_RUN_CACHE[key]=saved
     return out
 
 
@@ -16779,16 +16801,28 @@ IRAN_REPORT_DAILY16=os.getenv("ATLAS_IRAN_REPORT_DAILY16","1")=="1"
 IRAN_REPORT_NIGHTLY23=os.getenv("ATLAS_IRAN_REPORT_NIGHTLY23","1")=="1"
 
 _V3_ROWS_RUN_CACHE={}
+_V3_TSE_SUPERSET_LIMIT=max(1500,int(os.getenv("ATLAS_TSE_SUPERSET_LIMIT","1500") or 1500))
 
 def _v3_rows(kind,limit=300):
-    """Canonical Iran reads with per-run reuse. Full payload is preserved for quality."""
+    """Canonical Iran reads with per-run reuse and TSE superset caching.
+
+    Each caller still receives the newest `limit` rows it requested and the
+    full TSE payload is preserved. Only duplicate PostgREST reads are removed.
+    Heavy cycles fetch the current largest TSE research window once; HOURLY
+    keeps the exact requested limit so the light cycle is never inflated.
+    """
     if not STORE.enabled:return []
     limit=max(1,int(limit))
     tabs={"fx":["atlas_iran_fx_snapshots"],"tse":["atlas_tse_snapshots"],
           "funds":["atlas_fund_snapshots"],"metals":["atlas_market_snapshots","atlas_hourly_signal_snapshots"],
           "market":["atlas_market_snapshots"]}.get(kind,["atlas_market_snapshots"])
     out=[]
+    cycle=str(os.getenv("ATLAS_PHASE37_CYCLE","HOURLY") or "HOURLY").upper()
+    heavy_cycle=cycle in {"DEEP4H","DAILY16","NIGHTLY23"}
     for tab in tabs:
+        fetch_limit=limit
+        if tab=="atlas_tse_snapshots" and heavy_cycle:
+            fetch_limit=max(limit,_V3_TSE_SUPERSET_LIMIT)
         cached=_V3_ROWS_RUN_CACHE.get(tab)
         if cached and int(cached.get("limit",0))>=limit:
             rows=list(cached.get("rows",[]))[:limit]
@@ -16796,9 +16830,11 @@ def _v3_rows(kind,limit=300):
             rows=[]
             for attempt in range(3):
                 try:
-                    r=STORE.select(tab,{"select":"*","order":"captured_at.desc","limit":str(limit)}) or []
+                    r=STORE.select(tab,{"select":"*","order":"captured_at.desc","limit":str(fetch_limit)}) or []
                     if isinstance(r,list):
-                        rows=r; _V3_ROWS_RUN_CACHE[tab]={"limit":limit,"rows":rows}; break
+                        _V3_ROWS_RUN_CACHE[tab]={"limit":fetch_limit,"rows":r}
+                        rows=list(r)[:limit]
+                        break
                 except Exception:pass
                 if attempt<2:time.sleep(1.25*(attempt+1))
         if rows:out.extend(rows)
