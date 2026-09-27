@@ -1024,6 +1024,8 @@ def init_sqlite():
 class SupabaseStore:
     def __init__(self):
         self.enabled = bool(SUPABASE_URL and SUPABASE_KEY)
+        # Observability-only egress guard: never suppresses a required analytical read.
+        self.egress_bytes=0; self.egress_calls=0; self.egress_by_table={}
         self.headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -1154,9 +1156,20 @@ class SupabaseStore:
             url = f"{SUPABASE_URL}/rest/v1/{table}?{q}"
             req = urllib.request.Request(url, headers=self.headers)
             with urllib.request.urlopen(req, timeout=15) as r:
-                return json.loads(r.read().decode())
+                raw=r.read(); n=len(raw)
+                self.egress_bytes+=n; self.egress_calls+=1
+                st=self.egress_by_table.setdefault(str(table),{"calls":0,"bytes":0})
+                st["calls"]+=1; st["bytes"]+=n
+                return json.loads(raw.decode())
         except Exception:
             return []
+
+    def egress_report(self, top=8):
+        rows=sorted(self.egress_by_table.items(),key=lambda kv:kv[1].get("bytes",0),reverse=True)
+        return {"calls":self.egress_calls,"bytes":self.egress_bytes,
+                "mb":round(self.egress_bytes/1024/1024,3),
+                "top":[{"table":k,"calls":v["calls"],"mb":round(v["bytes"]/1024/1024,3)}
+                       for k,v in rows[:max(1,int(top))]]}
 
     def upsert(self, table, row, on_conflict):
         """درج یا به‌روزرسانی واقعی (نه فقط insert). بدون این، جدولی مثل
@@ -1191,6 +1204,18 @@ class SupabaseStore:
 
 
 STORE = SupabaseStore()
+
+def _atlas_egress_guard_report():
+    try:
+        x=STORE.egress_report()
+        if x.get("calls"):
+            print(f"📉 PostgREST egress this run: {x['mb']:.3f} MB | calls={x['calls']} | top={x['top']}")
+    except Exception:pass
+try:
+    import atexit
+    atexit.register(_atlas_egress_guard_report)
+except Exception:pass
+
 
 
 def append_changelog(component, old, new, reason, evidence=None):
@@ -7778,21 +7803,28 @@ def persist_phase37_snapshots(results, top10, deep=False):
     return len(rows), ok
 
 
-def _p37_load_history(table, hours):
-    if not STORE.enabled:
-        return []
-    since = (now_utc() - timedelta(hours=int(hours))).isoformat()
-    try:
-        return STORE.select(table, {
-            "select": "captured_at,symbol,asset_group,public_signal,decision_state,direction,confidence,opportunity_score,price,depth,payload",
-            "captured_at": f"gte.{since}",
-            "order": "captured_at.asc",
-            "limit": "5000",
-        }) or []
-    except Exception as e:
-        append_changelog("PHASE37_HISTORY", None, None, f"{table}: {e}")
-        return []
+_P37_HISTORY_RUN_CACHE={}
 
+def _p37_load_history(table,hours):
+    """Same analytical history, with wider-window rows reused inside this run."""
+    if not STORE.enabled:return []
+    hours=max(1,int(hours)); cached=_P37_HISTORY_RUN_CACHE.get(table)
+    if cached and int(cached.get("hours",0))>=hours:
+        cutoff=now_utc()-timedelta(hours=hours); out=[]
+        for row in cached.get("rows",[]):
+            try:
+                dt=datetime.fromisoformat(str(row.get("captured_at") or "").replace("Z","+00:00"))
+                if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
+                if dt>=cutoff:out.append(row)
+            except Exception:out.append(row)
+        return out
+    since=(now_utc()-timedelta(hours=hours)).isoformat()
+    try:
+        rows=STORE.select(table,{"select":"captured_at,symbol,asset_group,public_signal,decision_state,direction,confidence,opportunity_score,price,depth,payload",
+          "captured_at":f"gte.{since}","order":"captured_at.asc","limit":"5000"}) or []
+        _P37_HISTORY_RUN_CACHE[table]={"hours":hours,"rows":rows}; return rows
+    except Exception as ex:
+        append_changelog("PHASE37_HISTORY",None,None,f"{table}: {ex}"); return []
 
 def _p37_history_summary(rows):
     out = {}
@@ -12191,10 +12223,16 @@ def _p2_lifecycle_phase(state):
     }.get(s, s or "NEW")
 
 
+_P2_LIFECYCLE_RUN_CACHE=None
 def _p2_remote_lifecycle_rows():
-    if not STORE.enabled:
-        return []
-    return STORE.select("atlas_signal_lifecycle", {"select": "*", "limit": "1000"}) or []
+    global _P2_LIFECYCLE_RUN_CACHE
+    if not STORE.enabled:return []
+    if _P2_LIFECYCLE_RUN_CACHE is None:
+        # Keep lifecycle semantics; omit large columns not consumed by lifecycle evaluation.
+        _P2_LIFECYCLE_RUN_CACHE=STORE.select("atlas_signal_lifecycle",{
+          "select":"signal_id,symbol,state,lifecycle_phase,direction,entry,sl,tp1,tp2,tp3,tp4,created_at,updated_at,activated_at,closed_at,last_price,confidence,signal_score",
+          "limit":"1000"}) or []
+    return list(_P2_LIFECYCLE_RUN_CACHE)
 
 
 def _p2_terminal_r(direction, entry, sl, price):
@@ -12660,9 +12698,15 @@ def _btv2_aggregate(rows):
     }
 
 
+_BTV2_EVENTS_RUN_CACHE={}
 def _btv2_lifecycle_events(limit=3000):
-    if not STORE.enabled: return []
-    return STORE.select("atlas_signal_lifecycle_events", {"select":"*","order":"timestamp.asc","limit":str(limit)}) or []
+    if not STORE.enabled:return []
+    limit=max(1,int(limit)); cached=_BTV2_EVENTS_RUN_CACHE.get("rows")
+    if cached is not None and len(cached)>=limit:return cached[:limit]
+    rows=STORE.select("atlas_signal_lifecycle_events",{
+      "select":"signal_id,symbol,from_state,to_state,timestamp,price,pnl_r,direction,entry,sl,timeframe",
+      "order":"timestamp.asc","limit":str(limit)}) or []
+    _BTV2_EVENTS_RUN_CACHE["rows"]=rows; return rows
 
 
 def _btv2_group_terminal(events, keyfn):
@@ -15677,7 +15721,7 @@ def _mai_user_preferences(uid):
     out={"capital_usd":None,"capital_irr":None,"crypto_pct":None,"stocks_pct":None,"metals_pct":None,
          "horizon":None,"goal":None,"excluded_markets":[],"platforms":[],"equity_scope":"TSE"}
     try:
-        rows=STORE.select("atlas_desk_multiasset_preferences",{"select":"*","user_id":f"eq.{uid}","limit":"1"})
+        rows=STORE.select("atlas_desk_multiasset_preferences",{"select":"capital_usd,capital_irr,crypto_pct,stocks_pct,metals_pct,horizon,goal,excluded_markets,platforms,equity_scope","user_id":f"eq.{uid}","limit":"1"})
         if rows:
             r=rows[0]
             for k in out:
@@ -16734,27 +16778,29 @@ IRAN_MULTI_ASSET_ENABLED=os.getenv("ATLAS_IRAN_MULTI_ASSET_ENABLED","1")=="1"
 IRAN_REPORT_DAILY16=os.getenv("ATLAS_IRAN_REPORT_DAILY16","1")=="1"
 IRAN_REPORT_NIGHTLY23=os.getenv("ATLAS_IRAN_REPORT_NIGHTLY23","1")=="1"
 
+_V3_ROWS_RUN_CACHE={}
+
 def _v3_rows(kind,limit=300):
-    """Read canonical Iran tables with bounded retry; read-only and fail-closed."""
+    """Canonical Iran reads with per-run reuse. Full payload is preserved for quality."""
     if not STORE.enabled:return []
-    tabs={
-        "fx":["atlas_iran_fx_snapshots"],
-        "tse":["atlas_tse_snapshots"],
-        "funds":["atlas_fund_snapshots"],
-        "metals":["atlas_market_snapshots","atlas_hourly_signal_snapshots"],
-    }.get(kind,["atlas_market_snapshots"])
+    limit=max(1,int(limit))
+    tabs={"fx":["atlas_iran_fx_snapshots"],"tse":["atlas_tse_snapshots"],
+          "funds":["atlas_fund_snapshots"],"metals":["atlas_market_snapshots","atlas_hourly_signal_snapshots"],
+          "market":["atlas_market_snapshots"]}.get(kind,["atlas_market_snapshots"])
     out=[]
     for tab in tabs:
-        rows=[]
-        for attempt in range(3):
-            try:
-                r=STORE.select(tab,{"select":"*","order":"captured_at.desc","limit":str(limit)}) or []
-                if isinstance(r,list) and r:
-                    rows=r
-                    break
-            except Exception:
-                pass
-            if attempt<2:time.sleep(1.25*(attempt+1))
+        cached=_V3_ROWS_RUN_CACHE.get(tab)
+        if cached and int(cached.get("limit",0))>=limit:
+            rows=list(cached.get("rows",[]))[:limit]
+        else:
+            rows=[]
+            for attempt in range(3):
+                try:
+                    r=STORE.select(tab,{"select":"*","order":"captured_at.desc","limit":str(limit)}) or []
+                    if isinstance(r,list):
+                        rows=r; _V3_ROWS_RUN_CACHE[tab]={"limit":limit,"rows":rows}; break
+                except Exception:pass
+                if attempt<2:time.sleep(1.25*(attempt+1))
         if rows:out.extend(rows)
     return out
 
