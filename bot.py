@@ -16786,14 +16786,19 @@ def persist_book_scan_snapshots(payload):
     return len(rows), ok
 
 
-def run_summer_book_scan_auto():
-    """Automatic Deep4H book scan. Sends Telegram only for excellent setups by default."""
+def run_summer_book_scan_auto(send_telegram=None):
+    """Automatic Deep4H book scan. Persistence always runs; scheduled Telegram obeys the central delivery guard."""
     payload = _summer_book_scan_payload()
     try:
         persist_book_scan_snapshots(payload)
     except Exception as e:
         print(f"⚠️ Book scan persist failed non-fatally: {e}")
     excellent = list(payload.get("signals") or [])
+    if send_telegram is None:
+        send_telegram = _atlas_report_delivery_allowed()
+    if not send_telegram:
+        print(f"📚 Auto Book Scan: excellent={len(excellent)}, sent=0 — scheduled Telegram blocked by delivery guard")
+        return {"sent": 0, "has_excellent": bool(excellent), "errors": payload.get("meta", {}).get("errors", []), "delivery_blocked": True}
     if ATLAS_BOOK_SCAN_SEND_ONLY_EXCELLENT and not excellent:
         print("📚 Auto Book Scan: no excellent setup; Telegram suppressed.")
         return {"sent": 0, "has_excellent": False, "errors": payload.get("meta", {}).get("errors", [])}
@@ -17524,6 +17529,47 @@ def send_iran_visual_dashboard():
 
 # =============================================================================
 
+# Central scheduled-report delivery guard.
+# Persistence/analysis may run in any cycle, but scheduled dashboards/reports
+# are allowed only when BOTH the workflow marks a report window and delivery
+# mode is FULL. Event-driven confirmed/rare signal paths remain independent.
+def _atlas_report_delivery_allowed() -> bool:
+    mode = (os.environ.get("ATLAS_DELIVERY_MODE") or "STORAGE_ONLY").strip().upper()
+    window = _parse_bool(os.environ.get("ATLAS_REPORT_WINDOW", "0"))
+    return mode == "FULL" and window
+
+def _atlas_opportunity_diagnostics(rows):
+    counts = {"NO_TRADE": 0, "SETUP": 0, "PRE_TRIGGER": 0, "CONFIRMED_BUY": 0, "CONFIRMED_SELL": 0, "UNAVAILABLE": 0}
+    examples = []
+    for r in rows or []:
+        state = str(r.get("opportunity_state") or "UNAVAILABLE").upper()
+        eng = r.get("opportunity_engine") or {}
+        sig = str(eng.get("signal") or "WATCH").upper() if isinstance(eng, dict) else "WATCH"
+        if state == "CONFIRMED":
+            key = "CONFIRMED_BUY" if sig == "BUY" else "CONFIRMED_SELL" if sig == "SELL" else "UNAVAILABLE"
+        elif state in ("NO_TRADE", "SETUP", "PRE_TRIGGER"):
+            key = state
+        else:
+            key = "UNAVAILABLE"
+        counts[key] += 1
+        if state in ("SETUP", "PRE_TRIGGER", "CONFIRMED") and len(examples) < 5:
+            examples.append({
+                "symbol": r.get("coin"),
+                "state": state,
+                "bias": r.get("opportunity_bias"),
+                "confidence": r.get("opportunity_confidence"),
+                "trigger": r.get("opportunity_trigger"),
+            })
+    print(
+        "🎯 Opportunity Engine V2: "
+        f"NO_TRADE={counts['NO_TRADE']} | SETUP={counts['SETUP']} | "
+        f"PRE_TRIGGER={counts['PRE_TRIGGER']} | CONFIRMED_BUY={counts['CONFIRMED_BUY']} | "
+        f"CONFIRMED_SELL={counts['CONFIRMED_SELL']} | UNAVAILABLE={counts['UNAVAILABLE']}"
+    )
+    if examples:
+        print(f"🎯 Opportunity examples: {examples}")
+    return counts
+
 def main():
     # Summer strict book scan (does not run full ATLAS pipeline)
     if (
@@ -17544,11 +17590,13 @@ def main():
         deep_cycle = _parse_bool(os.environ.get("ATLAS_PHASE37_DEEP_4H", "0"))
         daily_cycle = _parse_bool(os.environ.get("ATLAS_PHASE37_DAILY_REPORT", "0"))
         nightly_cycle = _parse_bool(os.environ.get("ATLAS_PHASE39_NIGHTLY_REPORT", "0"))
+        report_delivery_allowed = _atlas_report_delivery_allowed()
         print(f"📌 Run Mode: {run_mode}")
         print(f"📌 Phase3.7 Deep4H: {deep_cycle}")
         print(f"📌 Phase3.7 Daily16: {daily_cycle}")
         print(f"📌 Phase3.9 Nightly23: {nightly_cycle}")
-        print("📌 Telegram policy: FULL Daily16 + Nightly23 + rare guarded market alerts; hourly/deep storage-only")
+        print(f"📌 Report delivery allowed: {report_delivery_allowed} | mode={(os.environ.get('ATLAS_DELIVERY_MODE') or 'STORAGE_ONLY').upper()} | window={os.environ.get('ATLAS_REPORT_WINDOW','0')}")
+        print("📌 Telegram policy: scheduled reports only inside approved report windows; confirmed/rare guarded alerts remain event-driven")
         print(f"📌 Exact assets: {len(ATLAS_SCOPED_CRYPTO)} crypto + {len(ATLAS_METALS)} metals = {len(ATLAS_SCOPED_ASSETS)} total")
 
         # Scheduled production is analysis-only. Snapshot collection remains
@@ -17616,6 +17664,7 @@ def main():
         stamp_full_report_cycle(results, daily_cycle=daily_cycle, nightly_cycle=nightly_cycle)
 
         scoped_results = _atlas_exact_scope_results(list(results) + metal_results, include_metals=True)
+        _atlas_opportunity_diagnostics(scoped_results)
 
         # Keep Free Alert detection/persistence for observability, but never send
         # it to Telegram under Phase 3.7 policy.
@@ -17826,7 +17875,7 @@ def main():
         if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
             try:
                 with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
-                    book_scan_result = run_summer_book_scan_auto()
+                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed)
             except Exception as e:
                 append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
@@ -17857,7 +17906,7 @@ def main():
         # DEEP4H visual policy: send the dashboard only when the strict Book Scan
         # confirms at least one excellent 4H+1D opportunity. DAILY16 keeps its
         # existing always-on visual dashboard path above; NIGHTLY23 is untouched.
-        if deep_cycle and not daily_cycle and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent"):
+        if deep_cycle and not daily_cycle and report_delivery_allowed and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent"):
             try:
                 with _AtlasTimer("ATLAS VISUAL DASHBOARD DEEP4H EXCELLENT"):
                     visual_sent, visual_errors = send_atlas_visual_dashboard(scoped_results, btc_regime=btc_regime)
@@ -17884,6 +17933,9 @@ def main():
             except Exception as e:
                 append_changelog("PERSONAL_DASHBOARDS_DEEP4H", None, None, str(e))
                 print(f"⚠️ DEEP4H personal dashboards failed non-fatally: {e}")
+
+        if deep_cycle and not daily_cycle and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent") and not report_delivery_allowed:
+            print("🔕 DEEP4H dashboards suppressed by central delivery guard; analysis/persistence completed.")
 
         print(f"\n{'='*50}")
         print("📊 PHASE 3.11 SUMMARY")
