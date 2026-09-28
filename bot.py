@@ -124,6 +124,13 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import traceback
 import hashlib
+
+# ATLAS Signal Opportunity Engine V2 (advisory; execution remains canonical)
+try:
+    from analysis import enrich_result as _atlas_opportunity_enrich
+except Exception as _atlas_opp_import_error:
+    _atlas_opportunity_enrich = None
+
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
@@ -10418,6 +10425,14 @@ def v11_apply_intelligence(r):
     r["v11_estimated_probability"] = None
     r["v11_probability_status"] = "NOT_CALIBRATED"
     build_decision_support(r)
+    # Opportunity Engine is additive: it exposes SETUP/PRE_TRIGGER/conditional
+    # geometry and never overwrites canonical decision_state/action/executable.
+    if _atlas_opportunity_enrich is not None:
+        try:
+            r = _atlas_opportunity_enrich(r)
+        except Exception as e:
+            r["opportunity_state"] = "UNAVAILABLE"
+            r["opportunity_error"] = str(e)[:240]
     return r
 
 def _intel_rank(results, personal=False):
@@ -11719,9 +11734,14 @@ def _atlas_market_board_line(r):
     if sig in ("BUY","SELL"):
         icon="🟢" if sig=="BUY" else "🔴"
         return f"{icon} {sym} [{source}] | {sig} {strength} | Score:{score:.0f} | MTF:{mtf:.0f}% | RR:{rr} | E:{fmt(r.get('entry'))} SL:{fmt(r.get('sl'))} TP1:{fmt(r.get('tp1'))}"
-    direction=str(r.get("direction") or "NEUTRAL").upper()
-    trigger=_aio_trigger(r)
-    return f"🟡 {sym} [{source}] | WAIT {strength} | {direction} | Score:{score:.0f} | MTF:{mtf:.0f}% | Trigger:{trigger}"
+    opp_state=str(r.get("opportunity_state") or "WAIT").upper()
+    direction=str(r.get("opportunity_bias") or r.get("direction") or "NEUTRAL").upper()
+    trigger=r.get("opportunity_trigger") or _aio_trigger(r)
+    if opp_state in ("SETUP","PRE_TRIGGER"):
+        return (f"🟠 {sym} [{source}] | {opp_state} {strength} | {direction} | Score:{score:.0f} | MTF:{mtf:.0f}% | "
+                f"Trigger:{fmt(trigger)} | E:{fmt(r.get('opportunity_entry'))} SL:{fmt(r.get('opportunity_sl'))} "
+                f"TP1:{fmt(r.get('opportunity_tp1'))} TP2:{fmt(r.get('opportunity_tp2'))}")
+    return f"🟡 {sym} [{source}] | NO_TRADE | {direction} | Score:{score:.0f} | MTF:{mtf:.0f}% | Trigger:{fmt(trigger)}"
 
 def build_current_market_decision_board(results):
     buckets={"BUY":[],"SELL":[],"WAIT":[]}
