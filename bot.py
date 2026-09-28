@@ -10425,7 +10425,7 @@ def v11_apply_intelligence(r):
     r["v11_estimated_probability"] = None
     r["v11_probability_status"] = "NOT_CALIBRATED"
     build_decision_support(r)
-    # Opportunity Engine is additive: it exposes SETUP/PRE_TRIGGER/conditional
+    # Opportunity Engine V2.2 is additive: it exposes SETUP/PRE_TRIGGER/conditional
     # geometry and never overwrites canonical decision_state/action/executable.
     if _atlas_opportunity_enrich is not None:
         try:
@@ -11670,6 +11670,11 @@ def persist_phase34_research_features(results):
             "macd_state_4h":snap.get("macd_state"),"atr_pct":r.get("atr_pct"),
             "liquidity_score":r.get("liquidity_score"),"regime_trend":r.get("regime_trend"),
             "regime_volatility":r.get("regime_volatility"),"opportunity_tier":r.get("opportunity_tier"),
+            "opportunity_state":r.get("opportunity_state"),"opportunity_bias":r.get("opportunity_bias"),
+            "opportunity_confidence":r.get("opportunity_confidence"),"opportunity_session":r.get("opportunity_session"),
+            "opportunity_regime":r.get("opportunity_regime"),"opportunity_evidence_families":r.get("opportunity_evidence_families"),
+            "opportunity_promotion_gate":r.get("opportunity_promotion_gate"),
+            "attribution_observability":{"planned_rr":r.get("opportunity_rr") or r.get("rr"),"mfe_r":None,"mae_r":None,"realized_r":None,"fees_r":None,"slippage_r":None,"status":"PENDING_OUTCOME_REPLAY"},
             "model_version":VERSION
         })
     return STORE.insert_many("atlas_ml_feature_store",rows) if rows else False
@@ -17559,9 +17564,12 @@ def _atlas_opportunity_diagnostics(rows):
                 "bias": r.get("opportunity_bias"),
                 "confidence": r.get("opportunity_confidence"),
                 "trigger": r.get("opportunity_trigger"),
+                "session": (r.get("opportunity_session") or {}).get("name") if isinstance(r.get("opportunity_session"), dict) else None,
+                "regime": r.get("opportunity_regime"),
+                "families": r.get("opportunity_evidence_families"),
             })
     print(
-        "🎯 Opportunity Engine V2: "
+        "🎯 Opportunity Engine V2.2: "
         f"NO_TRADE={counts['NO_TRADE']} | SETUP={counts['SETUP']} | "
         f"PRE_TRIGGER={counts['PRE_TRIGGER']} | CONFIRMED_BUY={counts['CONFIRMED_BUY']} | "
         f"CONFIRMED_SELL={counts['CONFIRMED_SELL']} | UNAVAILABLE={counts['UNAVAILABLE']}"
