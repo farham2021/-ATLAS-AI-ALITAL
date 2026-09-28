@@ -10,8 +10,16 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
+PARIS = ZoneInfo("Europe/Paris")
 TABLE = (os.environ.get("ATLAS_SCHEDULER_TABLE") or "atlas_scheduler_runs").strip()
-DEEP_HOURS = (0, 4, 8, 12, 20)
+# Scheduled delivery is deliberately limited to three Europe/Paris windows.
+# GitHub Actions only wakes the guard around these windows; the guard is the authority.
+REPORT_SLOTS = (
+    ("DEEP4H", 10, 5, "europe_session_after_4h_close"),
+    ("DAILY16", 14, 50, "post_us_macro_15m_close"),
+    ("NIGHTLY23", 18, 5, "london_newyork_overlap_4h_close"),
+)
+REPORT_RECOVERY_MIN = int(os.environ.get("ATLAS_REPORT_RECOVERY_MIN", "55") or 55)
 DEFAULT_LEASE_MIN = int(os.environ.get("ATLAS_SCHEDULER_LEASE_MIN", "65") or 65)
 
 
@@ -197,54 +205,37 @@ def _plan(mode: str, run_key: str, reason: str, scheduled: bool = True):
     return {"mode": mode, "run_key": run_key, "reason": reason, "scheduled": "1" if scheduled else "0"}
 
 
-def _latest_deep_slot(dt: datetime):
-    candidates = [h for h in DEEP_HOURS if h <= dt.hour]
-    if not candidates:
-        return None
-    h = max(candidates)
-    return dt.replace(hour=h, minute=0, second=0, microsecond=0)
+def _slot_key(mode: str, paris_slot: datetime) -> str:
+    # Keep run keys stable and human-readable; the DB column name remains
+    # tehran_date for backward compatibility, but these slots are Paris-local.
+    return f"{mode}:{paris_slot.date().isoformat()}:{paris_slot.strftime('%H%M')}PARIS"
 
 
 def choose_plan(dt: datetime, state_getter=remote_done):
-    dt = dt.astimezone(TEHRAN)
-    today = dt.date()
-    today_daily = day_key("DAILY16", today)
-    today_nightly = day_key("NIGHTLY23", today)
+    """Choose at most one of three scheduled report windows.
 
-    if dt.hour >= 23:
-        s = state_getter(today_nightly)
-        if s is not True:
-            return _plan("NIGHTLY23", today_nightly, "nightly_due_or_unconfirmed")
+    Automatic HOURLY runs are intentionally disabled. Manual workflow_dispatch
+    can still request HOURLY/DEEP4H/DAILY16/NIGHTLY23 for diagnostics.
+    Europe/Paris is used so CET/CEST DST is handled by zoneinfo rather than by
+    hard-coded UTC offsets.
+    """
+    paris = dt.astimezone(PARIS)
+    candidates = []
+    for mode, hour, minute, reason in REPORT_SLOTS:
+        slot = paris.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if slot <= paris < slot + timedelta(minutes=max(10, REPORT_RECOVERY_MIN)):
+            candidates.append((slot, mode, reason))
+    if not candidates:
+        return _plan("NONE", "", "outside_three_report_windows")
 
-    if dt.hour >= 16:
-        s = state_getter(today_daily)
-        if s is not True:
-            return _plan("DAILY16", today_daily, "daily16_due_or_unconfirmed")
-
-    if dt.hour < 2:
-        yday = today - timedelta(days=1)
-        prev_nightly = day_key("NIGHTLY23", yday)
-        s = state_getter(prev_nightly)
-        if s is not True:
-            return _plan("NIGHTLY23", prev_nightly, "previous_nightly_recovery")
-
-    deep_dt = _latest_deep_slot(dt)
-    if deep_dt is not None:
-        deep_key = hour_key("DEEP4H", deep_dt)
-        if dt - deep_dt < timedelta(hours=4):
-            s = state_getter(deep_key)
-            if s is False:
-                return _plan("DEEP4H", deep_key, "deep4h_due_or_recovery")
-            if s is None:
-                return _plan("NONE", "", "deep4h_state_unavailable")
-
-    hourly_key = hour_key("HOURLY", dt)
-    s = state_getter(hourly_key)
-    if s is False:
-        return _plan("HOURLY", hourly_key, "current_hour_slot")
-    if s is None:
-        return _plan("NONE", "", "hourly_state_unavailable")
-    return _plan("NONE", "", "slot_already_done")
+    slot, mode, reason = max(candidates, key=lambda x: x[0])
+    run_key = _slot_key(mode, slot)
+    state = state_getter(run_key)
+    if state is False:
+        return _plan(mode, run_key, reason)
+    if state is None:
+        return _plan("NONE", "", f"{mode.lower()}_state_unavailable")
+    return _plan("NONE", "", f"{mode.lower()}_slot_already_done")
 
 
 def write_github_output(values, path):
@@ -286,7 +277,7 @@ def cmd_force_done(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="ATLAS 3.11.15 scheduler with RPC lease and fail-open")
+    p = argparse.ArgumentParser(description="ATLAS three-window Paris scheduler with RPC lease and fail-open")
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("plan")
     a.add_argument("--manual", choices=["HOURLY", "DEEP4H", "DAILY16", "NIGHTLY23"])
