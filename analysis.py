@@ -1,10 +1,12 @@
-"""ATLAS Signal Opportunity Engine V2 — dependency-free production module.
+"""ATLAS Signal Opportunity Engine V2.2 — dependency-free production module.
 Consumes closed OHLCV rows [timestamp, open, high, low, close, volume].
 It does NOT authorize execution. Canonical execution remains in bot.py.
 """
 from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional, Sequence
 import math, urllib.parse
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 DEFAULT_CONFIG={
  "ema_fast":20,"ema_slow":50,"rsi_period":14,"atr_period":14,"breakout_lookback":20,"swing_lookback":12,
@@ -50,8 +52,46 @@ def _macd_hist(a):
 def tradingview_link(symbol,exchange=None):
  s=str(symbol or '').upper().replace('/','').replace('-','').replace(' ',''); tv=f"{str(exchange).upper()}:{s}" if exchange else s
  return 'https://www.tradingview.com/chart/?symbol='+urllib.parse.quote(tv,safe=':')
+def _session_context(ts=None):
+ """Research context only. Europe/Paris handles CET/CEST automatically."""
+ try:
+  if ts is None: dt=datetime.now(timezone.utc)
+  elif isinstance(ts,(int,float)): dt=datetime.fromtimestamp(float(ts)/1000.0 if float(ts)>1e11 else float(ts),timezone.utc)
+  else:
+   z=str(ts).replace('Z','+00:00'); dt=datetime.fromisoformat(z)
+   if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+  paris=dt.astimezone(ZoneInfo('Europe/Paris')); h=paris.hour+paris.minute/60
+  if 8<=h<13.5: sess='EUROPE'
+  elif 13.5<=h<16.5: sess='LONDON_NY_OVERLAP'
+  elif 16.5<=h<21: sess='NEW_YORK'
+  elif 2<=h<8: sess='ASIA'
+  else: sess='LOW_LIQUIDITY'
+  return {'name':sess,'timezone':'Europe/Paris','local_time':paris.isoformat(),'research_only':True}
+ except Exception:return {'name':'UNKNOWN','timezone':'Europe/Paris','research_only':True}
+
+def _regime_context(closes,atr,ef,es):
+ if not closes or not atr or not closes[-1]: return {'trend':'UNKNOWN','volatility':'UNKNOWN','research_only':True}
+ px=closes[-1]; atr_pct=atr/px*100
+ spread=abs(ef-es)/px*100 if ef is not None and es is not None else 0
+ trend='TRENDING' if spread>=0.45 else 'RANGING'
+ vol='HIGH' if atr_pct>=3.0 else 'LOW' if atr_pct<=1.2 else 'NORMAL'
+ return {'trend':trend,'volatility':vol,'atr_pct':round(atr_pct,3),'ema_spread_pct':round(spread,3),'research_only':True}
+
+def _family_score(direction,ef,es,rsi,mh,md,hv,price,ph,pl,mtf_same,mtf_opp,deriv_adj):
+ long=direction=='LONG'
+ trend=0
+ trend += 45 if ((ef>es)==long) else -45
+ if rsi is not None: trend += 20 if ((rsi>=52)==long and (rsi<75 if long else rsi>25)) else 0
+ if mh is not None: trend += 20 if ((mh>0)==long) else -20
+ if md is not None: trend += 15 if ((md>0)==long) else -15
+ structure=70 if (price>ph if long else price<pl) else 25
+ volume=70 if hv else 40
+ mtf=max(-100,min(100,(mtf_same-mtf_opp)*35))
+ derivatives=max(-100,min(100,deriv_adj/6*100))
+ return {'TREND':round(max(-100,min(100,trend)),1),'STRUCTURE':structure,'VOLUME':volume,'MTF':round(mtf,1),'DERIVATIVES_SHADOW':round(derivatives,1)}
+
 def analyze_rows(rows:Sequence[Sequence[Any]],symbol='',timeframe='4h',config:Optional[Mapping[str,Any]]=None,*,mtf_context=None,derivatives=None,exchange=None)->Dict[str,Any]:
- c={**DEFAULT_CONFIG,**dict(config or {})}; base={'engine':'ATLAS_SIGNAL_OPPORTUNITY_V2','symbol':symbol,'timeframe':timeframe,'state':'NO_TRADE','signal':'WATCH','bias':'NEUTRAL','executable':False,'confidence':0.0,'trade_plan':None,'tradingview':tradingview_link(symbol,exchange)}
+ c={**DEFAULT_CONFIG,**dict(config or {})}; base={'engine':'ATLAS_SIGNAL_OPPORTUNITY_V2_2','symbol':symbol,'timeframe':timeframe,'state':'NO_TRADE','signal':'WATCH','bias':'NEUTRAL','executable':False,'confidence':0.0,'trade_plan':None,'tradingview':tradingview_link(symbol,exchange)}
  clean=[]
  for r in rows or []:
   if len(r)<6:continue
@@ -109,15 +149,16 @@ def analyze_rows(rows:Sequence[Sequence[Any]],symbol='',timeframe='4h',config:Op
  if risk>0:
   t=[entry+sgn*risk*x for x in c['tp_r_multiples'][:4]];plan={'direction':direction,'entry':round(entry,8),'stop_loss':round(sl,8),'tp1':round(t[0],8),'tp2':round(t[1],8),'tp3':round(t[2],8),'tp4':round(t[3],8),'risk_reward_tp2':2.0,'invalidation':inv}
  sig='BUY' if confirmed and direction=='LONG' else 'SELL' if confirmed else 'WATCH'
- return {**base,'state':state,'signal':sig,'bias':direction,'executable':confirmed,'confidence':round(conf,2),'price':round(price,8),'trigger':round(trigger,8),'trade_plan':plan,'reason':' | '.join(why+[f'MTF {same}/{opposite}/{neutral}',state]),'evidence':{'bull_points':bull,'bear_points':bear,'derivatives_adjustment':dd,'derivatives_mode':'CONFIRMATION_ONLY'},'indicators':{'ema_fast':round(ef,8),'ema_slow':round(es,8),'rsi':round(rsi,2),'atr':round(atr,8),'macd_hist':None if mh is None else round(mh,8),'volume_ratio':round(vols[-1]/vma,3) if vma else None}}
+ return {**base,'state':state,'signal':sig,'bias':direction,'executable':confirmed,'confidence':round(conf,2),'price':round(price,8),'trigger':round(trigger,8),'trade_plan':plan,'reason':' | '.join(why+[f'MTF {same}/{opposite}/{neutral}',state]),'session_context':_session_context(clean[-1][0]),'regime_context':_regime_context(closes,atr,ef,es),'evidence_families':_family_score(direction,ef,es,rsi,mh,md,hv,price,ph,pl,same,opposite,dd),'promotion_gate':'WALK_FORWARD+ABLATION+OOS+COSTS','shadow_families':['DERIVATIVES_SHADOW','SMC_FVG_OB'],'evidence':{'bull_points':bull,'bear_points':bear,'derivatives_adjustment':dd,'derivatives_mode':'SHADOW_CONFIRMATION_ONLY','double_count_guard':True},'indicators':{'ema_fast':round(ef,8),'ema_slow':round(es,8),'rsi':round(rsi,2),'atr':round(atr,8),'macd_hist':None if mh is None else round(mh,8),'volume_ratio':round(vols[-1]/vma,3) if vma else None}}
 
 def enrich_result(result:Dict[str,Any])->Dict[str,Any]:
  """Attach opportunity fields without overwriting canonical decision/execution fields."""
  r=result; rows=((r.get('snapshots') or {}).get('4h') or {}).get('rows') or []
  mtf={'15m':r.get('m15_trend'),'1h':r.get('h1_trend'),'4h':r.get('h4_trend'),'1d':r.get('d1_trend'),'1w':r.get('w1_trend')}
- d={'funding_rate':r.get('coinglass_funding_rate')}
+ d={'funding_rate':r.get('coinglass_funding_rate') or r.get('funding_rate'),'oi_change_pct':r.get('open_interest_change') or r.get('oi_change') or r.get('oi_change_pct'),'taker_buy_sell_ratio':r.get('taker_buy_sell_ratio') or r.get('taker_ratio')}
  o=analyze_rows(rows,str(r.get('coin') or ''),'4h',mtf_context=mtf,derivatives=d)
  p=o.get('trade_plan') or {};r['opportunity_engine']=o;r['opportunity_state']=o.get('state');r['opportunity_bias']=o.get('bias');r['opportunity_confidence']=o.get('confidence');r['opportunity_trigger']=o.get('trigger');r['opportunity_tv']=o.get('tradingview')
  # Conditional geometry is exposed for SETUP/PRE_TRIGGER; canonical Entry/SL/TP is never overwritten.
+ r['opportunity_session']=o.get('session_context');r['opportunity_regime']=o.get('regime_context');r['opportunity_evidence_families']=o.get('evidence_families');r['opportunity_promotion_gate']=o.get('promotion_gate');
  r['opportunity_entry']=p.get('entry');r['opportunity_sl']=p.get('stop_loss');r['opportunity_tp1']=p.get('tp1');r['opportunity_tp2']=p.get('tp2');r['opportunity_tp3']=p.get('tp3');r['opportunity_tp4']=p.get('tp4');r['opportunity_rr']=p.get('risk_reward_tp2');r['opportunity_invalidation']=p.get('invalidation')
  return r
