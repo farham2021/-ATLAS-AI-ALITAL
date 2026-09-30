@@ -16478,6 +16478,177 @@ def send_daily16_management_pngs(results, scoped_results, portfolio_risk=None):
 
 
 
+# ATLAS regime-aware research radar (canonical decisions remain unchanged)
+"""ATLAS regime-aware, research-only watchlist.
+
+Consumes already-closed 4h OHLCV snapshots. It never changes canonical action,
+gate, execution, position size, or Entry/SL/TP. Candidate levels are conditional
+research levels, not orders. Missing or poor-quality data fail closed.
+"""
+
+from dataclasses import dataclass
+from math import isfinite
+from typing import Any, Mapping, Sequence
+
+
+@dataclass(frozen=True)
+class Candidate:
+    symbol: str
+    regime: str
+    bias: str
+    state: str
+    trigger: float
+    invalidation: float
+    price: float
+    distance_atr: float
+    evidence: str
+    blocker: str
+    canonical: str
+    gate_score: float | None
+    display_score: float | None
+    candle_ts: str
+
+
+def _radar_num(value: Any) -> float | None:
+    try:
+        value = float(value)
+        return value if isfinite(value) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _bars(result: Mapping[str, Any]) -> list[tuple[Any, float, float, float, float, float]]:
+    raw = ((result.get("snapshots") or {}).get("4h") or {}).get("rows") or []
+    bars = []
+    for row in raw:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        numbers = [_radar_num(v) for v in row[1:6]]
+        if None in numbers:
+            continue
+        o, h, l, c, v = numbers
+        if l <= min(o, c) <= max(o, c) <= h and v >= 0 and c > 0:
+            bars.append((row[0], o, h, l, c, v))
+    return bars
+
+
+def _atr(bars: Sequence[tuple], n: int = 14) -> float | None:
+    if len(bars) < n + 1:
+        return None
+    true_ranges = [max(bars[i][2] - bars[i][3],
+                       abs(bars[i][2] - bars[i-1][4]),
+                       abs(bars[i][3] - bars[i-1][4]))
+                   for i in range(len(bars) - n, len(bars))]
+    value = sum(true_ranges) / n
+    return value if value > 0 else None
+
+
+def _canonical(result: Mapping[str, Any]) -> str:
+    action = str(result.get("action") or "").upper()
+    gate = str(result.get("gate") or "").upper()
+    if gate == "PASS" and action in ("BUY CONFIRMATION", "SELL CONFIRMATION"):
+        return "BUY" if action.startswith("BUY") else "SELL"
+    return "WAIT"
+
+
+def candidate(result: Mapping[str, Any]) -> Candidate | None:
+    bars = _bars(result)
+    if len(bars) < 80:
+        return None
+    atr = _atr(bars)
+    if atr is None:
+        return None
+    symbol = str(result.get("coin") or "").upper().strip()
+    if not symbol:
+        return None
+    # No bypass of the existing data-quality and spread protections.
+    quality = _radar_num(result.get("data_quality"))
+    spread = _radar_num(result.get("spread"))
+    if quality is None or quality < 70 or (spread is not None and spread > 3):
+        return None
+    if str(result.get("quality") or "").upper() == "LOW":
+        return None
+
+    recent = bars[-21:-1]  # Never let the decision candle define its own boundary.
+    upper = max(b[2] for b in recent)
+    lower = min(b[3] for b in recent)
+    last = bars[-1]
+    price = last[4]
+    width_atr = (upper - lower) / atr
+    h4 = str(result.get("h4_trend") or "").upper()
+    d1 = str(result.get("d1_trend") or "").upper()
+    volume_mean = sum(b[5] for b in recent) / len(recent)
+    volume_ratio = last[5] / volume_mean if volume_mean else 0.0
+    if not (0.25 <= atr / price * 100 <= 15) or volume_ratio < 0.6:
+        return None
+
+    regime = bias = state = evidence = ""
+    trigger = invalidation = distance = 0.0
+    if h4 == d1 and h4 in ("BULLISH", "BEARISH"):
+        regime = "TREND"
+        bias = "LONG" if h4 == "BULLISH" else "SHORT"
+        trigger = upper if bias == "LONG" else lower
+        invalidation = lower if bias == "LONG" else upper
+        distance = max(0.0, (trigger-price if bias == "LONG" else price-trigger) / atr)
+        crossed = price > upper if bias == "LONG" else price < lower
+        # A closed breakout is research evidence, not execution confirmation.
+        if crossed and volume_ratio >= 1.1:
+            state = "TRIGGER_OBSERVED"
+        elif distance <= 0.5:
+            state = "PRE_TRIGGER"
+        elif distance <= 1.5:
+            state = "SETUP"
+        evidence = f"H4/D1 aligned; closed 4h; volume {volume_ratio:.2f}x"
+    elif h4 in ("MIXED", "NEUTRAL", "RANGING") and 2 <= width_atr <= 12:
+        regime = "RANGE"
+        near_low = abs(price-lower) / atr
+        near_high = abs(upper-price) / atr
+        bias = "LONG" if near_low <= near_high else "SHORT"
+        trigger = lower + 0.25*atr if bias == "LONG" else upper - 0.25*atr
+        invalidation = lower - 0.5*atr if bias == "LONG" else upper + 0.5*atr
+        distance = near_low if bias == "LONG" else near_high
+        if distance <= 0.5:
+            state = "PRE_TRIGGER"
+        elif distance <= 1.5:
+            state = "SETUP"
+        evidence = f"H4 range boundary; width {width_atr:.1f} ATR; D1 {d1 or 'UNKNOWN'}"
+    if not state:
+        return None
+
+    gate_score = _radar_num(result.get("confidence_raw"))
+    display_score = _radar_num(result.get("confidence"))
+    blocker = str(result.get("gate_reason") or "unconfirmed closed-candle trigger")
+    if blocker == "All mandatory gates passed":
+        blocker = "canonical BUY/SELL confirmation still absent"
+    return Candidate(symbol, regime, bias, state, trigger, invalidation, price,
+                     round(distance, 3), evidence, blocker, _canonical(result),
+                     gate_score, display_score, str(last[0]))
+
+
+def top_candidates(results: Sequence[Mapping[str, Any]], limit: int = 5) -> list[Candidate]:
+    found = [x for row in results if (x := candidate(row)) is not None and x.canonical == "WAIT"]
+    found.sort(key=lambda x: (x.state != "TRIGGER_OBSERVED",
+                              x.state != "PRE_TRIGGER", x.distance_atr, x.symbol))
+    return found[:max(0, limit)]
+
+
+def format_watchlist(results: Sequence[Mapping[str, Any]], limit: int = 5) -> str:
+    rows = top_candidates(results, limit)
+    lines = ["🔎 ATLAS | ۵ فرصت تحت‌نظر (پژوهشی، نه سیگنال معامله)"]
+    if not rows:
+        return "\n".join(lines + ["دادهٔ معتبر/ستاپ نزدیک کافی نیست؛ WAIT معتبر است."])
+    for r in rows:
+        gate = "?" if r.gate_score is None else f"{r.gate_score:.0f}"
+        shown = "?" if r.display_score is None else f"{r.display_score:.0f}"
+        lines.extend([
+            f"{r.symbol} | {r.regime} {r.bias} | {r.state} | canonical: {r.canonical}",
+            f"  شرط مشاهده: {r.trigger:.8g} | ابطال پژوهشی: {r.invalidation:.8g} | فاصله: {r.distance_atr:.2f} ATR",
+            f"  امتیاز گیت/نمایش: {gate}/{shown} | {r.evidence}",
+            f"  هنوز چرا WAIT؟ {r.blocker[:160]}",
+        ])
+    lines.append("⚠️ سطح‌های بالا سفارش، حدضرر تأییدشده یا احتمال سود نیستند؛ Execution Layer بدون تغییر است.")
+    return "\n".join(lines)
+
 def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc_regime, portfolio_risk, metal_results=None):
     """Decision-first DAILY16 Telegram surface.
 
@@ -16505,6 +16676,16 @@ def _phase310_send_full_daily16(results, scoped_results, top10, macro, news, btc
         _daily16_diag("EXECUTIVE_BRIEF",s,e)
     except Exception as ex:
         ee=f"DAILY16_EXECUTIVE_BRIEF: {ex}"; errors.append(ee); _daily16_diag("EXECUTIVE_BRIEF",0,[ee])
+
+    # Add one research-only Top-5 radar message. No canonical action, gate,
+    # Entry/SL/TP or execution field is changed by the radar.
+    if os.environ.get("ATLAS_REGIME_RADAR_ENABLED", "1") == "1":
+        try:
+            txt=format_watchlist(results, limit=5)
+            p,s,e=send_report(txt); parts+=p; sent_total+=s; errors.extend(e)
+            _daily16_diag("REGIME_WATCHLIST",s,e)
+        except Exception as ex:
+            ee=f"REGIME_WATCHLIST: {ex}"; errors.append(ee); _daily16_diag("REGIME_WATCHLIST",0,[ee])
 
     # C) Keep exactly one compact Decision Board (max 5 WAIT by existing config).
     # Opportunity Board is intentionally not sent separately; its useful
@@ -18015,56 +18196,4 @@ def main():
                         print(f"⚠️ DEEP4H visual dashboard: {_err}")
             except Exception as e:
                 append_changelog("VISUAL_DASHBOARD_DEEP4H", None, None, str(e))
-                print(f"⚠️ DEEP4H visual dashboard failed non-fatally: {e}")
-
-            # Same trigger as the public DEEP4H dashboard: excellent setup only.
-            # Every user receives only their own private portfolio image.
-            try:
-                with _AtlasTimer("ATLAS PERSONAL DASHBOARDS DEEP4H EXCELLENT"):
-                    personal_dash = send_all_personal_portfolio_dashboards(scoped_results)
-                print(
-                    "💼 DEEP4H personal dashboards:",
-                    "users=", personal_dash.get("users"),
-                    "sent=", personal_dash.get("sent"),
-                    "skipped=", personal_dash.get("skipped"),
-                    "errors=", len(personal_dash.get("errors") or []),
-                )
-            except Exception as e:
-                append_changelog("PERSONAL_DASHBOARDS_DEEP4H", None, None, str(e))
-                print(f"⚠️ DEEP4H personal dashboards failed non-fatally: {e}")
-
-        if deep_cycle and not daily_cycle and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent") and not report_delivery_allowed:
-            print("🔕 DEEP4H dashboards suppressed by central delivery guard; analysis/persistence completed.")
-
-        print(f"\n{'='*50}")
-        print("📊 PHASE 3.11 SUMMARY")
-        print(f"  Scoped assets: {len(scoped_results)}")
-        print(f"  Hourly persisted: {hourly_count}")
-        print(f"  Deep4H cycle: {deep_cycle}")
-        print(f"  Telegram sends counted this run: {total_sent}")
-        print(f"  Errors: {len(all_errors)}")
-        print(f"{'='*50}\n")
-        return 0
-    except Exception as e:
-        tb = traceback.format_exc()
-        append_changelog("FATAL", None, None, str(e), {"traceback": tb})
-        print(f"{VERSION} ERROR: {e}")
-        print(tb)
-        # Failure alert is intentionally retained: operational failure is not
-        # a market report and must remain visible for reliability.
-        try:
-            if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
-                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
-                for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
-                    if destination:
-                        try:
-                            telegram_send_one(destination, alert)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+                print(f"⚠️ DEEP4H visual dashboard failed non-fatally:
