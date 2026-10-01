@@ -19,7 +19,7 @@ REPORT_SLOTS = (
     ("DAILY16", 14, 50, "post_us_macro_15m_close"),
     ("NIGHTLY23", 18, 5, "london_newyork_overlap_4h_close"),
 )
-REPORT_RECOVERY_MIN = int(os.environ.get("ATLAS_REPORT_RECOVERY_MIN", "90") or 90)
+REPORT_RECOVERY_MIN = int(os.environ.get("ATLAS_REPORT_RECOVERY_MIN", "180") or 180)
 DEFAULT_LEASE_MIN = int(os.environ.get("ATLAS_SCHEDULER_LEASE_MIN", "65") or 65)
 
 
