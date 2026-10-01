@@ -18188,4 +18188,64 @@ def main():
         # existing always-on visual dashboard path above; NIGHTLY23 is untouched.
         if deep_cycle and not daily_cycle and report_delivery_allowed and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent"):
             try:
-                wit
+                with _AtlasTimer("ATLAS VISUAL DASHBOARD DEEP4H EXCELLENT"):
+                    visual_sent, visual_errors = send_atlas_visual_dashboard(scoped_results, btc_regime=btc_regime)
+                print(f"🖼 DEEP4H excellent visual dashboard: sent={visual_sent}, errors={len(visual_errors)}")
+                if visual_errors:
+                    for _err in visual_errors[:3]:
+                        print(f"⚠️ DEEP4H visual dashboard: {_err}")
+            except Exception as e:
+                append_changelog("VISUAL_DASHBOARD_DEEP4H", None, None, str(e))
+                print(f"⚠️ DEEP4H visual dashboard failed non-fatally: {e}")
+
+            # Same trigger as the public DEEP4H dashboard: excellent setup only.
+            # Every user receives only their own private portfolio image.
+            try:
+                with _AtlasTimer("ATLAS PERSONAL DASHBOARDS DEEP4H EXCELLENT"):
+                    personal_dash = send_all_personal_portfolio_dashboards(scoped_results)
+                print(
+                    "💼 DEEP4H personal dashboards:",
+                    "users=", personal_dash.get("users"),
+                    "sent=", personal_dash.get("sent"),
+                    "skipped=", personal_dash.get("skipped"),
+                    "errors=", len(personal_dash.get("errors") or []),
+                )
+            except Exception as e:
+                append_changelog("PERSONAL_DASHBOARDS_DEEP4H", None, None, str(e))
+                print(f"⚠️ DEEP4H personal dashboards failed non-fatally: {e}")
+
+        if deep_cycle and not daily_cycle and isinstance(book_scan_result, dict) and book_scan_result.get("has_excellent") and not report_delivery_allowed:
+            print("🔕 DEEP4H dashboards suppressed by central delivery guard; analysis/persistence completed.")
+
+        print(f"\n{'='*50}")
+        print("📊 PHASE 3.11 SUMMARY")
+        print(f"  Scoped assets: {len(scoped_results)}")
+        print(f"  Hourly persisted: {hourly_count}")
+        print(f"  Deep4H cycle: {deep_cycle}")
+        print(f"  Telegram sends counted this run: {total_sent}")
+        print(f"  Errors: {len(all_errors)}")
+        print(f"{'='*50}\n")
+        return 0
+    except Exception as e:
+        tb = traceback.format_exc()
+        append_changelog("FATAL", None, None, str(e), {"traceback": tb})
+        print(f"{VERSION} ERROR: {e}")
+        print(tb)
+        # Failure alert is intentionally retained: operational failure is not
+        # a market report and must remain visible for reliability.
+        try:
+            if TELEGRAM_TOKEN and (TELEGRAM_CHAT_ID or TELEGRAM_GROUP_CHAT_ID):
+                alert = f"🚨 {VERSION} FAILED\nReason: {str(e)[:900]}\n\nCheck GitHub Actions log and changelog.txt."
+                for destination in (TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID):
+                    if destination:
+                        try:
+                            telegram_send_one(destination, alert)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
