@@ -66,14 +66,17 @@ def main():
  csvbuf=io.StringIO();cols=["symbol","tf","status","price","volume_ratio","entry","sl","tp1","tp2","rr","watch_trigger","side","source"]
  writer=csv.DictWriter(csvbuf,fieldnames=cols,extrasaction="ignore");writer.writeheader();writer.writerows(outputs)
  def multipart(method,filename,blob,mime,caption):
-  boundary="ATLASBoundary123456789"
-  parts=[]
+  import uuid
+  boundary="ATLAS"+uuid.uuid4().hex
+  chunks=[]
   for name,value in (("chat_id",chat),("caption",caption)):
-   parts.append(("--"+boundary+"\\r\\nContent-Disposition: form-data; name=\\\""+name+"\\\"\\r\\n\\r\\n"+str(value)+"\\r\\n").encode())
+   chunks.append(("--"+boundary+"\r\nContent-Disposition: form-data; name=\""+name+"\"\r\n\r\n"+str(value)+"\r\n").encode())
   field="photo" if method=="sendPhoto" else "document"
-  parts.append(("--"+boundary+"\\r\\nContent-Disposition: form-data; name=\\\""+field+"\\\"; filename=\\\""+filename+"\\\"\\r\\nContent-Type: "+mime+"\\r\\n\\r\\n").encode()+blob+b"\\r\\n")
-  parts.append(("--"+boundary+"--\\r\\n").encode())
-  return request("https://api.telegram.org/bot"+token+"/"+method,headers={"Content-Type":"multipart/form-data; boundary="+boundary},data=b"".join(parts))
+  chunks.append(("--"+boundary+"\r\nContent-Disposition: form-data; name=\""+field+"\"; filename=\""+filename+"\"\r\nContent-Type: "+mime+"\r\n\r\n").encode())
+  chunks.extend((blob,b"\r\n",("--"+boundary+"--\r\n").encode()))
+  result=request("https://api.telegram.org/bot"+token+"/"+method,headers={"Content-Type":"multipart/form-data; boundary="+boundary},data=b"".join(chunks))
+  if not result.get("ok"):raise RuntimeError("Telegram "+method+" rejected")
+  return result
  def render_png():
   import matplotlib
   matplotlib.use("Agg")
@@ -92,14 +95,10 @@ def main():
   return buf.getvalue()
  if os.getenv("ATLAS_PAPER_TELEGRAM","0")=="1":
   token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_CHAT_ID"]
-  try:
-   response=multipart("sendDocument","atlas_paper_setups.csv",csvbuf.getvalue().encode("utf-8-sig"),"text/csv","ATLAS PAPER | CSV")
-   print("CSV sent",response.get("ok",False))
-  except Exception as exc:print("CSV delivery failed",type(exc).__name__)
-  try:
-   response=multipart("sendPhoto","atlas_paper_setups.png",render_png(),"image/png","ATLAS PAPER | PNG")
-   print("PNG sent",response.get("ok",False))
-  except Exception as exc:print("PNG delivery failed",type(exc).__name__)
+  response=multipart("sendDocument","atlas_paper_setups.csv",csvbuf.getvalue().encode("utf-8-sig"),"text/csv","ATLAS PAPER | CSV")
+  print("CSV delivered message_id",response["result"]["message_id"])
+  response=multipart("sendPhoto","atlas_paper_setups.png",render_png(),"image/png","ATLAS PAPER | PNG")
+  print("PNG delivered message_id",response["result"]["message_id"])
   for part in [msg[i:i+3500] for i in range(0,len(msg),3500)]:
    result=request("https://api.telegram.org/bot"+token+"/sendMessage",data=urllib.parse.urlencode({"chat_id":chat,"text":part}).encode())
    if not result.get("ok"):raise RuntimeError("Telegram send rejected")
