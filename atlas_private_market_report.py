@@ -1,13 +1,18 @@
 """ATLAS private market status report, read-only; no trade recommendation."""
-import os,json,urllib.parse,urllib.request,datetime
+import os,json,urllib.parse,urllib.request,urllib.error,datetime,time
 def api(url,headers=None,data=None):
  req=urllib.request.Request(url,headers=headers or {},data=data)
- with urllib.request.urlopen(req,timeout=25) as r:return json.load(r)
+ for attempt in range(3):
+  try:
+   with urllib.request.urlopen(req,timeout=30) as r:return json.load(r)
+  except (urllib.error.HTTPError,urllib.error.URLError,TimeoutError) as e:
+   if attempt==2 or (isinstance(e,urllib.error.HTTPError) and e.code not in (429,500,502,503,504)):raise
+   time.sleep(2*(attempt+1))
 def main():
  base=os.environ["SUPABASE_URL"].rstrip("/")
  key=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
  token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_CHAT_ID"]
- params=urllib.parse.urlencode({"select":"symbol,asset_group,captured_at,price,decision_state,public_signal,confidence,opportunity_score,payload","order":"captured_at.desc","limit":1000})
+ params=urllib.parse.urlencode({"select":"symbol,asset_group,captured_at,price,decision_state,public_signal,confidence,opportunity_score","order":"captured_at.desc","limit":150})
  rows=api(base+"/rest/v1/atlas_hourly_signal_snapshots?"+params,{"apikey":key,"Authorization":"Bearer "+key})
  latest={}
  for r in rows:
@@ -38,14 +43,14 @@ def main():
  if internal:
   lines.extend(["","تأییدهای داخلی که هنوز WAIT هستند:"])
   for r in internal[:10]:
-   p=r.get("payload") or {}
+   p={}
    if isinstance(p,str):
     try:p=json.loads(p)
     except ValueError:p={}
    missing=[x for x in ("entry","sl","tp1") if not p.get(x)]
    flags=[]
-   if missing:flags.append("missing "+",".join(missing))
-   if p.get("session")=="CLOSED":flags.append("session closed")
+   # Payload intentionally excluded from bulk query to prevent oversized responses.
+   flags.append("risk gate details not loaded")
    if (r.get("opportunity_score") or 0)<55:flags.append("low opportunity score")
    if not flags:flags.append("public risk gate not passed")
    lines.append(f'{r["symbol"]}: {r["decision_state"]} | confidence {r.get("confidence") or "?"} | '+", ".join(flags))
