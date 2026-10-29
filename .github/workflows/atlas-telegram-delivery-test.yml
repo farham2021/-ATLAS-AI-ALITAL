@@ -1,0 +1,36 @@
+name: ATLAS Telegram Delivery Diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  private-telegram-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify Telegram bot and send one private diagnostic message
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.parse,urllib.request,sys
+          token=os.getenv("TELEGRAM_TOKEN","")
+          chat=os.getenv("TELEGRAM_CHAT_ID","")
+          if not token or not chat: raise SystemExit("Missing Telegram credentials")
+          base="https://api.telegram.org/bot"+token+"/"
+          def call(method,payload):
+              req=urllib.request.Request(base+method,data=urllib.parse.urlencode(payload).encode())
+              with urllib.request.urlopen(req,timeout=15) as resp: return json.load(resp)
+          try:
+              me=call("getMe",{})
+              print("getMe ok:",me.get("ok",False))
+              if not me.get("ok"): raise SystemExit("Bot token rejected")
+              msg=call("sendMessage",{"chat_id":chat,"text":"ATLAS diagnostic: GitHub Actions to Telegram private delivery test. No trading signal."})
+              print("sendMessage ok:",msg.get("ok",False))
+              print("message_id:",msg.get("result",{}).get("message_id","missing"))
+              if not msg.get("ok"): raise SystemExit("Telegram send failed")
+          except Exception as e:
+              print("Telegram test failed:",type(e).__name__)
+              sys.exit(1)
+          PY
