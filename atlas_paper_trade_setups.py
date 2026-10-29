@@ -1,7 +1,7 @@
 """ATLAS actionable PAPER research: closed candles, explicit BUY/SELL/WATCH/WAIT, TP/SL.
 No live execution. Uses cached exchange candles; does not guarantee performance.
 """
-import os,json,urllib.request,urllib.parse,datetime,statistics,math
+import os,json,urllib.request,urllib.parse,datetime,statistics,math,csv,io
 def request(url,headers=None,data=None):
  with urllib.request.urlopen(urllib.request.Request(url,headers=headers or {},data=data),timeout=30) as r:return json.load(r)
 def main():
@@ -62,8 +62,44 @@ def main():
  if not outputs:lines.append("NO TRADE: no sufficiently fresh valid closed candles.")
  msg="\n".join(lines)
  print(json.dumps({"assets":len(outputs),"statuses":{s:sum(x["status"]==s for x in outputs) for s in ("BUY","SELL","WATCH","WAIT")}},ensure_ascii=False))
+ # CSV export of the exact same signals; image generation is best-effort.
+ csvbuf=io.StringIO();cols=["symbol","tf","status","price","volume_ratio","entry","sl","tp1","tp2","rr","watch_trigger","side","source"]
+ writer=csv.DictWriter(csvbuf,fieldnames=cols,extrasaction="ignore");writer.writeheader();writer.writerows(outputs)
+ def multipart(method,filename,blob,mime,caption):
+  boundary="ATLASBoundary123456789"
+  parts=[]
+  for name,value in (("chat_id",chat),("caption",caption)):
+   parts.append(("--"+boundary+"\\r\\nContent-Disposition: form-data; name=\\\""+name+"\\\"\\r\\n\\r\\n"+str(value)+"\\r\\n").encode())
+  field="photo" if method=="sendPhoto" else "document"
+  parts.append(("--"+boundary+"\\r\\nContent-Disposition: form-data; name=\\\""+field+"\\\"; filename=\\\""+filename+"\\\"\\r\\nContent-Type: "+mime+"\\r\\n\\r\\n").encode()+blob+b"\\r\\n")
+  parts.append(("--"+boundary+"--\\r\\n").encode())
+  return request("https://api.telegram.org/bot"+token+"/"+method,headers={"Content-Type":"multipart/form-data; boundary="+boundary},data=b"".join(parts))
+ def render_png():
+  import matplotlib
+  matplotlib.use("Agg")
+  import matplotlib.pyplot as plt
+  from matplotlib.backends.backend_agg import FigureCanvasAgg
+  fig,ax=plt.subplots(figsize=(14,max(4,2+0.35*min(len(outputs),30))),dpi=140)
+  ax.axis("off")
+  headers=["Asset","TF","Signal","Price","Entry","SL","TP1","TP2"]
+  def fmt(v):return "" if v is None else f"{v:.7g}" if isinstance(v,(float,int)) else str(v)
+  cells=[[fmt(x.get(k)) for k in ("symbol","tf","status","price","entry","sl","tp1","tp2")] for x in outputs[:30]]
+  if not cells:cells=[["NO DATA"]+[""]*7]
+  table=ax.table(cellText=cells,colLabels=headers,loc="center",cellLoc="center")
+  table.auto_set_font_size(False);table.set_fontsize(9);table.scale(1,1.4)
+  fig.suptitle("ATLAS | PAPER SETUPS | "+now.strftime("%Y-%m-%d %H:%M UTC"),fontsize=14)
+  buf=io.BytesIO();fig.savefig(buf,format="png",bbox_inches="tight");plt.close(fig)
+  return buf.getvalue()
  if os.getenv("ATLAS_PAPER_TELEGRAM","0")=="1":
   token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_CHAT_ID"]
+  try:
+   response=multipart("sendDocument","atlas_paper_setups.csv",csvbuf.getvalue().encode("utf-8-sig"),"text/csv","ATLAS PAPER | CSV")
+   print("CSV sent",response.get("ok",False))
+  except Exception as exc:print("CSV delivery failed",type(exc).__name__)
+  try:
+   response=multipart("sendPhoto","atlas_paper_setups.png",render_png(),"image/png","ATLAS PAPER | PNG")
+   print("PNG sent",response.get("ok",False))
+  except Exception as exc:print("PNG delivery failed",type(exc).__name__)
   for part in [msg[i:i+3500] for i in range(0,len(msg),3500)]:
    result=request("https://api.telegram.org/bot"+token+"/sendMessage",data=urllib.parse.urlencode({"chat_id":chat,"text":part}).encode())
    if not result.get("ok"):raise RuntimeError("Telegram send rejected")
