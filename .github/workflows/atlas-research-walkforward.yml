@@ -1,0 +1,21 @@
+name: ATLAS Research Walk Forward Audit
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 4 * * 1'
+permissions:
+  contents: read
+jobs:
+  research-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run read-only chronological research audit
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python atlas_research_walkforward.py
