@@ -1,0 +1,23 @@
+name: ATLAS Supabase Read-Only Connection Check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Compare project references without exposing secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          python3 - <<'PY'
+          import os,urllib.parse,sys
+          url=os.getenv('SUPABASE_URL','')
+          host=urllib.parse.urlsplit(url).hostname or ''
+          ref=host.removesuffix('.supabase.co') if host.endswith('.supabase.co') else 'invalid'
+          print('Configured project ref:',ref)
+          print('Matches connected project:',ref=='dhasxrsnrubryjnictzi')
+          if ref=='invalid':sys.exit(1)
+          PY
