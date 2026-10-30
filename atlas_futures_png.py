@@ -16,16 +16,21 @@ def select_five(rows, capital=2000.0, risk_pct=1.0, max_leverage=3.0):
         if not isinstance(r,dict): continue
         symbol=str(r.get("coin") or r.get("symbol") or "").upper().strip()
         if not symbol or symbol in ("XAU","XAG","XCU","GOLD","SILVER","COPPER"): continue
-        action=str(r.get("action") or "").upper()
+        action=str(r.get("decision") or r.get("action") or "").upper()
         direction="LONG" if action in ("BUY","ACCUMULATE") else "SHORT" if action in ("SELL","REDUCE") else "WAIT"
         entry=_num(r.get("entry")); sl=_num(r.get("sl"))
         tp1=_num(r.get("tp1")); tp2=_num(r.get("tp2"))
         confidence=_num(r.get("decision_confidence")) or _num(r.get("confidence")) or 0
-        executable=r.get("executable") is True
+        executable=r.get("executable") is True and action in ("BUY","SELL")
         valid=(direction!="WAIT" and executable and all(v is not None and v>0 for v in (entry,sl,tp1,tp2))
                and ((sl<entry<tp1<=tp2) if direction=="LONG" else (tp2<=tp1<entry<sl)))
         rr=(abs(tp1-entry)/abs(entry-sl)) if valid else None
         if valid and rr<2: valid=False
+        # Unknown perpetual-market venue, liquidity or funding fails closed.
+        if not (r.get("futures_venue_verified") is True
+                and r.get("futures_liquidity_verified") is True
+                and r.get("futures_funding_verified") is True):
+            valid=False
         lev=min(max(1.0,float(max_leverage)),3.0)
         risk_usd=max(0.0,float(capital))*max(0.0,float(risk_pct))/100.0
         qty=(risk_usd/abs(entry-sl)) if valid else None
@@ -38,7 +43,7 @@ def select_five(rows, capital=2000.0, risk_pct=1.0, max_leverage=3.0):
             entry=entry if valid else None,sl=sl if valid else None,tp1=tp1 if valid else None,tp2=tp2 if valid else None,
             rr=rr if valid else None,confidence=confidence,leverage=lev if valid else None,
             risk_usd=risk_usd if valid else None,notional_usd=notional if valid else None,
-            reason="Canonical signal + RR>=2" if valid else "No executable canonical plan / invalid levels or RR<2"))
+            reason="Canonical + verified futures market + RR>=2" if valid else "WAIT: canonical plan, RR, venue, liquidity or funding not verified"))
     selected.sort(key=lambda x:(x["state"]!="VALID",-x["confidence"],x["symbol"]))
     return selected[:5]
 
