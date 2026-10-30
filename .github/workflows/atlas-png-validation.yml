@@ -2,6 +2,8 @@ name: ATLAS PNG Futures PR Validation
 on:
   pull_request:
     paths:
+      - atlas_early_warning_v13.py
+      - test_atlas_early_warning_v13.py
       - atlas_futures_png.py
       - atlas_futures_evidence.py
       - test_atlas_futures_evidence.py
@@ -27,6 +29,6 @@ jobs:
       - name: Install rendering dependency
         run: python -m pip install matplotlib
       - name: Compile changed modules
-        run: python -m py_compile atlas_futures_evidence.py test_atlas_futures_evidence.py atlas_futures_png.py atlas_cross_asset_png.py atlas_conditional_opportunities.py bot.py test_atlas_futures_png.py test_atlas_cross_asset_png.py test_atlas_conditional_opportunities.py
+        run: python -m py_compile atlas_early_warning_v13.py test_atlas_early_warning_v13.py atlas_futures_evidence.py test_atlas_futures_evidence.py atlas_futures_png.py atlas_cross_asset_png.py atlas_conditional_opportunities.py bot.py test_atlas_futures_png.py test_atlas_cross_asset_png.py test_atlas_conditional_opportunities.py
       - name: Validate trade gates and actual PNG bytes
-        run: python -m unittest -v test_atlas_futures_evidence.py test_atlas_futures_png.py test_atlas_cross_asset_png.py test_atlas_conditional_opportunities.py
+        run: python -m unittest -v test_atlas_early_warning_v13.py test_atlas_futures_evidence.py test_atlas_futures_png.py test_atlas_cross_asset_png.py test_atlas_conditional_opportunities.py
