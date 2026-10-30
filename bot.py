@@ -18012,6 +18012,13 @@ def main():
                 total_sent+=_s;all_errors.extend(_e)
                 _s,_e=send_atlas_visual_dashboard(scoped_results,btc_regime=btc_regime)
                 total_sent+=_s;all_errors.extend(_e)
+                # Mandatory Iran dashboards: TSE equities + macro/metals/funds.
+                # Keep the existing crypto/futures PNGs intact.
+                if IRAN_MULTI_ASSET_ENABLED and ATLAS_IRAN_DASHBOARD_ENABLED:
+                    _iran_sent,_iran_errors=send_iran_visual_dashboard()
+                    total_sent+=_iran_sent;all_errors.extend(_iran_errors)
+                    if _iran_sent == 0:
+                        raise RuntimeError("PNG_ONLY Daily16: Iran TSE and macro dashboards were not delivered: " + "; ".join(_iran_errors))
                 if total_sent==0: raise RuntimeError("PNG_ONLY Daily16: no images delivered")
                 print(f"🖼 PNG_ONLY DAILY16: images_sent={total_sent} errors={len(all_errors)}")
             except Exception as e:
@@ -18147,7 +18154,7 @@ def main():
                         scoped_results,
                         backtest_ok=globals().get("_LAST_BACKTEST_OK", True),
                         sender=telegram_send_one,
-                        send_telegram=bool(daily_cycle),
+                        send_telegram=bool(daily_cycle and os.environ.get("ATLAS_PNG_ONLY", "0") != "1"),
                     )
                     print(
                         "⚙️ Execution:",
@@ -18168,7 +18175,7 @@ def main():
                     scoped_results,
                     personal_symbols=list(ATLAS_PERSONAL_ASSETS),
                     sender=telegram_send_one,
-                    send_report=True,
+                    send_report=os.environ.get("ATLAS_PNG_ONLY", "0") != "1",
                 )
             print(
                 "💼 Desk:",
@@ -18187,7 +18194,7 @@ def main():
         if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
             try:
                 with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
-                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed)
+                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed and os.environ.get("ATLAS_PNG_ONLY", "0") != "1")
             except Exception as e:
                 append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
