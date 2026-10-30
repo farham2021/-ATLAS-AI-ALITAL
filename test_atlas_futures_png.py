@@ -25,7 +25,7 @@ class FuturesBoardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             fn=os.path.join(folder,"preview.png")
             render_png(select_five([dict(coin="BTC",action="WAIT")]),fn)
-            with open(fn,"rb") as fh: self.assertEqual(fh.read(8),b"\\x89PNG\\r\\n\\x1a\\n")
+            with open(fn,"rb") as fh: self.assertEqual(fh.read(8),bytes.fromhex("89504e470d0a1a0a"))
     def test_five_max(self):
         rows=[dict(coin=f"COIN{i}",action="WAIT",confidence=i) for i in range(9)]
         self.assertEqual(len(select_five(rows)),5)
