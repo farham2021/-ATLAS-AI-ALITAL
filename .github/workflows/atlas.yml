@@ -112,8 +112,8 @@ jobs:
         if: steps.gate.outputs.should_run == '1'
         run: |
           python -m unittest -v test_atlas_futures_png.py
-          python -m unittest -v test_atlas_v13_shadow.py test_atlas_v13_runtime.py
-          python -m py_compile atlas_v13_shadow.py atlas_v13_runtime.py atlas_futures_png.py bot.py analysis.py atlas_professional_monitor.py atlas_self_learning.py atlas_schedule_guard.py iran_data_collector_v2.py iran_data_health.py
+          python -m unittest -v test_atlas_v13_shadow.py test_atlas_v13_runtime.py test_atlas_v13_receipts.py
+          python -m py_compile atlas_v13_receipts.py atlas_v13_shadow.py atlas_v13_runtime.py atlas_futures_png.py bot.py analysis.py atlas_professional_monitor.py atlas_self_learning.py atlas_schedule_guard.py iran_data_collector_v2.py iran_data_health.py
           python -c "import analysis; assert analysis._professional_analyze is not None, 'professional monitor import failed'"
           test -f atlas_schedule_guard.py
 
