@@ -18179,7 +18179,7 @@ def main():
                     scoped_results,
                     personal_symbols=list(ATLAS_PERSONAL_ASSETS),
                     sender=telegram_send_one,
-                    send_report=True,
+                    send_report=os.environ.get("ATLAS_PNG_ONLY","0") != "1",
                 )
             print(
                 "💼 Desk:",
@@ -18198,7 +18198,7 @@ def main():
         if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
             try:
                 with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
-                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed)
+                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed and os.environ.get("ATLAS_PNG_ONLY","0") != "1")
             except Exception as e:
                 append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
