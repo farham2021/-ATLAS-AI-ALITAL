@@ -38,6 +38,11 @@ class EarlyRiskSignalTests(unittest.TestCase):
         self.assertEqual(normalized[-1][0], risk.expected_closed_open_ms("4h", self.now_ms))
         self.assertEqual(len(normalized), 60)
 
+    def test_only_explicit_live_value_enables_delivery_mode(self):
+        self.assertEqual(risk.normalize_risk_mode("LIVE"), "LIVE")
+        self.assertEqual(risk.normalize_risk_mode("SHADOW"), "SHADOW")
+        self.assertEqual(risk.normalize_risk_mode("typo"), "SHADOW")
+
     def test_stale_daily_series_fails_closed(self):
         rows4 = candles("4h", [100.0] * 60, now_ms=self.now_ms)
         rowsd = candles("1d", [100.0] * 60, now_ms=self.now_ms - 8 * 24 * 3600 * 1000)

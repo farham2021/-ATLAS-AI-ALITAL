@@ -37,7 +37,14 @@ TELEGRAM_GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
 CMC_API_KEY = os.getenv("CMC_API_KEY", "").strip()
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
-RISK_MODE = os.getenv("ATLAS_EARLY_RISK_MODE", "SHADOW").strip().upper()
+
+
+def normalize_risk_mode(value):
+    """Only an explicit LIVE value can enable Telegram delivery."""
+    return "LIVE" if str(value or "").strip().upper() == "LIVE" else "SHADOW"
+
+
+RISK_MODE = normalize_risk_mode(os.getenv("ATLAS_EARLY_RISK_MODE", "SHADOW"))
 ALERT_COOLDOWN_HOURS = max(1, int(os.getenv("ATLAS_RISK_ALERT_COOLDOWN_HOURS", "6")))
 MAX_ALERTS_PER_CYCLE = max(1, min(20, int(os.getenv("ATLAS_RISK_ALERT_MAX_PER_CYCLE", "10"))))
 
