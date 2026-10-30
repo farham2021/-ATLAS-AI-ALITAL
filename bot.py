@@ -18012,6 +18012,17 @@ def main():
                 total_sent+=_s;all_errors.extend(_e)
                 _s,_e=send_atlas_visual_dashboard(scoped_results,btc_regime=btc_regime)
                 total_sent+=_s;all_errors.extend(_e)
+                # Preserve the three mandatory Iran/core visuals and user-specific privacy.
+                if IRAN_MULTI_ASSET_ENABLED and ATLAS_IRAN_DASHBOARD_ENABLED:
+                    _s,_e=send_iran_visual_dashboard()
+                    total_sent+=_s;all_errors.extend(_e)
+                # Persistence must not be skipped by selecting a delivery format.
+                _alloc=run_personal_allocation_cycle(scoped_results)
+                if _alloc.get("errors"): all_errors.extend(_alloc["errors"])
+                _mai=run_multiasset_intelligence_cycle(scoped_results)
+                if _mai.get("errors"): all_errors.extend(_mai["errors"])
+                _personal=send_all_personal_portfolio_dashboards(scoped_results)
+                if _personal.get("errors"): all_errors.extend(_personal["errors"])
                 if total_sent==0: raise RuntimeError("PNG_ONLY Daily16: no images delivered")
                 print(f"🖼 PNG_ONLY DAILY16: images_sent={total_sent} errors={len(all_errors)}")
             except Exception as e:
@@ -18147,7 +18158,7 @@ def main():
                         scoped_results,
                         backtest_ok=globals().get("_LAST_BACKTEST_OK", True),
                         sender=telegram_send_one,
-                        send_telegram=bool(daily_cycle),
+                        send_telegram=bool(daily_cycle and os.environ.get("ATLAS_PNG_ONLY","0") != "1"),
                     )
                     print(
                         "⚙️ Execution:",
