@@ -18013,6 +18013,18 @@ def main():
 
         if daily_cycle and os.environ.get("ATLAS_PNG_ONLY", "0") == "1":
             # PNG-only daily reporting. No CSV, text, voice or document delivery.
+            # Refresh private investor allocation and multi-asset intelligence even
+            # when public delivery is PNG-only. Chat Plane reads these snapshots.
+            try:
+                _alloc=run_personal_allocation_cycle(scoped_results)
+                print("🧠 PNG_ONLY PERSONAL ALLOCATION:",_alloc)
+                _mai=run_multiasset_intelligence_cycle(scoped_results)
+                print("🌐 PNG_ONLY MULTI-ASSET:",_mai)
+                if _alloc.get("errors") or _mai.get("errors"):
+                    print("⚠️ Private advisory snapshot persistence had errors")
+            except Exception as _private_error:
+                append_changelog("PRIVATE_INVESTOR_REPORT",None,None,str(_private_error))
+                print(f"⚠️ Private investor report failed: {_private_error}")
             # All signal/market persistence above remains unchanged.
             try:
                 from atlas_futures_png import select_five, render_png
