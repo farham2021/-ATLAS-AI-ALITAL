@@ -18012,6 +18012,27 @@ def main():
                 total_sent+=_s;all_errors.extend(_e)
                 _s,_e=send_atlas_visual_dashboard(scoped_results,btc_regime=btc_regime)
                 total_sent+=_s;all_errors.extend(_e)
+                # Cross-asset status is read-only; no fabricated Iranian market quotes.
+                from atlas_cross_asset_png import summarize as cross_asset_summary, render_png as cross_asset_render
+                cross_file=cross_asset_render(cross_asset_summary(list(results or []) + list(metal_results or [])))
+                try:
+                    for chat in dict.fromkeys(x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x):
+                        if _telegram_send_photo_file(chat,cross_file,"ATLAS Iran | Equities, Metals, USD / USDT"):
+                            total_sent+=1
+                finally:
+                    try: os.unlink(cross_file)
+                    except OSError: pass
+                # Preserve the three mandatory Iran/core visuals and user-specific privacy.
+                if IRAN_MULTI_ASSET_ENABLED and ATLAS_IRAN_DASHBOARD_ENABLED:
+                    _s,_e=send_iran_visual_dashboard()
+                    total_sent+=_s;all_errors.extend(_e)
+                # Persistence must not be skipped by selecting a delivery format.
+                _alloc=run_personal_allocation_cycle(scoped_results)
+                if _alloc.get("errors"): all_errors.extend(_alloc["errors"])
+                _mai=run_multiasset_intelligence_cycle(scoped_results)
+                if _mai.get("errors"): all_errors.extend(_mai["errors"])
+                _personal=send_all_personal_portfolio_dashboards(scoped_results)
+                if _personal.get("errors"): all_errors.extend(_personal["errors"])
                 if total_sent==0: raise RuntimeError("PNG_ONLY Daily16: no images delivered")
                 print(f"🖼 PNG_ONLY DAILY16: images_sent={total_sent} errors={len(all_errors)}")
             except Exception as e:
@@ -18147,7 +18168,7 @@ def main():
                         scoped_results,
                         backtest_ok=globals().get("_LAST_BACKTEST_OK", True),
                         sender=telegram_send_one,
-                        send_telegram=bool(daily_cycle),
+                        send_telegram=bool(daily_cycle and os.environ.get("ATLAS_PNG_ONLY","0") != "1"),
                     )
                     print(
                         "⚙️ Execution:",
@@ -18168,7 +18189,7 @@ def main():
                     scoped_results,
                     personal_symbols=list(ATLAS_PERSONAL_ASSETS),
                     sender=telegram_send_one,
-                    send_report=True,
+                    send_report=os.environ.get("ATLAS_PNG_ONLY","0") != "1",
                 )
             print(
                 "💼 Desk:",
@@ -18187,7 +18208,7 @@ def main():
         if ATLAS_BOOK_SCAN_AUTO and deep_cycle:
             try:
                 with _AtlasTimer("AUTO SUMMER BOOK SCAN"):
-                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed)
+                    book_scan_result = run_summer_book_scan_auto(send_telegram=report_delivery_allowed and os.environ.get("ATLAS_PNG_ONLY","0") != "1")
             except Exception as e:
                 append_changelog("AUTO_BOOK_SCAN", None, None, str(e))
                 print(f"⚠️ Auto Book Scan failed non-fatally: {e}")
