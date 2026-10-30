@@ -18093,6 +18093,16 @@ def main():
             except Exception as e:
                 append_changelog("PERSONAL_DASHBOARDS", None, None, str(e))
                 print(f"⚠️ Personal dashboards failed non-fatally: {e}")
+        elif nightly_cycle and os.environ.get("ATLAS_PNG_ONLY", "0") == "1":
+            # Reuse the read-only market visual for nightly PNG-only delivery.
+            _s,_e=send_atlas_visual_dashboard(scoped_results,btc_regime=btc_regime)
+            total_sent+=_s;all_errors.extend(_e)
+            if IRAN_MULTI_ASSET_ENABLED and ATLAS_IRAN_DASHBOARD_NIGHTLY:
+                _s,_e=send_iran_visual_dashboard()
+                total_sent+=_s;all_errors.extend(_e)
+            if total_sent==0:
+                raise RuntimeError("PNG_ONLY Nightly23: no images delivered")
+            print(f"🖼 PNG_ONLY NIGHTLY23: images_sent={total_sent} errors={len(all_errors)}")
         elif nightly_cycle and ATLAS_NIGHTLY_BRIEF_ENABLED:
             try:
                 telegram_preflight()
