@@ -1,0 +1,24 @@
+name: ATLAS Independent Self-Healing Watchdog
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: atlas-watchdog
+  cancel-in-progress: false
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Inspect scheduler health without changing state
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python atlas_watchdog.py
