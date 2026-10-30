@@ -111,8 +111,8 @@ jobs:
       - name: Verify release
         if: steps.gate.outputs.should_run == '1'
         run: |
-          python -m unittest -v test_atlas_futures_png.py
-          python -m py_compile atlas_futures_png.py bot.py analysis.py atlas_professional_monitor.py atlas_self_learning.py atlas_schedule_guard.py iran_data_collector_v2.py iran_data_health.py
+          python -m unittest discover -v
+          python -m py_compile atlas_futures_png.py bot.py analysis.py atlas_professional_monitor.py atlas_self_learning.py atlas_schedule_guard.py atlas_early_risk.py atlas_crossmarket_risk.py atlas_watchdog.py iran_data_collector_v2.py iran_data_health.py
           python -c "import analysis; assert analysis._professional_analyze is not None, 'professional monitor import failed'"
           test -f atlas_schedule_guard.py
 

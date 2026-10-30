@@ -12,7 +12,7 @@ def fetch(t):
  with urllib.request.urlopen(r,timeout=20) as x:return json.loads(x.read())
 def age(s):return (datetime.now(timezone.utc)-datetime.fromisoformat(s.replace("Z","+00:00"))).total_seconds()/3600
 def main():
- rules=[("atlas_iran_fx_snapshots",{"USD_IRR","GOLD18","COIN_EMAMI"},9),("atlas_market_snapshots",{"XAGUSD","SILVER999_FAIR"},4),("atlas_tse_snapshots",{"TSE_MARKET"},30),("atlas_fund_snapshots",set(),36)]
+ rules=[("atlas_iran_fx_snapshots",{"USD_IRR","USDT_IRR","GOLD18","COIN_EMAMI"},9),("atlas_market_snapshots",{"XAGUSD","XAUUSD","COPPER","SILVER999_FAIR"},8),("atlas_tse_snapshots",{"TSE_MARKET"},30),("atlas_fund_snapshots",set(),36)]
  rep={};bad=[]
  for t,req,mx in rules:
   try:rows=fetch(t)

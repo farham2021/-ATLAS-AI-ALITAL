@@ -1,5 +1,13 @@
 name: ATLAS Early Risk Guard
 on:
+  pull_request:
+    paths:
+      - "atlas_early_risk.py"
+      - "atlas_crossmarket_risk.py"
+      - "atlas_watchdog.py"
+      - "test_atlas_early_risk.py"
+      - "test_atlas_watchdog.py"
+      - ".github/workflows/atlas_early_risk.yml"
   schedule:
     - cron: "11,41 * * * *"
   workflow_dispatch:
@@ -9,18 +17,41 @@ concurrency:
   group: atlas-early-risk
   cancel-in-progress: false
 jobs:
-  risk:
+  tests:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Scan confirmed crypto downside risks and notify Telegram
+      - name: Compile risk engines and run offline tests
+        run: |
+          python -m py_compile atlas_early_risk.py atlas_crossmarket_risk.py atlas_watchdog.py
+          python -m unittest -v test_atlas_early_risk.py test_atlas_watchdog.py
+
+  risk:
+    # Live data is inspected in SHADOW first. Alert delivery is a separate,
+    # user-approved promotion after the shadow run and review are satisfactory.
+    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && github.event_name == 'schedule')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install existing ATLAS CCXT market adapter
+        run: python -m pip install --disable-pip-version-check "ccxt>=4.3.0"
+      - name: Scan current Top 100 + personal assets and Iran markets (shadow)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          ATLAS_EARLY_RISK_MODE: SHADOW
         run: python atlas_early_risk.py

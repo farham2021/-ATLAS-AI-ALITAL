@@ -1,7 +1,8 @@
 name: ATLAS Independent Self-Healing Watchdog
 on:
   schedule:
-    - cron: "41 * * * *"
+    # Check shortly after the half-hourly early-risk scanner wakes.
+    - cron: "21,51 * * * *"
   workflow_dispatch:
 permissions:
   contents: read
