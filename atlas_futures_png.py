@@ -45,6 +45,19 @@ def select_five(rows, capital=2000.0, risk_pct=1.0, max_leverage=3.0):
             risk_usd=risk_usd if valid else None,notional_usd=notional if valid else None,
             reason="Canonical + verified futures market + RR>=2" if valid else "WAIT: canonical plan, RR, venue, liquidity or funding not verified"))
     selected.sort(key=lambda x:(x["state"]!="VALID",-x["confidence"],x["symbol"]))
+    from atlas_conditional_opportunities import discover
+    conditional=discover(rows,limit=5)
+    # Conditional direction is visible, but cannot be mistaken for a trade order.
+    by_symbol={p["symbol"]:p for p in conditional if p["state"]=="CONDITIONAL"}
+    for item in selected:
+        if item["state"]=="VALID": continue
+        watch=by_symbol.get(item["symbol"])
+        if watch:
+            item["side"]=watch["side"]
+            item["state"]="CONDITIONAL"
+            item["reason"]="CONDITIONAL "+watch["side"]+" watch only; trigger requires confirmation"
+            item["trigger"]=watch["trigger"]
+    selected.sort(key=lambda x:({"VALID":0,"CONDITIONAL":1}.get(x["state"],2),-x["confidence"],x["symbol"]))
     return selected[:5]
 
 def render_png(picks, filename="atlas_futures_top5.png"):
@@ -63,7 +76,7 @@ def render_png(picks, filename="atlas_futures_top5.png"):
             line=f'Entry {p["entry"]:.8g}   SL {p["sl"]:.8g}   TP1 {p["tp1"]:.8g}   TP2 {p["tp2"]:.8g}   RR {p["rr"]:.2f}'
             extra=f'Leverage <= {p["leverage"]:.1f}x   Risk <= ${p["risk_usd"]:.2f}   Notional <= ${p["notional_usd"]:.2f}'
         else:
-            line="WAIT / NO TRADE - no verified actionable levels"
+            line=("CONDITIONAL "+p["side"]+" | watch trigger "+format(p["trigger"],".8g")+" | NOT AN ORDER") if p["state"]=="CONDITIONAL" else "WAIT / NO TRADE - no verified actionable levels"
             extra=p["reason"]
         ax.text(.055,y-.043,line,color="#e2eaf1",fontsize=10.3,transform=ax.transAxes)
         ax.text(.055,y-.082,extra,color="#9eb3c8",fontsize=9.6,transform=ax.transAxes)
