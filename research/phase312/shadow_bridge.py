@@ -39,7 +39,7 @@ def research(asof=None):
     for s in snapshots:
         p=s.get("payload") or {}
         try:
-            tf=str(p.get("timeframe") or "4h").lower()
+            tf=str(p.get("timeframe") or p.get("signal_timeframe") or "").lower()
             if tf not in ("1h","4h"):quality["unknown_timeframe"]+=1;continue
             ts=int(p["signal_candle_ts"])
             key=(s["symbol"],tf,ts,s["direction"],s["model_version"])
