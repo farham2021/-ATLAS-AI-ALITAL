@@ -17986,6 +17986,16 @@ def main():
             append_changelog("DOMAIN_STRONG_SIGNAL_TIMING",None,None,str(e))
             print(f"⚠️ Domain strong-signal timing failed non-fatally: {e}")
 
+        # ATLAS v13 research integration: real current-cycle rows, fail-closed.
+        # No execution or unverified Telegram signals; persist diagnostics for audit.
+        try:
+            from atlas_v13_runtime import run_v13_cycle
+            v13_status = run_v13_cycle(results, metal_results, scoped_results)
+            print("🧠 ATLAS v13:", v13_status)
+        except Exception as e:
+            append_changelog("V13_RUNTIME", None, None, str(e))
+            print(f"⚠️ ATLAS v13 runtime failed non-fatally: {e}")
+
         # Preserve internal history/persistence. No Telegram report/file/audio/image.
         with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
             _save_snapshot_history(results, now_tehran().isoformat())
