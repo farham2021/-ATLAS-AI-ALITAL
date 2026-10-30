@@ -9447,6 +9447,13 @@ def _telegram_send_photo_file(chat_id, filename, caption=None):
         data=json.loads(resp.read().decode("utf-8",errors="replace"))
     if not data.get("ok"):
         raise RuntimeError(f"Telegram sendPhoto failed: {data}")
+    # ATLAS v13: record Telegram's actual acknowledgement, not a send attempt.
+    # Local audit only; no token, personal chat ID or payload is logged.
+    try:
+        from atlas_v13_receipts import record_photo_receipt
+        record_photo_receipt(filename, caption, data)
+    except Exception as _receipt_error:
+        print(f"⚠️ V13 receipt audit unavailable: {type(_receipt_error).__name__}")
     return True
 
 
