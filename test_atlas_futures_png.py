@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from atlas_futures_png import select_five
 
 class FuturesBoardTests(unittest.TestCase):
@@ -7,7 +8,7 @@ class FuturesBoardTests(unittest.TestCase):
         self.assertEqual(x["side"],"WAIT")
         self.assertIsNone(x["entry"])
     def test_valid_long(self):
-        x=select_five([dict(coin="ETH",action="BUY",executable=True,entry=100,sl=95,tp1=110,tp2=120,confidence=80,futures_venue_verified=True,futures_liquidity_verified=True,futures_funding_verified=True)])[0]
+        x=select_five([dict(coin="ETH",action="BUY",executable=True,entry=100,sl=95,tp1=110,tp2=120,confidence=80,futures_venue_verified=True,futures_liquidity_verified=True,futures_funding_verified=True,futures_timestamp=datetime.now(timezone.utc).isoformat(),futures_bid=99.99,futures_ask=100.01,futures_24h_notional_usd=10000000,futures_open_interest_usd=1000000,futures_funding_rate=0.0001,futures_exchange="verified_test_venue",futures_contract_active=True)])[0]
         self.assertEqual(x["side"],"LONG")
         self.assertEqual(x["rr"],2)
         self.assertLessEqual(x["risk_usd"],20)
