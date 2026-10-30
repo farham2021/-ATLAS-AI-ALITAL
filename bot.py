@@ -17994,7 +17994,29 @@ def main():
             save_context(macro, news, market_liquidity_index(results), market_info)
             save_run(results, 0, macro, news, unavailable)
 
-        if daily_cycle:
+        if daily_cycle and os.environ.get("ATLAS_PNG_ONLY", "0") == "1":
+            # PNG-only daily reporting. No CSV, text, voice or document delivery.
+            # All signal/market persistence above remains unchanged.
+            try:
+                from atlas_futures_png import select_five, render_png
+                picks=select_five(scoped_results, capital=float(os.environ.get("ATLAS_FUTURES_CAPITAL_USD","2000")),
+                                  risk_pct=float(os.environ.get("ATLAS_FUTURES_RISK_PCT","1")),
+                                  max_leverage=float(os.environ.get("ATLAS_FUTURES_MAX_LEVERAGE","3")))
+                fn=render_png(picks)
+                for chat in dict.fromkeys(x for x in (TELEGRAM_CHAT_ID,TELEGRAM_GROUP_CHAT_ID) if x):
+                    if _telegram_send_photo_file(chat,fn,"ATLAS Top 5 Futures | conditional plans only"):
+                        total_sent+=1
+                try: os.unlink(fn)
+                except Exception: pass
+                _s,_e=send_daily16_management_pngs(results,scoped_results,portfolio_risk)
+                total_sent+=_s;all_errors.extend(_e)
+                _s,_e=send_atlas_visual_dashboard(scoped_results,btc_regime=btc_regime)
+                total_sent+=_s;all_errors.extend(_e)
+                if total_sent==0: raise RuntimeError("PNG_ONLY Daily16: no images delivered")
+                print(f"🖼 PNG_ONLY DAILY16: images_sent={total_sent} errors={len(all_errors)}")
+            except Exception as e:
+                raise RuntimeError(f"PNG_ONLY Daily16 failed: {e}") from e
+        elif daily_cycle:
             try:
                 telegram_preflight()
             except Exception as e:
