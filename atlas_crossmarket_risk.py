@@ -69,6 +69,12 @@ def main():
  # Only independently confirmed TSE breadth+flow gets an informational warning.
  # No autonomous Telegram sends from unvalidated news or isolated metal snapshots.
  if findings:
+  # Deduplicate warnings across scheduled scans.
+  key=os.environ["SUPABASE_SERVICE_ROLE_KEY"];base=os.environ["SUPABASE_URL"].rstrip("/")
+  state=request(base+"/rest/v1/atlas_risk_alert_state?symbol=eq.TSE_MARKET&select=level,notified_at",{"apikey":key,"Authorization":"Bearer "+key})
+  if state and age(state[0]["notified_at"])<6:
+   print("TSE alert cooldown active")
+   findings=[]
   token=os.getenv("TELEGRAM_TOKEN");chat=os.getenv("TELEGRAM_GROUP_CHAT_ID")
   if token and chat:
    for symbol,level,flags in findings:
@@ -77,5 +83,9 @@ def main():
     req=urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=data)
     with urllib.request.urlopen(req,timeout=20) as r:
      if not json.load(r).get("ok"):raise RuntimeError("Telegram delivery failed")
+    body=json.dumps({"symbol":"TSE_MARKET","level":level,"notified_at":NOW().isoformat()}).encode()
+    headers={"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=minimal"}
+    save=urllib.request.Request(base+"/rest/v1/atlas_risk_alert_state?on_conflict=symbol",data=body,headers=headers,method="POST")
+    with urllib.request.urlopen(save,timeout=15):pass
  for e in errors:print("::warning::"+e)
 if __name__=="__main__":main()
