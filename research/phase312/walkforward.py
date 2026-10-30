@@ -50,6 +50,8 @@ def replay(bars, train_fraction=.70, horizon=12, fee_bps=10, slippage_bps=5):
             if sl:label="SL_FIRST";exit_idx=j;break
             if tp:label="TP_FIRST";exit_idx=j;break
         next_allowed=exit_idx+1
+        # Purge train signals whose outcomes cross into the test period.
+        if i<split and exit_idx>=split:continue
         risk=1.5*atr
         gross=(2 if label=="TP_FIRST" else -1 if label in ("SL_FIRST","AMBIGUOUS") else d*(float(b[exit_idx][4])-p)/risk)
         cost=p*2*(fee_bps+slippage_bps)/10000/risk
