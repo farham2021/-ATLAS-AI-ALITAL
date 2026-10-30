@@ -35,7 +35,7 @@ def replay(bars, train_fraction=.70, horizon=12, fee_bps=10, slippage_bps=5):
         d=(1 if p>max(highs) and statistics.mean(closes[-20:])>statistics.mean(closes[-50:]) and vr>=1.2
            else -1 if p<min(lows) and statistics.mean(closes[-20:])<statistics.mean(closes[-50:]) and vr>=1.2 else 0)
         if not d:continue
-        tr=[max(float(b[j][2])-float(b[j][3]),abs(float(b[j][2])-float(b[j-1][4])),abs(float(b[j][3])-float(b[j-1][4])) for j in range(i-13,i+1)]
+        tr=[max(float(b[j][2])-float(b[j][3]), abs(float(b[j][2])-float(b[j-1][4])), abs(float(b[j][3])-float(b[j-1][4]))) for j in range(i-13,i+1)]
         atr=statistics.mean(tr)
         if not 0<atr/p<.1:continue
         stop=p-d*1.5*atr
