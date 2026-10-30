@@ -9447,6 +9447,13 @@ def _telegram_send_photo_file(chat_id, filename, caption=None):
         data=json.loads(resp.read().decode("utf-8",errors="replace"))
     if not data.get("ok"):
         raise RuntimeError(f"Telegram sendPhoto failed: {data}")
+    # ATLAS v13: record Telegram's actual acknowledgement, not a send attempt.
+    # Local audit only; no token, personal chat ID or payload is logged.
+    try:
+        from atlas_v13_receipts import record_photo_receipt
+        record_photo_receipt(filename, caption, data)
+    except Exception as _receipt_error:
+        print(f"⚠️ V13 receipt audit unavailable: {type(_receipt_error).__name__}")
     return True
 
 
@@ -17986,6 +17993,16 @@ def main():
             append_changelog("DOMAIN_STRONG_SIGNAL_TIMING",None,None,str(e))
             print(f"⚠️ Domain strong-signal timing failed non-fatally: {e}")
 
+        # ATLAS v13 research integration: real current-cycle rows, fail-closed.
+        # No execution or unverified Telegram signals; persist diagnostics for audit.
+        try:
+            from atlas_v13_runtime import run_v13_cycle
+            v13_status = run_v13_cycle(results, metal_results, scoped_results)
+            print("🧠 ATLAS v13:", v13_status)
+        except Exception as e:
+            append_changelog("V13_RUNTIME", None, None, str(e))
+            print(f"⚠️ ATLAS v13 runtime failed non-fatally: {e}")
+
         # Preserve internal history/persistence. No Telegram report/file/audio/image.
         with _AtlasTimer("ANALYSIS SNAPSHOT HISTORY"):
             _save_snapshot_history(results, now_tehran().isoformat())
@@ -17996,6 +18013,18 @@ def main():
 
         if daily_cycle and os.environ.get("ATLAS_PNG_ONLY", "0") == "1":
             # PNG-only daily reporting. No CSV, text, voice or document delivery.
+            # Refresh private investor allocation and multi-asset intelligence even
+            # when public delivery is PNG-only. Chat Plane reads these snapshots.
+            try:
+                _alloc=run_personal_allocation_cycle(scoped_results)
+                print("🧠 PNG_ONLY PERSONAL ALLOCATION:",_alloc)
+                _mai=run_multiasset_intelligence_cycle(scoped_results)
+                print("🌐 PNG_ONLY MULTI-ASSET:",_mai)
+                if _alloc.get("errors") or _mai.get("errors"):
+                    print("⚠️ Private advisory snapshot persistence had errors")
+            except Exception as _private_error:
+                append_changelog("PRIVATE_INVESTOR_REPORT",None,None,str(_private_error))
+                print(f"⚠️ Private investor report failed: {_private_error}")
             # All signal/market persistence above remains unchanged.
             try:
                 from atlas_futures_png import select_five, render_png
