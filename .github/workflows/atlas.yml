@@ -245,6 +245,10 @@ jobs:
             export ATLAS_DELIVERY_MODE=STORAGE_ONLY
             export ATLAS_REPORT_WINDOW=0
             export ATLAS_EXECUTION_ENABLED=0
+            # Bot's DAILY16/NIGHTLY23 delivery blocks are keyed on cycle flags,
+            # not ATLAS_DELIVERY_MODE. Disable those blocks for manual diagnostics.
+            export ATLAS_PHASE37_DAILY_REPORT=0
+            export ATLAS_PHASE39_NIGHTLY_REPORT=0
             unset TELEGRAM_TOKEN TELEGRAM_CHAT_ID TELEGRAM_GROUP_CHAT_ID
           fi
           python bot.py
