@@ -1,5 +1,6 @@
 """ATLAS read-only futures opportunity board. No synthetic trade levels."""
 import math
+from atlas_futures_evidence import verify as verify_futures_evidence
 from datetime import datetime, timezone
 
 def _num(x):
@@ -27,7 +28,8 @@ def select_five(rows, capital=2000.0, risk_pct=1.0, max_leverage=3.0):
         rr=(abs(tp1-entry)/abs(entry-sl)) if valid else None
         if valid and rr<2: valid=False
         # Unknown perpetual-market venue, liquidity or funding fails closed.
-        if not (r.get("futures_venue_verified") is True
+        evidence_ok, evidence_reason=verify_futures_evidence(r)
+        if not (evidence_ok and r.get("futures_venue_verified") is True
                 and r.get("futures_liquidity_verified") is True
                 and r.get("futures_funding_verified") is True):
             valid=False
@@ -43,7 +45,7 @@ def select_five(rows, capital=2000.0, risk_pct=1.0, max_leverage=3.0):
             entry=entry if valid else None,sl=sl if valid else None,tp1=tp1 if valid else None,tp2=tp2 if valid else None,
             rr=rr if valid else None,confidence=confidence,leverage=lev if valid else None,
             risk_usd=risk_usd if valid else None,notional_usd=notional if valid else None,
-            reason="Canonical + verified futures market + RR>=2" if valid else "WAIT: canonical plan, RR, venue, liquidity or funding not verified"))
+            reason="Canonical + verified futures market + RR>=2" if valid else "WAIT: "+evidence_reason+" / canonical plan or RR not verified"))
     selected.sort(key=lambda x:(x["state"]!="VALID",-x["confidence"],x["symbol"]))
     from atlas_conditional_opportunities import discover
     conditional=discover(rows,limit=5)
