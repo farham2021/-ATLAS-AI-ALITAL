@@ -1,0 +1,22 @@
+name: ATLAS Phase 3.12 Shadow Lab CI
+on:
+  pull_request:
+    paths:
+      - "research/phase312/**"
+      - ".github/workflows/phase312-shadow-ci.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  evidence-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile and run isolated tests (no secrets)
+        run: |
+          python -m compileall -q research/phase312
+          python -m unittest discover -v -s research/phase312 -p "test_*.py"
