@@ -187,7 +187,13 @@ jobs:
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
         run: |
           set -euo pipefail
-          # Manual dispatch is always diagnostic: no Telegram delivery or paper execution.\n          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then\n            export ATLAS_DELIVERY_MODE=STORAGE_ONLY\n            export ATLAS_REPORT_WINDOW=0\n            export ATLAS_EXECUTION_ENABLED=0\n          fi\n          case "$SELECTED_MODE" in
+          # Manual dispatch is always diagnostic: no Telegram delivery or paper execution.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            export ATLAS_DELIVERY_MODE=STORAGE_ONLY
+            export ATLAS_REPORT_WINDOW=0
+            export ATLAS_EXECUTION_ENABLED=0
+          fi
+          case "$SELECTED_MODE" in
             HOURLY)
               export ATLAS_DELIVERY_MODE=STORAGE_ONLY
               export ATLAS_PHASE37_CYCLE=HOURLY
@@ -233,7 +239,15 @@ jobs:
               export ATLAS_REPORT_WINDOW=1 ;;
             *) exit 2 ;;
           esac
-          # Enforce diagnostic settings AFTER mode-specific defaults, so DAILY16 and\n          # NIGHTLY23 cannot silently reset manual dispatch to FULL.\n          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then\n            export ATLAS_DELIVERY_MODE=STORAGE_ONLY\n            export ATLAS_REPORT_WINDOW=0\n            export ATLAS_EXECUTION_ENABLED=0\n            unset TELEGRAM_TOKEN TELEGRAM_CHAT_ID TELEGRAM_GROUP_CHAT_ID\n          fi\n          python bot.py
+          # Enforce diagnostic settings AFTER mode-specific defaults, so DAILY16 and
+          # NIGHTLY23 cannot silently reset manual dispatch to FULL.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            export ATLAS_DELIVERY_MODE=STORAGE_ONLY
+            export ATLAS_REPORT_WINDOW=0
+            export ATLAS_EXECUTION_ENABLED=0
+            unset TELEGRAM_TOKEN TELEGRAM_CHAT_ID TELEGRAM_GROUP_CHAT_ID
+          fi
+          python bot.py
 
       # Normal path: mark DONE with the lease token issued by claim.
       - name: Mark slot complete
