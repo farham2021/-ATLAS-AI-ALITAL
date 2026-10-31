@@ -258,6 +258,13 @@ def choose_plan(dt: datetime, state_getter=remote_done, hourly_wake: bool = Fals
             paris_slot=slot.isoformat(timespec="minutes"),
             recovery_min=REPORT_RECOVERY_MIN,
         )
+    if state is True and hourly_wake:
+        # A completed report slot must not suppress the storage-only hourly cycle.
+        hourly_key = hour_key("HOURLY", dt.astimezone(TEHRAN))
+        hourly_state = state_getter(hourly_key)
+        if hourly_state is not True:
+            return _plan("HOURLY", hourly_key, "hourly_after_report_completed",
+                         tehran_now=dt.astimezone(TEHRAN).isoformat(timespec="seconds"))
     if state is None:
         # The claim step remains the duplicate-prevention authority. If Supabase
         # state lookup is temporarily unavailable, keep the slot eligible so the
