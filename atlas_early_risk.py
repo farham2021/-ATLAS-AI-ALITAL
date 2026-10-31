@@ -4,21 +4,31 @@ BASE="https://api.exchange.coinbase.com/products/"
 SYMBOLS=("BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","LINKUSDT","AVAXUSDT","SUIUSDT")
 def fetch(symbol,interval,limit=90):
  product=symbol.removesuffix("USDT")+"-USD"
- granularity={"4h":14400,"1d":86400}[interval]
+ granularity={"4h":3600,"1d":86400}[interval]
  q=urllib.parse.urlencode({"granularity":granularity})
  req=urllib.request.Request(BASE+urllib.parse.quote(product)+"/candles?"+q,headers={"User-Agent":"ATLAS-RiskGuard/1","Accept":"application/json"})
- with urllib.request.urlopen(req,timeout=20) as r:rows=json.load(r)
- if not isinstance(rows,list):raise ValueError("unexpected Coinbase candle response")
+ with urllib.request.urlopen(req,timeout=20) as response:
+  rows=json.load(response)
+ if not isinstance(rows,list):raise ValueError("unexpected candle response")
  now=datetime.datetime.now(datetime.timezone.utc).timestamp()
- out=[]
- for x in rows:
-  if not isinstance(x,list) or len(x)<6:continue
-  start,low,high,opening,close,volume=x[:6]
-  if float(start)+granularity>now:continue
-  out.append([int(start)*1000,opening,high,low,close,volume,(int(start)+granularity)*1000])
- out.sort(key=lambda x:x[0])
- if len(out)<55:raise ValueError("insufficient closed candles from Coinbase")
- return out[-limit:]
+ candles={}
+ for row in rows:
+  if not isinstance(row,list) or len(row)<6:continue
+  t,low,high,opening,close,volume=row[:6]
+  t=int(t)
+  if t+granularity>now:continue
+  candles[t]=[t*1000,float(opening),float(high),float(low),float(close),float(volume),(t+granularity)*1000]
+ ordered=[candles[t] for t in sorted(candles)]
+ if interval=="1d":return ordered[-limit:]
+ groups={}
+ for row in ordered:
+  bucket=(row[0]//14400000)*14400000
+  groups.setdefault(bucket,[]).append(row)
+ result=[]
+ for bucket,group in sorted(groups.items()):
+  if len(group)!=4 or [row[0] for row in group]!=[bucket+i*3600000 for i in range(4)]:continue
+  result.append([bucket,group[0][1],max(row[2] for row in group),min(row[3] for row in group),group[-1][4],sum(row[5] for row in group),bucket+14400000])
+ return result[-limit:]
 def score(rows4,rowsd):
  if len(rows4)<55 or len(rowsd)<55:raise ValueError("insufficient candles")
  c=[float(r[4]) for r in rows4];v=[float(r[5]) for r in rows4];d=[float(r[4]) for r in rowsd]
