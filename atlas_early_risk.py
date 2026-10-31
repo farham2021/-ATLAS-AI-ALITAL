@@ -60,6 +60,7 @@ def fetch_validated(symbol,interval):
     raise ValueError("gaps in recent candles")
    if rows[-1][6]>int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000):
     raise ValueError("unclosed last candle")
+   if int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)-rows[-1][6]>3*step:raise ValueError("stale candles")
    print("ATLAS candle source",symbol,interval,name,len(rows))
    return rows
   except Exception as exc:
