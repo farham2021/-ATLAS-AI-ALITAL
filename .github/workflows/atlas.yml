@@ -3,7 +3,7 @@ name: ATLAS v12 Multi-Asset Self-Healing
 on:
   schedule:
     # Hourly storage-only wake; report slots take priority when due.
-    - cron: "17 * * * *"
+    - cron: "17,47 * * * *"
     # Explicit primary + recovery wake-ups for the three Europe/Paris report slots.
     # We intentionally avoid a high-frequency */10 watchdog: GitHub scheduled runs
     # are best-effort and may be delayed/dropped under load. These sparse UTC wakes
@@ -54,7 +54,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             python atlas_schedule_guard.py plan --manual "${{ inputs.cycle_mode }}" --github-output "$GITHUB_OUTPUT"
           else
-            if [ "${{ github.event.schedule }}" = "17 * * * *" ]; then
+            if [ "${{ github.event.schedule }}" = "17,47 * * * *" ]; then
               python atlas_schedule_guard.py plan --hourly-wake --github-output "$GITHUB_OUTPUT"
             else
               python atlas_schedule_guard.py plan --github-output "$GITHUB_OUTPUT"
