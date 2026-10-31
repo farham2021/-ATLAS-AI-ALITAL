@@ -61,6 +61,7 @@ def fetch_validated(symbol,interval):
    if rows[-1][6]>int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000):
     raise ValueError("unclosed last candle")
    if int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)-rows[-1][6]>3*step:raise ValueError("stale candles")
+   if any(float(row[2])<float(row[3]) or float(row[4])<=0 or float(row[5])<0 for row in rows[-55:]):raise ValueError("invalid OHLCV values")
    print("ATLAS candle source",symbol,interval,name,len(rows))
    return rows
   except Exception as exc:
