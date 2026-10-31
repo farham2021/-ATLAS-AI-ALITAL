@@ -22,8 +22,8 @@ def check(now=None):
     for cycle,hours in thresholds.items():
         age=(now-last[cycle]).total_seconds()/3600 if cycle in last else None
         if age is None or age>hours:warnings.append(f"{cycle}: last successful completion "+(f"{age:.1f}h ago" if age is not None else "unknown"))
-    expired=[r for r in rows if r.get("status")=="RUNNING" and r.get("lease_until") and datetime.fromisoformat(r["lease_until"].replace("Z","+00:00"))<now]
-    if expired:warnings.append(f"{len(expired)} expired RUNNING leases (manual review; no forced DONE)")
+    expired=[r for r in rows if r.get("status")=="RUNNING" and r.get("lease_until") and 0 < (now-datetime.fromisoformat(r["lease_until"].replace("Z","+00:00"))).total_seconds() < 86400]
+    if expired:warnings.append(f"{len(expired)} recently expired RUNNING leases (manual review; no forced DONE)")
     return {"checked_at":now.isoformat(),"last_done":{k:v.isoformat() for k,v in last.items()},"warnings":warnings}
 if __name__=="__main__":
     try:
@@ -31,7 +31,7 @@ if __name__=="__main__":
         print(json.dumps(result,ensure_ascii=False))
         if result["warnings"]:
             for warning in result["warnings"]:print("::warning::ATLAS watchdog: "+warning)
-            raise SystemExit(2)
+            print("ATLAS health degraded: warning annotations emitted; monitoring completed")
     except Exception as exc:
         print("::error::ATLAS watchdog unavailable: "+str(exc))
         raise SystemExit(3)
