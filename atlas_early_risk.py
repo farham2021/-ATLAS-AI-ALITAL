@@ -1,13 +1,24 @@
 """ATLAS risk early-warning scanner. No orders. Closed-candle confirmation only."""
 import json,os,urllib.request,urllib.parse,datetime,statistics,sys
-BASE="https://api.binance.com/api/v3/klines"
+BASE="https://api.exchange.coinbase.com/products/"
 SYMBOLS=("BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","LINKUSDT","AVAXUSDT","SUIUSDT")
 def fetch(symbol,interval,limit=90):
- q=urllib.parse.urlencode({"symbol":symbol,"interval":interval,"limit":limit})
- req=urllib.request.Request(BASE+"?"+q,headers={"User-Agent":"ATLAS-RiskGuard/1"})
- with urllib.request.urlopen(req,timeout=15) as r:rows=json.load(r)
- now=int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)
- return [r for r in rows if int(r[6])<now]
+ product=symbol.removesuffix("USDT")+"-USD"
+ granularity={"4h":14400,"1d":86400}[interval]
+ q=urllib.parse.urlencode({"granularity":granularity})
+ req=urllib.request.Request(BASE+urllib.parse.quote(product)+"/candles?"+q,headers={"User-Agent":"ATLAS-RiskGuard/1","Accept":"application/json"})
+ with urllib.request.urlopen(req,timeout=20) as r:rows=json.load(r)
+ if not isinstance(rows,list):raise ValueError("unexpected Coinbase candle response")
+ now=datetime.datetime.now(datetime.timezone.utc).timestamp()
+ out=[]
+ for x in rows:
+  if not isinstance(x,list) or len(x)<6:continue
+  start,low,high,opening,close,volume=x[:6]
+  if float(start)+granularity>now:continue
+  out.append([int(start)*1000,opening,high,low,close,volume,(int(start)+granularity)*1000])
+ out.sort(key=lambda x:x[0])
+ if len(out)<55:raise ValueError("insufficient closed candles from Coinbase")
+ return out[-limit:]
 def score(rows4,rowsd):
  if len(rows4)<55 or len(rowsd)<55:raise ValueError("insufficient candles")
  c=[float(r[4]) for r in rows4];v=[float(r[5]) for r in rows4];d=[float(r[4]) for r in rowsd]
@@ -49,7 +60,7 @@ def alert(symbol,result):
       "\nنسبت حجم: "+str(result["volume_ratio"])+
       "\nنشانه‌ها: "+", ".join(result["flags"])+
       "\nتحلیل مبتنی بر کندل بسته‌شده 4H و 1D؛ پیش‌بینی قطعی نیست."+
-      "\nچارت: https://www.tradingview.com/chart/?symbol=BINANCE%3A"+symbol)
+      "\nچارت: https://www.tradingview.com/chart/?symbol=COINBASE%3A"+symbol.removesuffix("USDT")+"USD")
  token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_GROUP_CHAT_ID"]
  body=urllib.parse.urlencode({"chat_id":chat,"text":msg}).encode()
  req=urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=body)
