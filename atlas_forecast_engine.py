@@ -11,9 +11,9 @@ def forecast(series,horizon_days=90):
  age=(dt.datetime.now(dt.timezone.utc).date()-d[-1][0]).days
  if age<0 or age>3:return {"status":"UNAVAILABLE","reason":"stale_or_future_data","age_days":age}
  if horizon_days not in (30,90,180,365):return {"status":"UNAVAILABLE","reason":"unsupported_horizon"}
- if len(d)<120 or (d[-1][0]-d[0][0]).days<119:return {"status":"UNAVAILABLE","reason":"insufficient_history"}
+ if len(d)<90 or (d[-1][0]-d[0][0]).days<89:return {"status":"UNAVAILABLE","reason":"insufficient_history"}
  folds=[]
- for i in range(90,len(d)-30,30):
+ for i in range(30,len(d)-30,10):
   elapsed=(d[i+30][0]-d[i][0]).days;lookback=(d[i][0]-d[i-30][0]).days
   if not 24<=elapsed<=45 or not 24<=lookback<=45:continue
   origin=d[i][1];actual=d[i+30][1]
