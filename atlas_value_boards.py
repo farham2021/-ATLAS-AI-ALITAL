@@ -5,6 +5,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 from pathlib import Path
+from atlas_forecast_engine import forecast
 
 IRAN={"XAUUSD":"Gold (global USD)","XAGUSD":"Silver (global USD)","COPPER":"Copper (global USD)","SILVER999_FAIR":"Silver 999 fair (IRR)","USD_IRR":"USD/IRR"}
 CRYPTO=("bitcoin","ethereum","solana","binancecoin","ripple","chainlink","avalanche-2","sui","dogecoin","cardano")
@@ -97,7 +98,7 @@ def main():
    table="atlas_iran_fx_snapshots" if sym=="USD_IRR" else "atlas_market_snapshots"
    series=supa(table,sym)
    iran.append((label,change(series,30)))
-   iran_scenarios[sym]=scenario_model(series)
+   iran_scenarios[sym]={"volatility_scenarios":scenario_model(series),"research_forecast_90d":forecast(series,90)}
   except Exception as e:
    print("::warning::",sym,type(e).__name__,str(e)[:120]);iran.append((label,None))
  for label in ("Housing (no verified series)","Cars (no verified series)","TSE index (no verified index series)"):
@@ -107,12 +108,12 @@ def main():
   try:
    series=crypto_series(coin)
    crypto.append((coin,change(series,30)))
-   crypto_scenarios[coin]=scenario_model(series)
+   crypto_scenarios[coin]={"volatility_scenarios":scenario_model(series),"research_forecast_90d":forecast(series,90)}
   except Exception as e:
    print("::warning::",coin,type(e).__name__,str(e)[:120]);crypto.append((coin,None))
  render("ATLAS | Iran assets — observed 30-day returns",iran,output/"atlas_iran_value.png")
  render("ATLAS | Crypto — observed 30-day returns",crypto,output/"atlas_crypto_value.png")
- report={"as_of_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"iran":iran,"crypto":crypto,"iran_momentum_rank":valuation_rank(iran),"crypto_momentum_rank":valuation_rank(crypto),"iran_scenarios":iran_scenarios,"crypto_scenarios":crypto_scenarios,"forecast_status":"VOLATILITY_SCENARIOS_ONLY_NOT_CALIBRATED_PREDICTIONS","files":["atlas_iran_value.png","atlas_crypto_value.png"]}
+ report={"as_of_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"iran":iran,"crypto":crypto,"iran_momentum_rank":valuation_rank(iran),"crypto_momentum_rank":valuation_rank(crypto),"iran_scenarios":iran_scenarios,"crypto_scenarios":crypto_scenarios,"forecast_status":"RESEARCH_WALK_FORWARD_AND_VOLATILITY_SCENARIOS_NOT_CALIBRATED","files":["atlas_iran_value.png","atlas_crypto_value.png"]}
  (output/"atlas_value_evidence.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
  print(json.dumps(report,ensure_ascii=False))
  if os.getenv("ATLAS_VALUE_SEND_TELEGRAM")=="1":
