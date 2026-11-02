@@ -38,7 +38,7 @@ def crypto_series(coin):
  key=os.getenv("COINGECKO_API_KEY","")
  headers={"User-Agent":"ATLAS-value-board/1"}
  if key:headers["x-cg-demo-api-key"]=key
- url="https://api.coingecko.com/api/v3/coins/"+urllib.parse.quote(coin)+"/market_chart?vs_currency=usd&days=90"
+ url="https://api.coingecko.com/api/v3/coins/"+urllib.parse.quote(coin)+"/market_chart?vs_currency=usd&days=365"
  raw=get(url,headers)
  return [(datetime.datetime.fromtimestamp(t/1000,datetime.timezone.utc),float(p)) for t,p in raw.get("prices",[]) if p>0]
 def valuation_rank(items):
