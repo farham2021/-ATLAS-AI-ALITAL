@@ -31,6 +31,7 @@ def change(series,days):
  candidates=[(abs((end-t).total_seconds()-days*86400),v) for t,v in series[:-1] if (end-t).total_seconds()>=days*86400*.85]
  if not candidates:return None
  _,baseline=min(candidates)
+ if abs((end-series[0][0]).total_seconds())<days*86400*.85:return None
  return (latest/baseline-1)*100
 def crypto_series(coin):
  key=os.getenv("COINGECKO_API_KEY","")
