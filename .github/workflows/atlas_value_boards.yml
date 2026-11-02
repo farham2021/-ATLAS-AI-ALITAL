@@ -1,0 +1,38 @@
+name: ATLAS Value Boards (Iran + Crypto PNG)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "35 15 * * *"
+permissions:
+  contents: read
+concurrency:
+  group: atlas-value-boards
+  cancel-in-progress: false
+jobs:
+  value-boards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PNG renderer
+        run: python -m pip install "matplotlib>=3.8,<4"
+      - name: Build separate Iran and crypto PNG boards (shadow)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          ATLAS_VALUE_SEND_TELEGRAM: "0"
+        run: python atlas_value_boards.py
+      - name: Preserve individual PNG files
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-iran-value-png
+          path: value_boards/atlas_iran_value.png
+      - name: Preserve crypto PNG
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-crypto-value-png
+          path: value_boards/atlas_crypto_value.png
