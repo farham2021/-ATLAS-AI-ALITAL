@@ -8,6 +8,8 @@ from pathlib import Path
 from atlas_forecast_engine import forecast
 
 IRAN={"XAUUSD":"Gold (global USD)","XAGUSD":"Silver (global USD)","COPPER":"Copper (global USD)","SILVER999_FAIR":"Silver 999 fair (IRR)","USD_IRR":"USD/IRR"}
+IRAN_TSE=("فولاد","فملی","شستا","خودرو","خساپا","وبملت","شپنا","شبندر")
+IRAN_FUNDS=("عیار","طلا","نقرابی","سیلور","افران","یاقوت","اهرم","دارا یکم","توان","سپر")
 CRYPTO=("bitcoin","ethereum","solana","binancecoin","ripple","chainlink","avalanche-2","sui","dogecoin","cardano")
 def get(url,headers=None):
  req=urllib.request.Request(url,headers=headers or {"User-Agent":"ATLAS-value-board/1"})
@@ -57,7 +59,7 @@ def scenario_model(series):
  now=datetime.datetime.now(datetime.timezone.utc)
  days={}
  for t,p in series:
-  if p>0 and (now-t).total_seconds()<5*86400:days[t.date()]=p
+  if p>0 and 0 <= (now-t).total_seconds() and (now-t).total_seconds() <= 400*86400:days[t.date()]=p
  prices=list(days.values())
  if len(prices)<65:return {"status":"INSUFFICIENT_DAILY_OBSERVATIONS"}
  import math
@@ -76,8 +78,11 @@ def scenario_model(series):
  return out
 
 def render(title,items,path):
- fig,ax=plt.subplots(figsize=(13,7.5))
+ fig,ax=plt.subplots(figsize=(13,max(7.5,len(items)*.43+2)))
  fig.patch.set_facecolor("#101827");ax.set_facecolor("#101827")
+ from matplotlib import font_manager
+ fonts=[p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf") if Path(p).exists()]
+ if fonts:font_manager.fontManager.addfont(fonts[0]);plt.rcParams["font.family"]=font_manager.FontProperties(fname=fonts[0]).get_name()
  labels=[x[0] for x in items];values=[x[1] for x in items]
  colors=["#34d399" if v is not None and v>=0 else "#fb7185" if v is not None else "#94a3b8" for v in values]
  plotted=[v if v is not None else 0 for v in values]
@@ -101,6 +106,15 @@ def main():
    iran_scenarios[sym]={"volatility_scenarios":scenario_model(series),"research_forecast_90d":forecast(series,90)}
   except Exception as e:
    print("::warning::",sym,type(e).__name__,str(e)[:120]);iran.append((label,None))
+ for category,table,symbols in (("TSE","atlas_tse_snapshots",IRAN_TSE),("Fund","atlas_fund_snapshots",IRAN_FUNDS)):
+  for sym in symbols:
+   label=category+" "+sym
+   try:
+    series=supa(table,sym)
+    iran.append((label,change(series,30)))
+    iran_scenarios[category+":"+sym]={"volatility_scenarios":scenario_model(series),"research_forecast_90d":forecast(series,90)}
+   except Exception as e:
+    print("::warning::",category,sym,type(e).__name__,str(e)[:120]);iran.append((label,None))
  for label in ("Housing (no verified series)","Cars (no verified series)","TSE index (no verified index series)"):
   iran.append((label,None))
  crypto=[];crypto_scenarios={}
@@ -117,7 +131,7 @@ def main():
  (output/"atlas_value_evidence.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
  print(json.dumps(report,ensure_ascii=False))
  if os.getenv("ATLAS_VALUE_SEND_TELEGRAM")=="1":
-  if not any(v is not None for _,v in iran+crypto):raise RuntimeError("no validated returns: refuse to deliver")
+  if not any(v is not None for _,v in iran) or not any(v is not None for _,v in crypto):raise RuntimeError("insufficient validated data for both boards: refuse to deliver")
   token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_GROUP_CHAT_ID"]
   for name,caption in (("atlas_iran_value.png","ATLAS Iran | Historical returns only; future valuation needs fundamentals and comparable prices."),("atlas_crypto_value.png","ATLAS Crypto | Historical returns only; not a buy recommendation.")):
    boundary="ATLASBOUNDARY"
