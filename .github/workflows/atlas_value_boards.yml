@@ -24,9 +24,16 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
-          ATLAS_VALUE_SEND_TELEGRAM: "0"
+          ATLAS_VALUE_SEND_TELEGRAM: "1"
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
         run: python atlas_value_boards.py
-      - name: Preserve inspectable evidence\n        uses: actions/upload-artifact@v4\n        with:\n          name: atlas-value-evidence\n          path: value_boards/atlas_value_evidence.json\n      - name: Preserve individual PNG files
+      - name: Preserve inspectable evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-value-evidence
+          path: value_boards/atlas_value_evidence.json
+      - name: Preserve individual PNG files
         uses: actions/upload-artifact@v4
         with:
           name: atlas-iran-value-png
