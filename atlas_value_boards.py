@@ -50,6 +50,30 @@ def valuation_rank(items):
           "basis":"30d relative momentum only; no fair-value estimate"}
          for i,(name,ret) in enumerate(ranked)]
 
+def scenario_model(series):
+ """Exploratory volatility scenarios, not calibrated price predictions."""
+ if len(series)<70:return {"status":"INSUFFICIENT_HISTORY"}
+ now=datetime.datetime.now(datetime.timezone.utc)
+ days={}
+ for t,p in series:
+  if p>0 and (now-t).total_seconds()<5*86400:days[t.date()]=p
+ prices=list(days.values())
+ if len(prices)<65:return {"status":"INSUFFICIENT_DAILY_OBSERVATIONS"}
+ import math
+ returns=[math.log(prices[i]/prices[i-1]) for i in range(1,len(prices))]
+ if len(returns)<60:return {"status":"INSUFFICIENT_RETURNS"}
+ vol=statistics.stdev(returns)
+ if not math.isfinite(vol) or vol<=0:return {"status":"INVALID_VOLATILITY"}
+ # Drift is deliberately zero: scenario bands describe uncertainty, not directional alpha.
+ out={"status":"EXPLORATORY_UNCALIBRATED","method":"zero-drift lognormal volatility bands","annualized_volatility":round(vol*math.sqrt(365),4)}
+ for months in (3,6,12):
+  horizon=months*30
+  width=1.28155*vol*math.sqrt(horizon)
+  out[str(months)+"m"]={"bear_pct":round((math.exp(-width)-1)*100,1),
+    "base_pct":0.0,"bull_pct":round((math.exp(width)-1)*100,1),
+    "note":"10th/50th/90th percentile illustration, not a calibrated forecast"}
+ return out
+
 def render(title,items,path):
  fig,ax=plt.subplots(figsize=(13,7.5))
  fig.patch.set_facecolor("#101827");ax.set_facecolor("#101827")
@@ -67,23 +91,28 @@ def render(title,items,path):
  fig.tight_layout(rect=[0,.045,1,1]);fig.savefig(path,dpi=150,facecolor=fig.get_facecolor());plt.close(fig)
 def main():
  output=Path(os.getenv("ATLAS_VALUE_OUTPUT","value_boards"));output.mkdir(parents=True,exist_ok=True)
- iran=[]
+ iran=[];iran_scenarios={}
  for sym,label in IRAN.items():
   try:
    table="atlas_iran_fx_snapshots" if sym=="USD_IRR" else "atlas_market_snapshots"
-   iran.append((label,change(supa(table,sym),30)))
+   series=supa(table,sym)
+   iran.append((label,change(series,30)))
+   iran_scenarios[sym]=scenario_model(series)
   except Exception as e:
    print("::warning::",sym,type(e).__name__,str(e)[:120]);iran.append((label,None))
  for label in ("Housing (no verified series)","Cars (no verified series)","TSE index (no verified index series)"):
   iran.append((label,None))
- crypto=[]
+ crypto=[];crypto_scenarios={}
  for coin in CRYPTO:
-  try:crypto.append((coin,change(crypto_series(coin),30)))
+  try:
+   series=crypto_series(coin)
+   crypto.append((coin,change(series,30)))
+   crypto_scenarios[coin]=scenario_model(series)
   except Exception as e:
    print("::warning::",coin,type(e).__name__,str(e)[:120]);crypto.append((coin,None))
  render("ATLAS | Iran assets — observed 30-day returns",iran,output/"atlas_iran_value.png")
  render("ATLAS | Crypto — observed 30-day returns",crypto,output/"atlas_crypto_value.png")
- report={"as_of_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"iran":iran,"crypto":crypto,"iran_momentum_rank":valuation_rank(iran),"crypto_momentum_rank":valuation_rank(crypto),"forecast_3m":None,"forecast_6m":None,"forecast_12m":None,"forecast_status":"NOT_ESTIMATED_INSUFFICIENT_FUNDAMENTALS","files":["atlas_iran_value.png","atlas_crypto_value.png"]}
+ report={"as_of_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"iran":iran,"crypto":crypto,"iran_momentum_rank":valuation_rank(iran),"crypto_momentum_rank":valuation_rank(crypto),"iran_scenarios":iran_scenarios,"crypto_scenarios":crypto_scenarios,"forecast_status":"VOLATILITY_SCENARIOS_ONLY_NOT_CALIBRATED_PREDICTIONS","files":["atlas_iran_value.png","atlas_crypto_value.png"]}
  (output/"atlas_value_evidence.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
  print(json.dumps(report,ensure_ascii=False))
  if os.getenv("ATLAS_VALUE_SEND_TELEGRAM")=="1":
