@@ -77,13 +77,21 @@ def scenario_model(series):
     "note":"10th/50th/90th percentile illustration, not a calibrated forecast"}
  return out
 
+def fa_label(value):
+ try:
+  import arabic_reshaper
+  from bidi.algorithm import get_display
+  return get_display(arabic_reshaper.reshape(str(value)))
+ except ImportError:
+  return str(value)
+
 def render(title,items,path):
  fig,ax=plt.subplots(figsize=(13,max(7.5,len(items)*.43+2)))
  fig.patch.set_facecolor("#101827");ax.set_facecolor("#101827")
  from matplotlib import font_manager
  fonts=[p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf") if Path(p).exists()]
  if fonts:font_manager.fontManager.addfont(fonts[0]);plt.rcParams["font.family"]=font_manager.FontProperties(fname=fonts[0]).get_name()
- labels=[x[0] for x in items];values=[x[1] for x in items]
+ labels=[fa_label(x[0]) for x in items];values=[x[1] for x in items]
  colors=["#34d399" if v is not None and v>=0 else "#fb7185" if v is not None else "#94a3b8" for v in values]
  plotted=[v if v is not None else 0 for v in values]
  ax.barh(labels,plotted,color=colors,height=.62)
