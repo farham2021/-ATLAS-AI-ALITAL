@@ -40,6 +40,16 @@ def crypto_series(coin):
  url="https://api.coingecko.com/api/v3/coins/"+urllib.parse.quote(coin)+"/market_chart?vs_currency=usd&days=90"
  raw=get(url,headers)
  return [(datetime.datetime.fromtimestamp(t/1000,datetime.timezone.utc),float(p)) for t,p in raw.get("prices",[]) if p>0]
+def valuation_rank(items):
+ """Conservative relative momentum screen, NOT an intrinsic valuation or forecast."""
+ observed=[(name,ret) for name,ret in items if ret is not None]
+ if len(observed)<3:return []
+ ranked=sorted(observed,key=lambda x:x[1],reverse=True)
+ return [{"asset":name,"return_30d_pct":round(ret,2),"rank":i+1,
+          "signal":"REVIEW" if ret>=0 else "WAIT",
+          "basis":"30d relative momentum only; no fair-value estimate"}
+         for i,(name,ret) in enumerate(ranked)]
+
 def render(title,items,path):
  fig,ax=plt.subplots(figsize=(13,7.5))
  fig.patch.set_facecolor("#101827");ax.set_facecolor("#101827")
@@ -73,7 +83,9 @@ def main():
    print("::warning::",coin,type(e).__name__,str(e)[:120]);crypto.append((coin,None))
  render("ATLAS | Iran assets — observed 30-day returns",iran,output/"atlas_iran_value.png")
  render("ATLAS | Crypto — observed 30-day returns",crypto,output/"atlas_crypto_value.png")
- print(json.dumps({"iran":iran,"crypto":crypto,"files":["atlas_iran_value.png","atlas_crypto_value.png"]},ensure_ascii=False))
+ report={"as_of_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"iran":iran,"crypto":crypto,"iran_momentum_rank":valuation_rank(iran),"crypto_momentum_rank":valuation_rank(crypto),"forecast_3m":None,"forecast_6m":None,"forecast_12m":None,"forecast_status":"NOT_ESTIMATED_INSUFFICIENT_FUNDAMENTALS","files":["atlas_iran_value.png","atlas_crypto_value.png"]}
+ (output/"atlas_value_evidence.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+ print(json.dumps(report,ensure_ascii=False))
  if os.getenv("ATLAS_VALUE_SEND_TELEGRAM")=="1":
   if not any(v is not None for _,v in iran+crypto):raise RuntimeError("no validated returns: refuse to deliver")
   token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_GROUP_CHAT_ID"]
