@@ -6,7 +6,7 @@ on:
       - atlas_trade_replay_shadow.py
       - test_atlas_trade_replay_shadow.py
       - atlas_kronos_adapter_shadow.py
-      - test_atlas_kronos_adapter_shadow test_atlas_external_evidence_gate.py
+      - test_atlas_kronos_adapter_shadow.py
       - atlas_portfolio_risk_shield.py
       - test_atlas_portfolio_risk_shield.py
       - atlas_external_evidence_gate.py
@@ -26,4 +26,4 @@ jobs:
         with:
           python-version: "3.11"
       - name: Test research gate without secrets or network
-        run: python -m unittest -v test_atlas_quant_research_gate test_atlas_portfolio_risk_shield test_atlas_trade_replay_shadow test_atlas_kronos_adapter_shadow
+        run: python -m unittest -v test_atlas_quant_research_gate test_atlas_portfolio_risk_shield test_atlas_trade_replay_shadow test_atlas_kronos_adapter_shadow test_atlas_external_evidence_gate
