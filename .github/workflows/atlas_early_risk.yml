@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Test early-risk detection
+        run: python -m unittest -v test_atlas_early_risk
       - name: Scan confirmed crypto downside risks and notify Telegram
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
