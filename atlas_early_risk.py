@@ -99,6 +99,25 @@ def score(rows4,rowsd):
         "HIGH" if (support_break and (selling or trend_weak)) or (decline24<=-4 and trend_weak) or strength>=4 else
         "WATCH" if support_break or (selling and last<ema20) or strength>=2 else "NONE")
  return {"level":level,"flags":flags,"price":last,"volume_ratio":round(volume_ratio,2),"decline24":round(decline24,2)}
+def score_growth(rows4,rowsd):
+ if len(rows4)<55 or len(rowsd)<55:raise ValueError("insufficient candles")
+ c=[float(r[4]) for r in rows4];v=[float(r[5]) for r in rows4];d=[float(r[4]) for r in rowsd]
+ last=c[-1];ma20=ema(c,20);ma50=ema(c,50)
+ daily20=sum(d[-20:])/20
+ resistance=max(float(r[2]) for r in rows4[-13:-1])
+ volume_ratio=v[-1]/max(statistics.mean(v[-21:-1]),1e-12)
+ advance24=(last/c[-7]-1)*100
+ breakout=last>resistance
+ strong_volume=volume_ratio>=1.6 and last>c[-2]
+ trend=last>ma20 and ma20>ma50 and d[-1]>daily20
+ level=("GROWTH_HIGH" if breakout and strong_volume and trend else
+        "GROWTH_WATCH" if breakout and (strong_volume or trend) else "NONE")
+ flags=[]
+ if breakout:flags.append("4H resistance break")
+ if strong_volume:flags.append("buying volume expansion")
+ if trend:flags.append("4H and daily uptrend")
+ return {"level":level,"flags":flags,"price":last,"volume_ratio":round(volume_ratio,2),"decline24":round(advance24,2)}
+
 def db_request(method,path,payload=None):
  url=os.environ["SUPABASE_URL"].rstrip("/")+"/rest/v1/"+path
  key=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -115,27 +134,31 @@ def alert(symbol,result):
  if previous.get("level")==level and previous.get("notified_at"):
   age=(now-datetime.datetime.fromisoformat(previous["notified_at"].replace("Z","+00:00"))).total_seconds()
   if age<6*3600:return False
- msg=("🚨 ATLAS | هشدار ریسک "+symbol+"\nسطح: "+level+
+ msg=(("🚀 ATLAS | هشدار رشد " if level.startswith("GROWTH") else "🚨 ATLAS | هشدار ریزش ")+symbol+"\nسطح: "+level+
       "\nقیمت مرجع: "+str(result["price"])+
       "\nتغییر ۲۴ ساعت: "+str(result["decline24"])+"٪"+
       "\nنسبت حجم: "+str(result["volume_ratio"])+
       "\nنشانه‌ها: "+", ".join(result["flags"])+
       "\nهشدار پیشگیرانه؛ شکست حمایت/ضعف روند می‌تواند پیش از ریزش بزرگ ظاهر شود، اما پیش‌بینی قطعی نیست."+
       "\nچارت: https://www.tradingview.com/chart/?symbol=COINBASE%3A"+symbol.removesuffix("USDT")+"USD")
- token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_GROUP_CHAT_ID"]
- body=urllib.parse.urlencode({"chat_id":chat,"text":msg}).encode()
- req=urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=body)
- with urllib.request.urlopen(req,timeout=20) as r:
-  response=json.load(r)
-  if not response.get("ok"):raise RuntimeError("Telegram send failed")
+ token=os.environ["TELEGRAM_TOKEN"]
+ for chat in (os.environ["TELEGRAM_GROUP_CHAT_ID"],os.getenv("ATLAS_PRIVATE_CHAT_ID","414890497")):
+  body=urllib.parse.urlencode({"chat_id":chat,"text":msg}).encode()
+  req=urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=body)
+  with urllib.request.urlopen(req,timeout=20) as r:
+   response=json.load(r)
+   if not response.get("ok"):raise RuntimeError("Telegram send failed")
  db_request("POST","atlas_risk_alert_state?on_conflict=symbol",{"symbol":symbol,"level":level,"notified_at":now.isoformat()})
  return True
 def main():
  failed=[];sent=0
  for symbol in SYMBOLS:
   try:
-   result=score(fetch_validated(symbol,"4h"),fetch_validated(symbol,"1d"))
-   print(symbol,json.dumps(result))
+   rows4=fetch_validated(symbol,"4h");rowsd=fetch_validated(symbol,"1d")
+   downside=score(rows4,rowsd)
+   upside=score_growth(rows4,rowsd)
+   result=downside if downside["level"]!="NONE" else upside
+   print(symbol,json.dumps({"downside":downside,"upside":upside,"selected":result["level"]}))
    if alert(symbol,result):sent+=1
   except Exception as e:
    failed.append(symbol+": "+str(e))
