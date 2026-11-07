@@ -1,0 +1,21 @@
+name: ATLAS 3.0 Portfolio Risk Shield Shadow Tests
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - atlas_portfolio_risk_shield.py
+      - test_atlas_portfolio_risk_shield.py
+      - .github/workflows/atlas_portfolio_risk_shadow.yml
+permissions:
+  contents: read
+jobs:
+  validate-shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate 5/8/12 thresholds, cash flows and transitions
+        run: python -m unittest -v test_atlas_portfolio_risk_shield
