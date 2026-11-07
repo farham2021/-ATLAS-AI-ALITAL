@@ -139,7 +139,7 @@ def alert(symbol,result):
       "\nتغییر ۲۴ ساعت: "+str(result["decline24"])+"٪"+
       "\nنسبت حجم: "+str(result["volume_ratio"])+
       "\nنشانه‌ها: "+", ".join(result["flags"])+
-      "\nهشدار پیشگیرانه؛ شکست حمایت/ضعف روند می‌تواند پیش از ریزش بزرگ ظاهر شود، اما پیش‌بینی قطعی نیست."+
+      ("\nهشدار رشد مبتنی بر شکست مقاومت؛ تضمین ادامه رشد نیست." if level.startswith("GROWTH") else "\nهشدار ریزش مبتنی بر ضعف روند؛ تضمین ادامه ریزش نیست.")+
       "\nچارت: https://www.tradingview.com/chart/?symbol=COINBASE%3A"+symbol.removesuffix("USDT")+"USD")
  token=os.environ["TELEGRAM_TOKEN"]
  for chat in (os.environ["TELEGRAM_GROUP_CHAT_ID"],os.getenv("ATLAS_PRIVATE_CHAT_ID","414890497")):
