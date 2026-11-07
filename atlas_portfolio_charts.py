@@ -1,4 +1,4 @@
-"""ATLAS portfolio charts for explicitly authorized private and group Telegram recipients. No Actions artifacts."""
+"""Private holdings to owner only; group receives public market-only analysis."""
 import os,json,datetime,urllib.request,urllib.parse,io,math
 import matplotlib
 matplotlib.use("Agg")
@@ -42,6 +42,22 @@ def chart(items,kind):
  fig.tight_layout(rect=[0,.05,1,1])
  b=io.BytesIO();fig.savefig(b,format="png",dpi=150,facecolor=fig.get_facecolor());plt.close(fig)
  return b.getvalue()
+def public_market_chart(quotes):
+ """Price-relative comparison uses public market data only, never holdings."""
+ symbols=[s for s in ("BTC","ETH","SOL","BNB","XRP","ADA","DOGE","LINK","SUI","ZEC") if s in quotes]
+ if len(symbols)<5:raise RuntimeError("insufficient public market prices")
+ fig,ax=plt.subplots(figsize=(11,7))
+ fig.patch.set_facecolor("#101827");ax.set_facecolor("#101827")
+ vals=[quotes[s] for s in symbols]
+ ax.barh(list(reversed(symbols)),list(reversed(vals)),color="#38bdf8")
+ ax.set_xscale("log");ax.tick_params(colors="white")
+ ax.set_xlabel("USD market price (log scale; NOT comparable returns)",color="white")
+ ax.set_title("ATLAS | Public crypto market reference prices",color="white",pad=18)
+ for spine in ax.spines.values():spine.set_visible(False)
+ fig.text(.03,.025,"Public market data only. No holdings, quantities, weights or portfolio values.",color="#cbd5e1",fontsize=9)
+ fig.tight_layout(rect=[0,.05,1,1])
+ b=io.BytesIO();fig.savefig(b,format="png",dpi=150,facecolor=fig.get_facecolor());plt.close(fig)
+ return b.getvalue()
 def send(token,chat,filename,data,caption):
  boundary="ATLASPORTFOLIOBOUNDARY"
  fields=(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n"+chat+"\r\n--"+boundary+"\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n"+caption+"\r\n--"+boundary+"\r\nContent-Disposition: form-data; name=\"photo\"; filename=\""+filename+"\"\r\nContent-Type: image/png\r\n\r\n").encode())
@@ -55,7 +71,8 @@ def main():
  if user!=chat:raise RuntimeError("private chat ID must equal owner user ID")
  rows=holdings(user)
  if not rows:raise RuntimeError("no holdings for configured user")
- items,missing=portfolio(rows,prices())
+ quotes=prices()
+ items,missing=portfolio(rows,quotes)
  if len(items)<5:raise RuntimeError("insufficient priced holdings; refuse delivery")
  total=sum(v for _,v in items)
  latest=max(str(x.get("updated_at","")) for x in rows)[:10]
@@ -69,8 +86,7 @@ def main():
  group=os.environ["TELEGRAM_GROUP_CHAT_ID"]
  if not group or group==chat:raise RuntimeError("distinct group destination required")
  for kind in ("weights","values"):
-  data=chart(items,kind)
-  for dest in (chat,group):
-   send(token,dest,"atlas_portfolio_"+kind+".png",data,caption)
- print("Private and group portfolio charts accepted; priced_assets",len(items),"unpriced_assets",len(missing))
+  send(token,chat,"atlas_portfolio_"+kind+".png",chart(items,kind),caption)
+ send(token,group,"atlas_public_market_prices.png",public_market_chart(quotes),"ATLAS | Public crypto reference prices. No personal portfolio information. Price levels are not return comparisons or trading signals.")
+ print("Owner-only portfolio charts and public group chart accepted; priced_assets",len(items),"unpriced_assets",len(missing))
 if __name__=="__main__":main()
