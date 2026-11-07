@@ -1,4 +1,4 @@
-name: ATLAS Private Portfolio Charts
+name: ATLAS Portfolio Charts to Group and Bot
 on:
   workflow_dispatch:
   schedule:
@@ -19,12 +19,13 @@ jobs:
           python-version: "3.11"
       - name: Install chart renderer
         run: python -m pip install "matplotlib>=3.8,<4"
-      - name: Send private holdings charts
+      - name: Send portfolio charts to private bot and group
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          ATLAS_PORTFOLIO_USER_ID: ${{ secrets.ATLAS_PORTFOLIO_USER_ID }}
-          ATLAS_PORTFOLIO_CHAT_ID: ${{ secrets.ATLAS_PORTFOLIO_CHAT_ID }}
+          ATLAS_PORTFOLIO_USER_ID: '414890497'
+          ATLAS_PORTFOLIO_CHAT_ID: '414890497'
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
         run: python atlas_portfolio_charts.py
