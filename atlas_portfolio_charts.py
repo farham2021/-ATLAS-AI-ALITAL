@@ -1,4 +1,4 @@
-"""Private ATLAS portfolio charts. Never publish holdings to group or Actions artifacts."""
+"""ATLAS portfolio charts for explicitly authorized private and group Telegram recipients. No Actions artifacts."""
 import os,json,datetime,urllib.request,urllib.parse,io,math
 import matplotlib
 matplotlib.use("Agg")
@@ -52,7 +52,7 @@ def send(token,chat,filename,data,caption):
  print("private Telegram photo accepted",filename,"message_id",result.get("result",{}).get("message_id"))
 def main():
  user=os.environ["ATLAS_PORTFOLIO_USER_ID"];chat=os.environ["ATLAS_PORTFOLIO_CHAT_ID"]
- if user!=chat:raise RuntimeError("private chat ID must equal owner user ID; refuse group delivery")
+ if user!=chat:raise RuntimeError("private chat ID must equal owner user ID")
  rows=holdings(user)
  if not rows:raise RuntimeError("no holdings for configured user")
  items,missing=portfolio(rows,prices())
@@ -66,7 +66,11 @@ def main():
           "\\nUnpriced tokens: "+(", ".join(missing) if missing else "none")+
           "\\nNo live wallet sync; not a sell signal.")
  token=os.environ["TELEGRAM_TOKEN"]
+ group=os.environ["TELEGRAM_GROUP_CHAT_ID"]
+ if not group or group==chat:raise RuntimeError("distinct group destination required")
  for kind in ("weights","values"):
-  send(token,chat,"atlas_portfolio_"+kind+".png",chart(items,kind),caption)
- print("Private portfolio charts delivered; priced_assets",len(items),"unpriced_assets",len(missing))
+  data=chart(items,kind)
+  for dest in (chat,group):
+   send(token,dest,"atlas_portfolio_"+kind+".png",data,caption)
+ print("Private and group portfolio charts accepted; priced_assets",len(items),"unpriced_assets",len(missing))
 if __name__=="__main__":main()
