@@ -17,7 +17,10 @@ class QuantResearchGateTests(unittest.TestCase):
         self.assertEqual(assess(evidence(checks={"data_integrity":True}))["status"],"RESEARCH_ONLY")
     def test_missing_oos_fails_closed(self):
         self.assertEqual(assess(evidence(out_of_sample_sharpe=None))["status"],"RESEARCH_ONLY")
-    def test_nonpositive_net_or_oos_cannot_pass(self):\n        self.assertEqual(assess(evidence(net_sharpe=-0.1))["status"],"RESEARCH_ONLY")\n        self.assertEqual(assess(evidence(out_of_sample_sharpe=0))["status"],"RESEARCH_ONLY")\n    def test_critical_bias_rejects(self):
+    def test_nonpositive_net_or_oos_cannot_pass(self):
+        self.assertEqual(assess(evidence(net_sharpe=-0.1))["status"],"RESEARCH_ONLY")
+        self.assertEqual(assess(evidence(out_of_sample_sharpe=0))["status"],"RESEARCH_ONLY")
+    def test_critical_bias_rejects(self):
         self.assertEqual(assess(evidence(critical_bias=True))["status"],"REJECTED")
     def test_data_integrity_false_rejects(self):
         self.assertEqual(assess(evidence(checks={"data_integrity":False}))["status"],"REJECTED")
