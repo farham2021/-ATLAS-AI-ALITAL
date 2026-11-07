@@ -1,0 +1,21 @@
+name: ATLAS Quant Research Shadow Gate
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - atlas_quant_research_gate.py
+      - test_atlas_quant_research_gate.py
+      - .github/workflows/atlas_quant_research_shadow.yml
+permissions:
+  contents: read
+jobs:
+  shadow-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test research gate without secrets or network
+        run: python -m unittest -v test_atlas_quant_research_gate test_atlas_portfolio_risk_shield
