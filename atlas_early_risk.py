@@ -68,11 +68,17 @@ def fetch_validated(symbol,interval):
    errors.append(name+": "+str(exc))
  raise ValueError("no validated OHLCV provider: "+"; ".join(errors))
 
+def ema(values,period):
+ if len(values)<period:raise ValueError("insufficient EMA history")
+ k=2/(period+1);value=sum(values[:period])/period
+ for price in values[period:]:value=price*k+value*(1-k)
+ return value
+
 def score(rows4,rowsd):
  if len(rows4)<55 or len(rowsd)<55:raise ValueError("insufficient candles")
  c=[float(r[4]) for r in rows4];v=[float(r[5]) for r in rows4];d=[float(r[4]) for r in rowsd]
  if min(c)<=0 or min(d)<=0:raise ValueError("bad price")
- last=c[-1];ema20=sum(c[-20:])/20;ema50=sum(c[-50:])/50
+ last=c[-1];ema20=ema(c,20);ema50=ema(c,50)
  daily20=sum(d[-20:])/20
  recent_low=min(float(r[3]) for r in rows4[-13:-1])
  volume_ratio=v[-1]/max(statistics.mean(v[-21:-1]),1e-12)
@@ -85,7 +91,13 @@ def score(rows4,rowsd):
  if volume_ratio>1.6 and c[-1]<c[-2]:flags.append("selling volume expansion")
  if decline24<=-4:flags.append("24h momentum loss")
  strength=len(flags)
- level="CRITICAL" if strength>=5 and ("4H support break" in flags) else "HIGH" if strength>=4 else "WATCH" if strength>=3 else "NONE"
+ # Earlier risk escalation: do not wait for five simultaneous confirmations.
+ support_break="4H support break" in flags
+ selling="selling volume expansion" in flags
+ trend_weak=("4H below MA20" in flags and "daily below MA20" in flags)
+ level=("CRITICAL" if support_break and selling and (trend_weak or decline24<=-4) else
+        "HIGH" if (support_break and (selling or trend_weak)) or (decline24<=-4 and trend_weak) or strength>=4 else
+        "WATCH" if support_break or (selling and last<ema20) or strength>=2 else "NONE")
  return {"level":level,"flags":flags,"price":last,"volume_ratio":round(volume_ratio,2),"decline24":round(decline24,2)}
 def db_request(method,path,payload=None):
  url=os.environ["SUPABASE_URL"].rstrip("/")+"/rest/v1/"+path
@@ -108,7 +120,7 @@ def alert(symbol,result):
       "\nتغییر ۲۴ ساعت: "+str(result["decline24"])+"٪"+
       "\nنسبت حجم: "+str(result["volume_ratio"])+
       "\nنشانه‌ها: "+", ".join(result["flags"])+
-      "\nتحلیل مبتنی بر کندل بسته‌شده 4H و 1D؛ پیش‌بینی قطعی نیست."+
+      "\nهشدار پیشگیرانه؛ شکست حمایت/ضعف روند می‌تواند پیش از ریزش بزرگ ظاهر شود، اما پیش‌بینی قطعی نیست."+
       "\nچارت: https://www.tradingview.com/chart/?symbol=COINBASE%3A"+symbol.removesuffix("USDT")+"USD")
  token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_GROUP_CHAT_ID"]
  body=urllib.parse.urlencode({"chat_id":chat,"text":msg}).encode()
