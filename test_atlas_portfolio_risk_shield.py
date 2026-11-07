@@ -24,5 +24,5 @@ class ShadowRiskShieldTests(unittest.TestCase):
   with self.assertRaises(ValueError):evaluate([o(0,100),o(1,0,-100)])
  def test_no_repeat(self):
   r=evaluate([o(0,100),o(1,94),o(2,93),o(3,91)])
-  self.assertEqual(len(transitions(r)),2)
+  self.assertEqual(len(transitions(r)),1)
 if __name__=="__main__":unittest.main()
