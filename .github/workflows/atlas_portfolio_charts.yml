@@ -1,4 +1,4 @@
-name: ATLAS Portfolio Charts to Group and Bot
+name: ATLAS Private Holdings and Public Market Charts
 on:
   workflow_dispatch:
   schedule:
@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
       - name: Install chart renderer
         run: python -m pip install "matplotlib>=3.8,<4"
-      - name: Send portfolio charts to private bot and group
+      - name: Send owner-only holdings and group-safe market chart
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
