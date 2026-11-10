@@ -28,8 +28,8 @@ jobs:
           python-version: '3.11'
       - name: Offline CSV and Telegram transport simulation
         run: |
-          python -m unittest -v test_atlas_risk_csv_digest test_atlas_risk_csv_delivery_simulation
-          python -m py_compile atlas_early_risk.py atlas_risk_csv_digest.py
+          python -m unittest -v test_atlas_risk_csv_digest test_atlas_risk_csv_delivery_simulation test_atlas_risk_universe_iran
+          python -m py_compile atlas_early_risk.py atlas_risk_csv_digest.py atlas_top100_universe.py atlas_iran_risk_snapshot.py
       - name: Live three-session digest
         if: github.event_name == 'schedule' || inputs.dry_run == false
         env:
