@@ -16,7 +16,7 @@ def csv_bytes(items,at=None):
         def safe(v):
             s=str(v)
             return "'"+s if s.lstrip().startswith(("=","+","-","@","\t","\r")) else s
-        w.writerow(dict(time_utc=at.isoformat(),symbol=symbol,direction="GROWTH" if level.startswith("GROWTH") else "DROP",severity=level,price_usd=result["price"],change_24h_pct=result["decline24"],volume_ratio=result["volume_ratio"],signals=safe("; ".join(result["flags"])),tradingview_url=chart_url(symbol) if result.get("market","CRYPTO")=="CRYPTO" else ""))
+        w.writerow(dict(time_utc=at.isoformat(),symbol=symbol,direction="GROWTH" if level.startswith("GROWTH") else ("DROP" if level!="NONE" else "NO_SIGNAL"),severity=level,price_usd=result["price"],change_24h_pct=result["decline24"],volume_ratio=result["volume_ratio"],signals=safe("; ".join(result["flags"])),tradingview_url=chart_url(symbol) if result.get("market","CRYPTO")=="CRYPTO" else ""))
     return out.getvalue().encode("utf-8-sig")
 def send_document(token,chat_id,data,filename,caption):
     boundary="----ATLASCSVBOUNDARY"
@@ -39,6 +39,7 @@ def send_digest(items):
     if not chats:raise ValueError("no destination chats")
     data=csv_bytes(items)
     drops=sum(x["level"]!="NONE" and not x["level"].startswith("GROWTH") for _,x in items)
-    caption=f"ATLAS risk digest | {drops} drop warnings, {sum(x["level"].startswith("GROWTH") for _,x in items)} growth warnings. Open CSV for TradingView links."
+    growth=sum(x["level"].startswith("GROWTH") for _,x in items)
+    caption=f"ATLAS risk digest | {drops} drop warnings, {growth} growth warnings. Open CSV for TradingView links."
     filename="atlas_risk_"+datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M")+".csv"
     return [send_document(token,chat,data,filename,caption) for chat in chats]
