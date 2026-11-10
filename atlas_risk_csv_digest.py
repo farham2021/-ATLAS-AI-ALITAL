@@ -16,7 +16,7 @@ def csv_bytes(items,at=None):
         def safe(v):
             s=str(v)
             return "'"+s if s.lstrip().startswith(("=","+","-","@","\t","\r")) else s
-        w.writerow(dict(time_utc=at.isoformat(),symbol=symbol,direction="GROWTH" if level.startswith("GROWTH") else "DROP",severity=level,price_usd=result["price"],change_24h_pct=result["decline24"],volume_ratio=result["volume_ratio"],signals=safe("; ".join(result["flags"])),tradingview_url=chart_url(symbol)))
+        w.writerow(dict(time_utc=at.isoformat(),symbol=symbol,direction="GROWTH" if level.startswith("GROWTH") else "DROP",severity=level,price_usd=result["price"],change_24h_pct=result["decline24"],volume_ratio=result["volume_ratio"],signals=safe("; ".join(result["flags"])),tradingview_url=chart_url(symbol) if result.get("market","CRYPTO")=="CRYPTO" else ""))
     return out.getvalue().encode("utf-8-sig")
 def send_document(token,chat_id,data,filename,caption):
     boundary="----ATLASCSVBOUNDARY"
