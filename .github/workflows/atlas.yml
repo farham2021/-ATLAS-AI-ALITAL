@@ -257,7 +257,6 @@ jobs:
       # Normal path: mark DONE with the lease token issued by claim.
       - name: Mark slot complete
         if: success() && steps.gate.outputs.should_run == '1' && steps.gate.outputs.path_kind == 'claimed'
-        continue-on-error: true
         env:
           ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
