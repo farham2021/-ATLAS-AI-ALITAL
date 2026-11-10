@@ -65,7 +65,6 @@ jobs:
         id: claim
         if: steps.plan.outputs.scheduled == '1' && steps.plan.outputs.mode != 'NONE'
         # Fail-open only for infrastructure/RPC failure. A successful DENIED claim still skips execution.
-        continue-on-error: true
         env:
           ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -93,9 +92,6 @@ jobs:
             elif [ "$CLAIMED" = "CLAIMED" ]; then
               SHOULD=1
               PATH_KIND=claimed
-            elif [ "$CLAIM_OUTCOME" = "failure" ]; then
-              SHOULD=1
-              PATH_KIND=fail_open
             fi
           fi
           echo "should_run=$SHOULD" >> "$GITHUB_OUTPUT"
@@ -132,9 +128,9 @@ jobs:
           ATLAS_FUTURES_MAX_LEVERAGE: "3"
           ATLAS_IRAN_MULTI_ASSET_ENABLED: "1"
           ATLAS_IRAN_REPORT_DAILY16: "1"
-          ATLAS_IRAN_REPORT_NIGHTLY23: "1"
+          ATLAS_IRAN_REPORT_NIGHTLY23: "0"
           ATLAS_IRAN_DASHBOARD_ENABLED: "1"
-          ATLAS_IRAN_DASHBOARD_NIGHTLY: "1"
+          ATLAS_IRAN_DASHBOARD_NIGHTLY: "0"
 
           ATLAS_DESK_ENABLED: "1"
           ATLAS_DESK_INGEST_ENABLED: "0"
@@ -215,8 +211,8 @@ jobs:
                 export ATLAS_DELIVERY_MODE=STORAGE_ONLY
                 export ATLAS_REPORT_WINDOW=0
               else
-                export ATLAS_DELIVERY_MODE=FULL
-                export ATLAS_REPORT_WINDOW=1
+                export ATLAS_DELIVERY_MODE=STORAGE_ONLY
+                export ATLAS_REPORT_WINDOW=0
               fi
               export ATLAS_PHASE37_CYCLE=DEEP4H
               export ATLAS_PHASE37_DEEP_4H=1
@@ -234,14 +230,14 @@ jobs:
               export ATLAS_EXECUTION_ENABLED=1
               export ATLAS_REPORT_WINDOW=1 ;;
             NIGHTLY23)
-              export ATLAS_DELIVERY_MODE=FULL
+              export ATLAS_DELIVERY_MODE=STORAGE_ONLY
               export ATLAS_PHASE37_CYCLE=NIGHTLY23
               export ATLAS_PHASE37_DEEP_4H=0
               export ATLAS_PHASE37_DAILY_REPORT=0
-              export ATLAS_PHASE39_NIGHTLY_REPORT=1
+              export ATLAS_PHASE39_NIGHTLY_REPORT=0
               export ATLAS_BOOK_SCAN_AUTO=0
               export ATLAS_EXECUTION_ENABLED=0
-              export ATLAS_REPORT_WINDOW=1 ;;
+              export ATLAS_REPORT_WINDOW=0 ;;
             *) exit 2 ;;
           esac
           # Enforce diagnostic settings AFTER mode-specific defaults, so DAILY16 and
@@ -273,10 +269,10 @@ jobs:
             --lease-token "${{ steps.claim.outputs.lease_token }}" \
             --source self-healing
 
-      # Fail-open path: claim RPC/infra failed, but the analysis still ran.
+      # Deprecated fail-open path is intentionally disabled.\n      # Fail-open path: claim RPC/infra failed, but the analysis still ran.
       # Force-DONE so the same Paris slot is not re-selected inside the recovery window.
       - name: Force-done after fail-open run
-        if: success() && steps.gate.outputs.should_run == '1' && steps.gate.outputs.path_kind == 'fail_open'
+        if: ${{ false }}
         continue-on-error: true
         env:
           ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
