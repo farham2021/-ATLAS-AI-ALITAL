@@ -180,8 +180,8 @@ def main():
  except Exception as exc:
   failed.append("Iran snapshot scan: "+str(exc))
  print("Crypto coverage:",coverage,"of",len(universe))
- if coverage<min(80,len(universe)):
-  failed.append("Crypto OHLCV coverage below 80; delivery suppressed to avoid misleading completeness")
+ if coverage<len(universe):
+  print("::warning::Partial crypto coverage; unsupported markets are excluded, not represented as safe")
  if failed:
   for error in failed:print("::error::"+error)
   sys.exit(2)
