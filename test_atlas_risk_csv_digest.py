@@ -7,7 +7,7 @@ class TestDigest(unittest.TestCase):
  def test_csv(self):
   data=csv_bytes([("BTCUSDT",{"level":"HIGH","price":75000,"decline24":-3,"volume_ratio":2,"flags":["support break"]}),("ETHUSDT",{"level":"NONE","price":2,"decline24":0,"volume_ratio":1,"flags":[]})])
   rows=list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
-  self.assertEqual(len(rows),1)
+  self.assertEqual(len(rows),2)
   self.assertEqual(list(rows[0]),list(FIELDS))
   self.assertEqual(rows[0]["direction"],"DROP")
   self.assertTrue(rows[0]["tradingview_url"].startswith("https://"))
