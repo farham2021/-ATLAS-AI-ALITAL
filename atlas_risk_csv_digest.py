@@ -12,7 +12,7 @@ def csv_bytes(items,at=None):
     w=csv.DictWriter(out,fieldnames=FIELDS,lineterminator="\r\n");w.writeheader()
     for symbol,result in items:
         level=result["level"]
-        if level=="NONE":continue
+        # Fixed desk assets remain visible even when no actionable signal exists.
         def safe(v):
             s=str(v)
             return "'"+s if s.lstrip().startswith(("=","+","-","@","\t","\r")) else s
@@ -38,7 +38,7 @@ def send_digest(items):
     chats=list(dict.fromkeys(filter(None,(os.environ.get("TELEGRAM_GROUP_CHAT_ID"),os.environ.get("ATLAS_PRIVATE_CHAT_ID")))))
     if not chats:raise ValueError("no destination chats")
     data=csv_bytes(items)
-    drops=sum(not x["level"].startswith("GROWTH") for _,x in items)
-    caption=f"ATLAS risk digest | {drops} drop warnings, {len(items)-drops} growth warnings. Open CSV for TradingView links."
+    drops=sum(x["level"]!="NONE" and not x["level"].startswith("GROWTH") for _,x in items)
+    caption=f"ATLAS risk digest | {drops} drop warnings, {sum(x["level"].startswith("GROWTH") for _,x in items)} growth warnings. Open CSV for TradingView links."
     filename="atlas_risk_"+datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M")+".csv"
     return [send_document(token,chat,data,filename,caption) for chat in chats]
