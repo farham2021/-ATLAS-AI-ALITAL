@@ -1,0 +1,47 @@
+name: ATLAS Risk CSV Three Tehran Sessions
+on:
+  schedule:
+    # Tehran UTC+03:30 year-round: 10:30, 16:00, 21:30.
+    - cron: '0 7 * * *'
+    - cron: '30 12 * * *'
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Safe offline delivery simulation; no Telegram/Supabase'
+        type: boolean
+        required: true
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: atlas-risk-csv-sessions
+  cancel-in-progress: false
+jobs:
+  csv-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Offline CSV and Telegram transport simulation
+        run: |
+          python -m unittest -v test_atlas_risk_csv_digest test_atlas_risk_csv_delivery_simulation
+          python -m py_compile atlas_early_risk.py atlas_risk_csv_digest.py
+      - name: Live three-session digest
+        if: github.event_name == 'schedule' || inputs.dry_run == false
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          ATLAS_PRIVATE_CHAT_ID: ${{ secrets.ATLAS_PRIVATE_CHAT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$TELEGRAM_TOKEN"
+          test -n "$TELEGRAM_GROUP_CHAT_ID"
+          test -n "$SUPABASE_URL"
+          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          python atlas_early_risk.py
