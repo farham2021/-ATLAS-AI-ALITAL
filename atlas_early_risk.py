@@ -155,6 +155,7 @@ def main():
  from atlas_top100_universe import discover_top100
  from atlas_iran_risk_snapshot import scan_iran
  from atlas_risk_csv_digest import send_digest
+ from atlas_risk_top20_selection import select,DESK
  failed=[];pending=[];now=datetime.datetime.now(datetime.timezone.utc)
  universe=discover_top100()
  def scan(item):
@@ -171,12 +172,13 @@ def main():
  coverage=sum(result is not None for _,result,_ in outcomes)
  for symbol,result,error in outcomes:
   if error:print("::warning::Crypto data gap "+symbol+": "+error[:250])
-  elif result["level"]!="NONE":pending.append((symbol,result))
+  elif result is not None:pending.append((symbol,result))
  # Iran: only timestamped provider-supplied percent changes; never infer stale prices.
  try:
   iran,iran_coverage=scan_iran(now)
   print("Iran data coverage:",json.dumps(iran_coverage))
-  pending.extend(iran)
+  # Iran alerts remain separate from the requested crypto top-20 digest.
+  print("Iran candidate alerts:",len(iran))
  except Exception as exc:
   failed.append("Iran snapshot scan: "+str(exc))
  print("Crypto coverage:",coverage,"of",len(universe))
@@ -185,6 +187,8 @@ def main():
  if failed:
   for error in failed:print("::error::"+error)
   sys.exit(2)
+ # Rank 10 fixed desk symbols and 10 strongest dynamic signals, not all 100.
+ pending=select(pending)
  # Deduplicate only after successful delivery; never mark failed sends as notified.
  unique={}
  for symbol,result in pending:
@@ -195,7 +199,7 @@ def main():
   state_key=("IRAN_" if result.get("market")=="IRAN" else "")+symbol
   rows=db_request("GET","atlas_risk_alert_state?symbol=eq."+urllib.parse.quote(state_key)+"&select=level,notified_at")
   previous=rows[0] if rows else {}
-  if previous.get("level")==result["level"] and previous.get("notified_at"):
+  if symbol not in DESK and previous.get("level")==result["level"] and previous.get("notified_at"):
    age=(now-datetime.datetime.fromisoformat(previous["notified_at"].replace("Z","+00:00"))).total_seconds()
    if age<6*3600:continue
   pending.append((symbol,result,state_key))
@@ -203,6 +207,7 @@ def main():
   receipts=send_digest([(symbol,result) for symbol,result,_ in pending])
   print("ATLAS Telegram CSV confirmed message ids:",receipts)
   for symbol,result,state_key in pending:
+   if result["level"]=="NONE":continue
    db_request("POST","atlas_risk_alert_state?on_conflict=symbol",{"symbol":state_key,"level":result["level"],"notified_at":now.isoformat()})
  print("ATLAS risk digest rows:",len(pending))
 if __name__=="__main__":main()
