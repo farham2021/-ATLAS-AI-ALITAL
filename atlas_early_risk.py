@@ -151,33 +151,58 @@ def alert(symbol,result):
  db_request("POST","atlas_risk_alert_state?on_conflict=symbol",{"symbol":symbol,"level":level,"notified_at":now.isoformat()})
  return True
 def main():
+ from concurrent.futures import ThreadPoolExecutor,as_completed
+ from atlas_top100_universe import discover_top100
+ from atlas_iran_risk_snapshot import scan_iran
  from atlas_risk_csv_digest import send_digest
- failed=[];pending=[]
- now=datetime.datetime.now(datetime.timezone.utc)
- for symbol in SYMBOLS:
+ failed=[];pending=[];now=datetime.datetime.now(datetime.timezone.utc)
+ universe=discover_top100()
+ def scan(item):
+  symbol=item["symbol"]
   try:
    rows4=fetch_validated(symbol,"4h");rowsd=fetch_validated(symbol,"1d")
    downside=score(rows4,rowsd);upside=score_growth(rows4,rowsd)
    result=downside if downside["level"]!="NONE" else upside
-   print(symbol,json.dumps({"downside":downside,"upside":upside,"selected":result["level"]}))
-   if result["level"]=="NONE":continue
-   rows=db_request("GET","atlas_risk_alert_state?symbol=eq."+urllib.parse.quote(symbol)+"&select=level,notified_at")
-   previous=rows[0] if rows else {}
-   if previous.get("level")==result["level"] and previous.get("notified_at"):
-    age=(now-datetime.datetime.fromisoformat(previous["notified_at"].replace("Z","+00:00"))).total_seconds()
-    if age<6*3600:continue
-   pending.append((symbol,result))
-  except Exception as e:failed.append(symbol+": "+str(e))
- # One CSV document per Telegram destination; no per-symbol Telegram messages.
- # State is persisted only after Telegram confirms document receipt.
+   result["market"]="CRYPTO"
+   return symbol,result,None
+  except Exception as exc:return symbol,None,str(exc)
+ with ThreadPoolExecutor(max_workers=8) as pool:
+  outcomes=[future.result() for future in as_completed([pool.submit(scan,item) for item in universe])]
+ coverage=sum(result is not None for _,result,_ in outcomes)
+ for symbol,result,error in outcomes:
+  if error:print("::warning::Crypto data gap "+symbol+": "+error[:250])
+  elif result["level"]!="NONE":pending.append((symbol,result))
+ # Iran: only timestamped provider-supplied percent changes; never infer stale prices.
+ try:
+  iran,iran_coverage=scan_iran(now)
+  print("Iran data coverage:",json.dumps(iran_coverage))
+  pending.extend(iran)
+ except Exception as exc:
+  failed.append("Iran snapshot scan: "+str(exc))
+ print("Crypto coverage:",coverage,"of",len(universe))
+ if coverage<min(80,len(universe)):
+  failed.append("Crypto OHLCV coverage below 80; delivery suppressed to avoid misleading completeness")
+ if failed:
+  for error in failed:print("::error::"+error)
+  sys.exit(2)
+ # Deduplicate only after successful delivery; never mark failed sends as notified.
+ unique={}
+ for symbol,result in pending:
+  key=(result.get("market","CRYPTO"),symbol)
+  unique[key]=(symbol,result)
+ pending=[]
+ for symbol,result in unique.values():
+  state_key=("IRAN_" if result.get("market")=="IRAN" else "")+symbol
+  rows=db_request("GET","atlas_risk_alert_state?symbol=eq."+urllib.parse.quote(state_key)+"&select=level,notified_at")
+  previous=rows[0] if rows else {}
+  if previous.get("level")==result["level"] and previous.get("notified_at"):
+   age=(now-datetime.datetime.fromisoformat(previous["notified_at"].replace("Z","+00:00"))).total_seconds()
+   if age<6*3600:continue
+  pending.append((symbol,result,state_key))
  if pending:
-  try:
-   receipts=send_digest(pending)
-   print("ATLAS CSV Telegram receipts:",receipts)
-   for symbol,result in pending:
-    db_request("POST","atlas_risk_alert_state?on_conflict=symbol",{"symbol":symbol,"level":result["level"],"notified_at":now.isoformat()})
-  except Exception as e:failed.append("CSV digest delivery/persistence: "+str(e))
- for f in failed:print("::warning::"+f)
- print("ATLAS CSV alerts:",len(pending))
- if failed:sys.exit(2)
+  receipts=send_digest([(symbol,result) for symbol,result,_ in pending])
+  print("ATLAS Telegram CSV confirmed message ids:",receipts)
+  for symbol,result,state_key in pending:
+   db_request("POST","atlas_risk_alert_state?on_conflict=symbol",{"symbol":state_key,"level":result["level"],"notified_at":now.isoformat()})
+ print("ATLAS risk digest rows:",len(pending))
 if __name__=="__main__":main()
