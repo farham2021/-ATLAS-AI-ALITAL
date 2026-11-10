@@ -153,7 +153,6 @@ def alert(symbol,result):
 def main():
  from concurrent.futures import ThreadPoolExecutor,as_completed
  from atlas_top100_universe import discover_top100
- from atlas_iran_risk_snapshot import scan_iran
  from atlas_risk_csv_digest import send_digest
  from atlas_risk_top20_selection import select,DESK
  failed=[];pending=[];now=datetime.datetime.now(datetime.timezone.utc)
@@ -173,14 +172,6 @@ def main():
  for symbol,result,error in outcomes:
   if error:print("::warning::Crypto data gap "+symbol+": "+error[:250])
   elif result is not None:pending.append((symbol,result))
- # Iran: only timestamped provider-supplied percent changes; never infer stale prices.
- try:
-  iran,iran_coverage=scan_iran(now)
-  print("Iran data coverage:",json.dumps(iran_coverage))
-  # Iran alerts remain separate from the requested crypto top-20 digest.
-  print("Iran candidate alerts:",len(iran))
- except Exception as exc:
-  failed.append("Iran snapshot scan: "+str(exc))
  print("Crypto coverage:",coverage,"of",len(universe))
  if coverage<len(universe):
   print("::warning::Partial crypto coverage; unsupported markets are excluded, not represented as safe")
@@ -197,11 +188,6 @@ def main():
  pending=[]
  for symbol,result in unique.values():
   state_key=("IRAN_" if result.get("market")=="IRAN" else "")+symbol
-  rows=db_request("GET","atlas_risk_alert_state?symbol=eq."+urllib.parse.quote(state_key)+"&select=level,notified_at")
-  previous=rows[0] if rows else {}
-  if symbol not in DESK and previous.get("level")==result["level"] and previous.get("notified_at"):
-   age=(now-datetime.datetime.fromisoformat(previous["notified_at"].replace("Z","+00:00"))).total_seconds()
-   if age<6*3600:continue
   pending.append((symbol,result,state_key))
  if pending:
   receipts=send_digest([(symbol,result) for symbol,result,_ in pending])
