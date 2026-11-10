@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - atlas_delivery_policy_shadow.py
+      - test_atlas_delivery_policy_shadow.py
       - atlas_risk_csv_digest.py
       - test_atlas_risk_csv_digest.py
       - atlas_six_strategies_shadow.py
@@ -30,4 +32,4 @@ jobs:
         with:
           python-version: "3.11"
       - name: Test research gate without secrets or network
-        run: python -m unittest -v test_atlas_risk_csv_digest test_atlas_six_strategies_shadow test_atlas_quant_research_gate test_atlas_portfolio_risk_shield test_atlas_trade_replay_shadow test_atlas_kronos_adapter_shadow test_atlas_external_evidence_gate
+        run: python -m unittest -v test_atlas_delivery_policy_shadow test_atlas_risk_csv_digest test_atlas_six_strategies_shadow test_atlas_quant_research_gate test_atlas_portfolio_risk_shield test_atlas_trade_replay_shadow test_atlas_kronos_adapter_shadow test_atlas_external_evidence_gate
