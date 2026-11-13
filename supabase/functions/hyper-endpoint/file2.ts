@@ -1775,6 +1775,7 @@ const ATLAS_MARKET_MENU=[
   ["📈 تحلیل نماد","🇮🇷 بورس ایران"],
   ["🥇 فلزات و قیمت‌ها","📑 آخرین تحلیل DEEP4H"],
   ["🧠 رادار ریسک","📊 ارزیابی سیگنال‌ها"],
+  ["📊 بروکر و فیوچرز","🎯 TP / SL"],
   ["⚖️ بازتعادل سبد","🏠 منوی اصلی"]
 ];
 const ATLAS_ALERT_MENU=[
@@ -1793,6 +1794,7 @@ const ATLAS_EN_LABELS:Record<string,string>={
 "🌐 زبان / Language":"🌐 Language / زبان",
 "🌐 گزارش چندبازاری":"🌐 Multi-asset report","📚 پژوهش بازار":"📚 Market research",
 "📈 تحلیل نماد":"📈 Analyze symbol","🇮🇷 بورس ایران":"🇮🇷 Iran stocks",
+"📊 بروکر و فیوچرز":"📊 Broker & Futures","🎯 TP / SL":"🎯 TP / SL",
 "🧠 رادار ریسک":"🧠 Risk radar","📊 ارزیابی سیگنال‌ها":"📊 Signal audit",
 "🥇 فلزات و قیمت‌ها":"🥇 Metals & prices","📑 آخرین تحلیل DEEP4H":"📑 Latest DEEP4H",
 "⚖️ بازتعادل سبد":"⚖️ Rebalance","🏠 منوی اصلی":"🏠 Main menu",
@@ -1900,6 +1902,7 @@ function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]
     "📈 تحلیل نماد":"/analyze_help","🇮🇷 بورس ایران":"/tse",
     "🥇 فلزات و قیمت‌ها":"/metals","📑 آخرین تحلیل DEEP4H":"/deepreport",
     "🧠 رادار ریسک":"/radar","📊 ارزیابی سیگنال‌ها":"/audit",
+    "📊 بروکر و فیوچرز":"/futures","🎯 TP / SL":"/futures",
     "⚙️ تنظیم هشدار نماد":"/watch_help"
   };
   if(commands[t])return {command:commands[t]};
@@ -2010,6 +2013,23 @@ async function atlasEnhanced(env:any, userId:string, text:string):Promise<string
  }
 
 
+
+ if(cmd==="/futures"){
+  const requested=words[1]?.toUpperCase();
+  const rows=await get("atlas_signal_lifecycle","select=symbol,direction,entry,sl,tp1,tp2,confidence,updated_at&order=updated_at.desc&limit=120");
+  const valid=rows.filter((r:any)=>{
+   const e=Number(r.entry),sl=Number(r.sl),tp=Number(r.tp1),side=String(r.direction||"").toUpperCase();
+   return ["LONG","SHORT"].includes(side)&&[e,sl,tp].every(v=>Number.isFinite(v)&&v>0)&&
+    (side==="LONG"?(sl<e&&tp>e):(sl>e&&tp<e))&&(!requested||r.symbol===requested);
+  }).slice(0,requested?1:12);
+  if(!valid.length)return "No valid futures levels found. Example: /futures BTC";
+  return "📊 ATLAS Futures / Paper Broker\n"+valid.map((r:any)=>{
+   const e=Number(r.entry),sl=Number(r.sl),tp=Number(r.tp1),second=Number(r.tp2),side=String(r.direction).toUpperCase();
+   const tp2=Number.isFinite(second)&&second>0&&(side==="LONG"?second>tp:second<tp)?second:"N/A";
+   const rr=(Math.abs(tp-e)/Math.abs(e-sl)).toFixed(2);
+   return r.symbol+" "+side+" | Entry "+e+" | SL "+sl+" | TP1 "+tp+" | TP2 "+tp2+" | R:R "+rr+" | score "+(r.confidence??"N/A");
+  }).join("\n")+"\nHistorical levels, not live executable quotes. No real trades.";
+ }
  if(cmd==="/radar"){
   const rows=await get("atlas_risk_radar_snapshots","select=symbol,asset_group,risk_score,alert_level,change_1h_pct,volatility_24h_pct,captured_at&order=captured_at.desc&limit=200");
   const seen=new Set<string>(),uniq=rows.filter((r:any)=>{if(seen.has(r.symbol))return false;seen.add(r.symbol);return true}).slice(0,15);
