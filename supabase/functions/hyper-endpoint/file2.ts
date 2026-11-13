@@ -1774,6 +1774,7 @@ const ATLAS_MARKET_MENU=[
   ["🌐 گزارش چندبازاری","📚 پژوهش بازار"],
   ["📈 تحلیل نماد","🇮🇷 بورس ایران"],
   ["🥇 فلزات و قیمت‌ها","📑 آخرین تحلیل DEEP4H"],
+  ["🧠 رادار ریسک","📊 ارزیابی سیگنال‌ها"],
   ["⚖️ بازتعادل سبد","🏠 منوی اصلی"]
 ];
 const ATLAS_ALERT_MENU=[
@@ -1792,6 +1793,7 @@ const ATLAS_EN_LABELS:Record<string,string>={
 "🌐 زبان / Language":"🌐 Language / زبان",
 "🌐 گزارش چندبازاری":"🌐 Multi-asset report","📚 پژوهش بازار":"📚 Market research",
 "📈 تحلیل نماد":"📈 Analyze symbol","🇮🇷 بورس ایران":"🇮🇷 Iran stocks",
+"🧠 رادار ریسک":"🧠 Risk radar","📊 ارزیابی سیگنال‌ها":"📊 Signal audit",
 "🥇 فلزات و قیمت‌ها":"🥇 Metals & prices","📑 آخرین تحلیل DEEP4H":"📑 Latest DEEP4H",
 "⚖️ بازتعادل سبد":"⚖️ Rebalance","🏠 منوی اصلی":"🏠 Main menu",
 "⚙️ تنظیم هشدار نماد":"⚙️ Alert settings","🔔 آخرین هشدارها":"🔔 Recent alerts",
@@ -1897,6 +1899,7 @@ function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]
     "🎯 فرصت‌های ورود و خروج":"/opportunities","🤝 دعوت کاربر":"/invite",
     "📈 تحلیل نماد":"/analyze_help","🇮🇷 بورس ایران":"/tse",
     "🥇 فلزات و قیمت‌ها":"/metals","📑 آخرین تحلیل DEEP4H":"/deepreport",
+    "🧠 رادار ریسک":"/radar","📊 ارزیابی سیگنال‌ها":"/audit",
     "⚙️ تنظیم هشدار نماد":"/watch_help"
   };
   if(commands[t])return {command:commands[t]};
@@ -2006,6 +2009,21 @@ async function atlasEnhanced(env:any, userId:string, text:string):Promise<string
   return username?"لینک دعوت: https://t.me/"+username+"?start=invite_"+userId+"\nردیابی پاداش دعوت هنوز فعال نیست.":"نام بات موجود نیست.";
  }
 
+
+ if(cmd==="/radar"){
+  const rows=await get("atlas_risk_radar_snapshots","select=symbol,asset_group,risk_score,alert_level,change_1h_pct,volatility_24h_pct,captured_at&order=captured_at.desc&limit=200");
+  const seen=new Set<string>(),uniq=rows.filter((r:any)=>{if(seen.has(r.symbol))return false;seen.add(r.symbol);return true}).slice(0,15);
+  if(!uniq.length)return "Risk radar: no verified snapshots yet. Shadow worker must complete its first run.";
+  return "🧠 ATLAS Shadow Risk Radar\n"+uniq.map((r:any)=>r.symbol+" | "+r.risk_score+"/100 | "+r.alert_level+" | 1h "+r.change_1h_pct+"% | 24h "+r.volatility_24h_pct+"%").join("\n")+"\nHeuristic score, not a probability or trading signal.";
+ }
+ if(cmd==="/audit"){
+  const rows=await get("atlas_signal_audit","select=symbol,direction,status,return_pct,directional_hit,signal_at&order=signal_at.desc&limit=20");
+  if(!rows.length)return "Signal audit: no historical samples yet. Shadow worker must complete its first run.";
+  const valid=rows.filter((r:any)=>r.status==="evaluated"&&r.directional_hit!==null);
+  const hits=valid.filter((r:any)=>r.directional_hit===true).length;
+  return "📊 ATLAS Signal Audit (24h)\nEvaluated directional samples: "+valid.length+" | Hit rate: "+(valid.length?(100*hits/valid.length).toFixed(1)+"%":"N/A")+"\n"+
+    rows.slice(0,12).map((r:any)=>r.symbol+" | "+(r.direction||"—")+" | "+r.status+" | return "+(r.return_pct??"N/A")+"%").join("\n");
+ }
  if(cmd==="/metals"){
   const wanted=["XAUUSD","XAGUSD","COPPER","SILVER999_FAIR","GOLD18","COIN_EMAMI","USD_IRR","USDT_IRR"];
   const [a,b]=await Promise.all([
