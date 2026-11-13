@@ -1,0 +1,5 @@
+'use strict';const {test}=require('node:test'),a=require('node:assert/strict'),r=require('../research/atlas-risk-validation.cjs');const candles=Array.from({length:250},(_,i)=>{const p=100+i*.15+Math.sin(i/7)*3;return {time:new Date(Date.UTC(2026,0,1,i)).toISOString(),open:p-.1,high:p+1,low:p-1,close:p,volume:1000}});
+test('historical VaR CVaR',()=>{const v=r.varCvar(Array.from({length:100},(_,i)=>(i-50)/1000));a.equal(v.status,'research_only');a.ok(v.cvarLoss>=v.varLoss)});
+test('portfolio shock weights',()=>{a.equal(r.stressPortfolio({BTC:.5,XAU:.5},{BTC:-.2,XAU:.1}).shockReturn,-.05);a.equal(r.stressPortfolio({BTC:.6},{BTC:-.2}).status,'weights_not_normalized')});
+test('walk-forward windows strictly chronological',()=>{const v=r.walkForward(candles,{trainBars:120,testBars:30,stepBars:30});a.equal(v.status,'research_only');a.ok(v.runs.length>0);for(const x of v.runs)a.ok(x.trainTo<x.testFrom)});
+test('missing candle detection',()=>{a.equal(r.validateCandleContinuity(candles,{intervalMs:3600000}).status,'complete');a.equal(r.validateCandleContinuity([...candles.slice(0,20),...candles.slice(21)],{intervalMs:3600000}).status,'gaps_detected')});
