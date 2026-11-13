@@ -9,6 +9,8 @@ on:
       - research/quant-core.cjs
       - research/atlas-intelligence.cjs
       - tests/atlas-intelligence.test.cjs
+      - research/atlas-risk-validation.cjs
+      - tests/atlas-risk-validation.test.cjs
       - .github/workflows/atlas-web-e2e.yml
 permissions:
   contents: read
@@ -22,7 +24,7 @@ jobs:
         with:
           node-version: '22'
       - name: Quantitative engine unit tests (no live trading)
-        run: node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs
+        run: node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs
       - run: npm install --no-save playwright@1.58.2
       - run: npx playwright install --with-deps chromium
       - name: Serve checked-out PWA (avoid GitHub Pages deployment race)
