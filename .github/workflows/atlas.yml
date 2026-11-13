@@ -260,6 +260,65 @@ jobs:
           node --check research/atlas-production-shadow.cjs
           node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs tests/atlas-production-shadow.test.cjs
 
+      - name: Persist CoinGecko top-100 market snapshots (research only)
+        if: steps.gate.outputs.should_run == '1'
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json,os,urllib.request,urllib.error,datetime,time
+          from urllib.parse import urlencode
+          base=os.environ.get('SUPABASE_URL','').rstrip('/')
+          key=os.environ.get('SUPABASE_SERVICE_ROLE_KEY','')
+          if not base or not key:
+              raise RuntimeError('Supabase credentials unavailable')
+          params=urlencode({'vs_currency':'usd','order':'market_cap_desc','per_page':100,'page':1,'sparkline':'false'})
+          cgkey=os.environ.get('COINGECKO_API_KEY','')
+          headers={'Accept':'application/json','User-Agent':'ATLAS-Research/1.0'}
+          host='https://api.coingecko.com/api/v3'
+          if cgkey:
+              headers['x-cg-demo-api-key']=cgkey
+          req=urllib.request.Request(host+'/coins/markets?'+params,headers=headers)
+          with urllib.request.urlopen(req,timeout=30) as response:
+              coins=json.load(response)
+          if not isinstance(coins,list) or len(coins)<50:
+              raise RuntimeError('Incomplete CoinGecko top-100 response')
+          now=datetime.datetime.now(datetime.timezone.utc).isoformat()
+          rows=[]
+          for c in coins:
+              sym=str(c.get('symbol','')).upper()
+              price=c.get('current_price')
+              if not sym or not isinstance(price,(int,float)) or price<=0:
+                  continue
+              rows.append({'captured_at':now,'symbol':sym,'asset':str(c.get('id','')),'price':price,'value':price,
+                'payload':{'source':'coingecko','research_only':True,'market_cap_rank':c.get('market_cap_rank'),
+                'volume_24h':c.get('total_volume'),'change_24h_pct':c.get('price_change_percentage_24h'),
+                'provider_last_updated':c.get('last_updated'),'currency':'USD'}})
+          if len(rows)<40:
+              raise RuntimeError('Too few valid CoinGecko market snapshots')
+          endpoint=base+'/rest/v1/atlas_market_snapshots'
+          auth={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'}
+          post=urllib.request.Request(endpoint,data=json.dumps(rows).encode(),headers=auth,method='POST')
+          with urllib.request.urlopen(post,timeout=30) as response:
+              print('Stored',len(rows),'CoinGecko top-market research snapshots; HTTP',response.status)
+          # CoinMarketCap is an independent cross-check only; never silently replace prices.
+          cmc=os.environ.get('COINMARKETCAP_API_KEY','')
+          if cmc:
+              try:
+                  q=urllib.request.Request('https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?symbol=BTC,ETH&convert=USD',
+                    headers={'X-CMC_PRO_API_KEY':cmc,'Accept':'application/json'})
+                  with urllib.request.urlopen(q,timeout=20) as response:
+                      comparison=json.load(response)
+                  print('CoinMarketCap comparison received:',bool(comparison.get('data')))
+              except Exception as exc:
+                  print('CoinMarketCap validation unavailable:',str(exc)[:180])
+          print('TradingView not used as an unofficial historical API; exchange OHLCV remains separate.')
+          PY
+
       - name: ATLAS live-data research shadow (no Telegram or orders)
         if: steps.gate.outputs.should_run == '1'
         continue-on-error: true
