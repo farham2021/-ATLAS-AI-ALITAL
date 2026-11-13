@@ -56,6 +56,7 @@ for sym,c in valid.items():
         "change_24h_pct":c.get("price_change_percentage_24h_in_currency"),"provider_updated_at":c.get("last_updated"),
         "cmc_price_usd":cp,"cmc_divergence_pct":divergence,
         "cross_source_disagreement":divergence is not None and divergence>5}})
+# Preserve provider provenance; historical OHLCV is backfilled separately.
 insert("atlas_market_snapshots",snapshots)
 print("CoinGecko snapshots stored:",len(snapshots),"CMC matched:",sum(s in cmc_quotes for s in valid))
 # Radar based on observed 1h/24h price changes and volumes, explicitly research-only.
