@@ -43,6 +43,8 @@ jobs:
           for(const id of ['operations','laboratory','metals'])if(!main.includes('id="'+id+'"'))throw Error('missing dashboard section '+id);
           if(!main.includes('labReference')||!main.includes("BASE+'/api/status'"))throw Error('unified integrations missing');
           if(!main.includes('per_page=100&page=1')||!main.includes('labLoadCoinCatalog')||!main.includes('labFallbackSymbols'))throw Error('top 100 coin catalog missing');
+          const labSelect=main.match(/<select id="labSymbol"[^>]*>([^<]*(?:<option[^>]*>[^<]*<\\/option>[^<]*)+)<\\/select>/)?.[1];
+          if(!labSelect||(labSelect.match(/<option /g)||[]).length<50)throw Error('initial crypto menu has fewer than 50 symbols');
           NODE
       - name: Quantitative engine unit tests (no live trading)
         run: node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs
