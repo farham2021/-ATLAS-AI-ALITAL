@@ -237,7 +237,7 @@ function renderIntelligence(){
  if(!intelligence)return;
  const rows=intelligence.radar.filter(r=>$('radarFilter').value==='all'||r.alert_level===$('radarFilter').value);
  if(!rows.length){$('radarRows').replaceChildren(node('p','هیچ رکوردی در جدول رادار ریسک ثبت نشده است. این بخش هنوز داده عملیاتی ندارد؛ ابتدا باید گردآوری قیمت‌ها و محاسبه ریسک در موتور ATLAS فعال و صحت‌سنجی شود.','warn'))}else renderRows('radarRows',rows.slice(0,70),r=>[r.symbol+' · '+r.alert_level+' · '+r.risk_score+'/100',
- (currentLang==='en'?'1h change: ':'تغییر ۱ ساعته: ')+num(r.change_1h_pct)+'% | '+(currentLang==='en'?'24h range: ':'دامنه ۲۴ ساعته: ')+num(r.volatility_24h_pct)+'% | '+fmt(r.captured_at)]);
+ (r.model_version?.includes('historical')?(currentLang==='en'?'Historical daily change (research): ':'تغییر روزانه تاریخی (پژوهشی): ')+num(r.volatility_24h_pct)+'%':(currentLang==='en'?'1h change: ':'تغییر ۱ ساعته: ')+num(r.change_1h_pct)+'% | '+(currentLang==='en'?'24h movement: ':'حرکت ۲۴ ساعته: ')+num(r.volatility_24h_pct)+'%')+' | '+fmt(r.captured_at)]);
  const p=intelligence.performance;
  $('auditStats').replaceChildren(node('div',(currentLang==='en'?'Evaluated signals: ':'سیگنال‌های ارزیابی‌شده: ')+p.evaluated+' | '+(currentLang==='en'?'Directional hit rate: ':'نرخ جهت درست: ')+(p.hit_rate===null?'N/A':(p.hit_rate*100).toFixed(1)+'%')));
  if(!intelligence.signals.length){$('auditRows').replaceChildren(node('p','هنوز هیچ سیگنالی در جدول ارزیابی ثبت نشده است. نرخ موفقیت قابل محاسبه نیست؛ این به معنی صفر بودن عملکرد معاملات نیست.','warn'))}else renderRows('auditRows',intelligence.signals.slice(0,35),x=>[x.symbol+' · '+(x.direction||'—')+' · '+x.status,
