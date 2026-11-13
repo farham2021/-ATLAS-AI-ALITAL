@@ -41,21 +41,28 @@ async function privateRoute(req:Request,url:URL){
  const get=(table:string,query:string)=>readTable(base,key,table+"?"+query);
  const filter="user_id=eq."+encodeURIComponent(userId);
  if(req.method==="GET"){
-  const [holdings,basis,trades,prefs,referrals,memberships,opening]=await Promise.all([
+  const [holdings,basis,trades,prefs,referrals,memberships,opening,language]=await Promise.all([
    get("atlas_desk_holdings",filter+"&select=coin,qty"),
    get("atlas_desk_purchase_basis",filter+"&select=coin,average_buy_price,buy_date,quote_currency"),
    get("atlas_desk_trades",filter+"&select=id,coin,side,qty,unit_price,fee,traded_at&order=traded_at.desc&limit=200"),
    get("atlas_desk_alert_preferences",filter+"&select=symbol,rise_pct,fall_pct,enabled"),
    get("atlas_desk_referrals","inviter_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id&limit=200"),
    get("atlas_desk_memberships",filter+"&select=status,plan,expires_at"),
-   get("atlas_desk_trade_opening",filter+"&select=coin,opening_qty,opening_cost")
+   get("atlas_desk_trade_opening",filter+"&select=coin,opening_qty,opening_cost"),
+   get("atlas_desk_language_preferences",filter+"&select=language")
   ]);
-  return json({user_id:userId,holdings,basis,trades,prefs,opening,membership:memberships[0]||{status:"trial",plan:"free"},referral_count:referrals.length});
+  return json({user_id:userId,holdings,basis,trades,prefs,opening,membership:memberships[0]||{status:"trial",plan:"free"},language:language[0]?.language||"fa",referral_count:referrals.length});
  }
  if(req.method!=="POST")return json({error:"method_not_allowed"},405);
  let body:any;try{body=await req.json()}catch{return json({error:"invalid_json"},400)}
  const action=String(body?.action||""),coin=String(body?.coin||"").toUpperCase();
  if(!/^[A-Z0-9]{2,20}$/.test(coin)&&action!=="referral")return json({error:"invalid_symbol"},400);
+ if(action==="language"){
+  const language=String(body.language||"");
+  if(!["fa","en"].includes(language))return json({error:"invalid_language"},400);
+  await dbWrite(base,key,"atlas_desk_language_preferences","POST",{user_id:userId,language,updated_at:new Date().toISOString()},"?on_conflict=user_id");
+  return json({ok:true,language});
+ }
  if(action==="basis"){
   const price=Number(body.price),date=body.date===null||body.date===""?null:String(body.date||"");
   if(!(price>0&&price<1e12)||date&&!/^\d{4}-\d{2}-\d{2}$/.test(date))return json({error:"invalid_basis"},400);
@@ -94,6 +101,23 @@ Deno.serve(async(req:Request)=>{
  if(req.method!=="GET"&&req.method!=="HEAD")return json({error:"method_not_allowed"},405);
  if(url.pathname.endsWith("/manifest.webmanifest"))return new Response(JSON.stringify({name:"ATLAS AI Dashboard",short_name:"ATLAS",start_url:"./",scope:"./",display:"standalone",background_color:"#091324",theme_color:"#101b32",lang:"fa",dir:"rtl"}),{headers:{"Content-Type":"application/manifest+json","Cache-Control":"public, max-age=3600"}});
 
+
+ if(url.pathname.endsWith("/api/reports")){
+  const cycle=String(url.searchParams.get("cycle")||"").toUpperCase();
+  if(!["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].includes(cycle))return json({error:"invalid_cycle"},400);
+  const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+  if(!base||!key)return json({error:"service_unavailable"},503);
+  try{
+   const runs=await readTable(base,key,"atlas_scheduler_runs?select=cycle,completed_at,status&cycle=eq."+cycle+"&status=eq.DONE&order=completed_at.desc&limit=1");
+   const run=runs[0];if(!run?.completed_at)return json({cycle,run:null,rows:[],source:null});
+   const end=new Date(run.completed_at),start=new Date(end.getTime()-90*60*1000);
+   const table=cycle==="DEEP4H"?"atlas_deep_4h_snapshots":"atlas_hourly_signal_snapshots";
+   const query=table+"?select=symbol,asset_group,direction,confidence,price,captured_at,public_signal,decision_state,opportunity_score&captured_at=gte."+encodeURIComponent(start.toISOString())+"&captured_at=lte."+encodeURIComponent(new Date(end.getTime()+5*60*1000).toISOString())+"&order=captured_at.desc&limit=200";
+   const records=await readTable(base,key,query),seen=new Set<string>();
+   const rows=records.filter((r:any)=>{if(seen.has(r.symbol))return false;seen.add(r.symbol);return true}).slice(0,50);
+   return json({cycle,run,rows,source:table,disclaimer:cycle==="DAILY16"||cycle==="NIGHTLY23"?"snapshot_near_cycle_not_full_report":null});
+  }catch(e){console.error("cycle report unavailable",String(e));return json({error:"report_unavailable"},503)}
+ }
  if(url.pathname.endsWith("/api/overview")){
   const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
   if(!base||!key)return json({error:"service_unavailable"},503);
