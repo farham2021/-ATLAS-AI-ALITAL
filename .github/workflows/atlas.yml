@@ -254,6 +254,21 @@ jobs:
           fi
           python bot.py
 
+      - name: Validate research risk sidecar
+        if: steps.gate.outputs.should_run == '1'
+        run: |
+          node --check research/atlas-production-shadow.cjs
+          node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs tests/atlas-production-shadow.test.cjs
+
+      - name: ATLAS live-data research shadow (no Telegram or orders)
+        if: steps.gate.outputs.should_run == '1'
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ATLAS_RESEARCH_SYMBOLS: XAUUSD,XAGUSD,BTC,ETH
+        run: node research/atlas-production-shadow.cjs
+
       # Normal path: mark DONE with the lease token issued by claim.
       - name: Mark slot complete
         if: success() && steps.gate.outputs.should_run == '1' && steps.gate.outputs.path_kind == 'claimed'
