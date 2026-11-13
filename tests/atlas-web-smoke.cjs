@@ -6,6 +6,7 @@ const { chromium, devices } = require('playwright');
   const context=await browser.newContext(device==='Desktop Chrome'?{viewport:{width:1365,height:900}}:{...devices['iPhone 13']});
   const page=await context.newPage();const errors=[];
   page.on('pageerror',e=>errors.push(e.message));
+  page.on('requestfailed',req=>{if(req.url().includes('/api/metals-analysis'))errors.push('METALS REQUEST '+req.failure()?.errorText+' '+req.url())});
   const url=process.env.ATLAS_TEST_URL||'https://farham2021.github.io/-ATLAS-AI-ALITAL/';
   const response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:45000});
   if(!response?.ok())failures.push(device+' page HTTP '+response?.status());
@@ -18,7 +19,7 @@ const { chromium, devices } = require('playwright');
    await page.locator('#'+button).click();
    await page.waitForTimeout(2500);
    if(!(await page.locator('#'+output).isVisible()))failures.push(device+' hidden '+output);
-   if(tab==='metals'){await page.waitForTimeout(1000);const txt=await page.locator('#metalAnalysis').innerText();if(!txt.includes('XAUUSD')&&!txt.includes('XAGUSD'))failures.push(device+' metals analysis missing selected symbol: '+txt.slice(0,180));}
+   if(tab==='metals'){await page.waitForTimeout(1000);const txt=await page.locator('#metalAnalysis').innerText();if(!txt.includes('XAUUSD')&&!txt.includes('XAGUSD'))failures.push(device+' metals analysis missing selected symbol: '+txt.slice(0,180));if(txt.includes('ناموفق')||txt.includes('unavailable'))failures.push(device+' metals API failed: '+txt.slice(0,200));}
   }
   const api=await page.request.get('https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web/api/us-markets');
   if(!api.ok())failures.push(device+' US API '+api.status());
