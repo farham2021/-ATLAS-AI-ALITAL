@@ -1,0 +1,11 @@
+{
+  "name": "ATLAS AI Dashboard",
+  "short_name": "ATLAS",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#091324",
+  "theme_color": "#101b32",
+  "lang": "fa",
+  "dir": "rtl"
+}
