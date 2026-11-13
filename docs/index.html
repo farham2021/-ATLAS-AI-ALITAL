@@ -357,7 +357,7 @@ function ensureNewsWidget(){
  });return newsWidgetLoader;
 }
 async function renderNewsWidget(id,symbol){
- const target=$(id);if(id==='tvNewsFeed'&&!symbol){target.replaceChildren(node('div',currentLang==='en'?'Select a cryptocurrency to view its TradingView news; broad global stories are hidden.':'برای نمایش اخبار مرتبط TradingView یک ارز انتخاب کنید؛ اخبار عمومی نامرتبط پنهان شده‌اند.','muted'));return}target.replaceChildren(node('div',currentLang==='en'?'Loading TradingView news…':'در حال بارگذاری اخبار TradingView…','muted'));
+ const target=$(id);target.replaceChildren(node('div',currentLang==='en'?'Loading TradingView news…':'در حال بارگذاری اخبار TradingView…','muted'));
  try{
   await ensureNewsWidget();const w=document.createElement('tv-news-feed');
   if(symbol)w.setAttribute('symbol',symbol);
@@ -365,7 +365,7 @@ async function renderNewsWidget(id,symbol){
   w.setAttribute('color-theme','dark');
   w.setAttribute('data-color-theme','dark');
   w.style.colorScheme='dark';
-  w.setAttribute('style','display:block;width:100%;min-height:360px');
+  w.setAttribute('style','display:block;width:100%;min-height:360px;color-scheme:dark;background:#13233b');
   target.replaceChildren(w);
  }catch(e){target.replaceChildren(node('div',currentLang==='en'?'TradingView news unavailable.':'اخبار TradingView در دسترس نیست.','warn'))}
 }
