@@ -30,7 +30,7 @@ async function validateTelegram(initData:string):Promise<string|null>{
  try{const user=JSON.parse(params.get("user")||"{}");return Number.isSafeInteger(user.id)&&user.id>0?String(user.id):null}catch{return null}
 }
 async function dbWrite(base:string,key:string,table:string,method:string,payload:unknown,query=""){
- const res=await fetch(base+"/rest/v1/"+table+query,{method,headers:{"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json","Prefer":"return=representation"},body:JSON.stringify(payload),signal:AbortSignal.timeout(9000)});
+ const res=await fetch(base+"/rest/v1/"+table+query,{method,headers:{"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=representation"},body:JSON.stringify(payload),signal:AbortSignal.timeout(9000)});
  if(!res.ok)throw Error("database write unavailable");return res.json();
 }
 async function privateRoute(req:Request,url:URL){
