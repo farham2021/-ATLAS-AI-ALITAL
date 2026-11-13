@@ -2,7 +2,7 @@
 :root{font-family:system-ui,-apple-system,sans-serif;background:#081120;color:#eaf3ff}*{box-sizing:border-box}body{margin:0;background:linear-gradient(155deg,#132b4c,#081120 45%);min-height:100vh}main{max-width:1200px;margin:auto;padding:20px 16px 80px}header{display:flex;justify-content:space-between;align-items:center;gap:12px}h1{font-size:25px;margin:5px 0}h2{font-size:18px;margin:0 0 15px}.muted,small{color:#a4b7d2}nav{display:flex;gap:8px;overflow-x:auto;padding:18px 0}button,select,input{font:inherit}button{border:1px solid #385475;border-radius:11px;background:#172b45;color:#e9f4ff;padding:10px 15px;cursor:pointer;white-space:nowrap}button.active,.primary{background:#1680bb;border-color:#1680bb}button:focus-visible{outline:2px solid #fff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#13233b;border:1px solid #29425e;border-radius:16px;padding:17px;margin:0 0 13px}.metric{font-size:25px;font-weight:750;margin:8px 0}.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #29415a}.row:last-child{border:0}.tag{background:#1e405b;border-radius:7px;padding:5px 8px;font-size:12px}.up{color:#65d7ab}.down{color:#ff969d}.warn{color:#ffcc8b}select,input{background:#0d1a2c;border:1px solid #3d5d7e;border-radius:10px;color:#fff;padding:10px;max-width:100%}.controls{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:15px}section[hidden]{display:none}#notice{color:#ffca99;min-height:20px}.empty{color:#a4b7d2;padding:16px 0}footer{color:#9fb2cc;font-size:12px;line-height:1.8;margin-top:18px}@media(max-width:480px){h1{font-size:20px}main{padding:15px 12px 75px}}
 </style></head><body><main><header><div><strong style="color:#77d8ff;letter-spacing:2px">ATLAS AI</strong><h1>میز کار هوشمند سرمایه‌گذاری</h1><small>کریپتو · بورس ایران · فرصت‌ها · هشدارها</small></div><button id="refresh">↻ بروزرسانی</button></header><nav id="nav" aria-label="بخش‌های برنامه"></nav><div id="notice" role="alert"></div>
 <section id="home"><div class="grid" id="metrics"></div><div class="grid"><article class="card"><h2>آخرین چرخه‌های تحلیل</h2><div id="cycles"></div></article><article class="card"><h2>آخرین هشدارها</h2><div id="latest"></div></article></div></section>
-<section id="portfolio" hidden><article class="card"><h2>💼 سبد اختصاصی و سود و زیان</h2><div id="loginState">برای نمایش دارایی‌های شخصی، این صفحه را از دکمه «اپلیکیشن ATLAS» داخل بات تلگرام باز کنید.</div><div id="holdings"></div></article><article class="card"><h2>ثبت مبنای خرید</h2><div class="controls"><input id="basisCoin" placeholder="BTC" maxlength="20"><input id="basisPrice" type="number" min="0" step="any" placeholder="قیمت خرید USD"><input id="basisDate" type="date"><button id="saveBasis">ذخیره</button></div></article><article class="card"><h2>ثبت تراکنش در دفتر مستقل</h2><div class="controls"><select id="tradeSide"><option value="BUY">خرید</option><option value="SELL">فروش</option></select><input id="tradeCoin" placeholder="BTC" maxlength="20"><input id="tradeQty" type="number" min="0" step="any" placeholder="مقدار"><input id="tradePrice" type="number" min="0" step="any" placeholder="قیمت واحد USD"><button id="saveTrade">ثبت تراکنش</button></div><small>این دفتر فعلاً موجودی‌های قبلی را تغییر نمی‌دهد؛ تطبیق حساب ضروری است.</small><div id="trades"></div></article></section>
+<section id="portfolio" hidden><article class="card"><h2>💼 سبد اختصاصی و سود و زیان</h2><div id="loginState">برای نمایش دارایی‌های شخصی، این صفحه را از دکمه «اپلیکیشن ATLAS» داخل بات تلگرام باز کنید.</div><div id="holdings"></div></article><article class="card"><h2>ثبت مبنای خرید</h2><div class="controls"><input id="basisCoin" placeholder="BTC" maxlength="20"><input id="basisPrice" type="number" min="0" step="any" placeholder="قیمت خرید USD"><input id="basisDate" type="date"><button id="saveBasis">ذخیره</button></div></article><article class="card"><h2>ثبت تراکنش در دفتر مستقل</h2><div class="controls"><select id="tradeSide"><option value="BUY">خرید</option><option value="SELL">فروش</option></select><input id="tradeCoin" placeholder="BTC" maxlength="20"><input id="tradeQty" type="number" min="0" step="any" placeholder="مقدار"><input id="tradePrice" type="number" min="0" step="any" placeholder="قیمت واحد USD"><button id="saveTrade">ثبت تراکنش</button></div><small>ثبت معامله به‌صورت اتمیک موجودی را بروزرسانی می‌کند. مبنای دارایی تاریخی محفوظ می‌ماند.</small><div id="trades"></div></article></section>
 <section id="crypto" hidden><article class="card"><h2>📈 تحلیل رمزارزها</h2><div class="controls"><select id="coin"></select><select id="tf"><option value="1h">۱ ساعت</option><option value="4h">۴ ساعت</option><option value="12h">۱۲ ساعت</option><option value="24h">۲۴ ساعت</option><option value="1w">یک هفته</option><option value="1mo">یک ماه</option></select><button class="primary" id="analyze">تحلیل</button></div><div id="analysis"></div></article><article class="card"><h2>آخرین قیمت‌های ذخیره‌شده</h2><div id="cryptolist"></div></article></section>
 <section id="iran" hidden><article class="card"><h2>🇮🇷 بورس و صندوق‌های ایران</h2><div class="controls"><select id="iranSymbol"></select><button class="primary" id="iranAnalyze">بررسی نماد</button></div><div id="iranAnalysis"></div></article><article class="card"><h2>تابلوی ایران</h2><div id="iranlist"></div></article></section>
 <section id="alerts" hidden><article class="card"><h2>🔔 هشدارهای صعود و ریزش</h2><p class="muted">هشدارهای ثبت‌شده در موتور ATLAS؛ وضعیت SENT به‌تنهایی تحویل به کاربر را اثبات نمی‌کند.</p><div id="allalerts"></div><article class="card"><h2>تنظیم هشدار شخصی</h2><div class="controls"><input id="alertCoin" placeholder="BTC"><input id="risePct" type="number" step="any" min="0" max="100" placeholder="رشد ٪"><input id="fallPct" type="number" step="any" min="0" max="100" placeholder="ریزش ٪"><button id="saveAlert">ذخیره هشدار</button></div><small>ذخیره تنظیم فعال است؛ اتصال به موتور ارسال خودکار هنوز در دست تکمیل است.</small></article><p>برای تنظیم آستانه شخصی در تلگرام: <code>/watch BTC fall 5</code> یا <code>/watch BTC rise 5</code></p><small>اتصال آستانه‌های شخصی به ارسال خودکار هنوز کامل نیست.</small></article></section>
@@ -35,19 +35,38 @@ async function privateRequest(body){
  const r=await fetch(BASE+"/api/private",{method:body?"POST":"GET",headers:{"X-Telegram-Init-Data":initData,"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined,cache:"no-store"});
  const d=await r.json();if(!r.ok)throw Error(d.error||"خطای سرویس");return d;
 }
+
+function computeTradePnL(trades,opening){
+ const grouped=new Map(),unknown=new Set();
+ for(const x of opening||[])if(Number(x.opening_qty)>0)unknown.add(x.coin);
+ const ordered=[...trades].sort((a,b)=>new Date(a.traded_at)-new Date(b.traded_at)||a.id-b.id);
+ for(const t of ordered){
+  let item=grouped.get(t.coin);if(!item){item={lots:[],realized:0,unverified:0};grouped.set(t.coin,item)}
+  let qty=Number(t.qty),price=Number(t.unit_price),fee=Number(t.fee||0);
+  if(t.side==='BUY'){item.lots.push({qty,cost:price+fee/qty});continue}
+  let remaining=qty;
+  for(const lot of item.lots){const used=Math.min(remaining,lot.qty);if(used<=0)continue;item.realized+=used*(price-lot.cost)-fee*used/qty;lot.qty-=used;remaining-=used;if(remaining<1e-9)break}
+  if(remaining>1e-9)item.unverified+=remaining;
+ }
+ return grouped;
+}
 async function privateLoad(){
  if(!initData)return;
  try{
   const d=await privateRequest();privateState=d;
   $('loginState').textContent="ورود تأییدشده تلگرام | شناسه کاربر "+d.user_id;
   const basis=new Map(d.basis.map(x=>[x.coin,x])),prices=new Map((state.crypto||[]).map(x=>[x.symbol,Number(x.price)]));
-  const total=d.holdings.reduce((n,x)=>n+(Number.isFinite(prices.get(x.coin))?Number(x.qty)*prices.get(x.coin):0),0);
+  const pnl=computeTradePnL(d.trades,d.opening);const total=d.holdings.reduce((n,x)=>n+(Number.isFinite(prices.get(x.coin))?Number(x.qty)*prices.get(x.coin):0),0);
   renderRows('holdings',d.holdings,x=>{
    const price=prices.get(x.coin),buy=Number(basis.get(x.coin)?.average_buy_price),valid=Number.isFinite(price)&&price>0;
    const pct=valid&&buy>0?(price/buy-1)*100:null;
    const weight=valid&&total>0?(100*Number(x.qty)*price/total).toFixed(1)+'٪':'—';
    return [x.coin+' · '+num(x.qty)+' واحد · قیمت '+(valid?num(price):'ناموجود'),'وزن '+weight+' | سود/زیان '+(pct===null?'مبنای خرید ناموجود':pct.toFixed(2)+'٪'),pct===null?'':pct>=0?'up':'down'];
   });
+  const pnlNote=document.createElement('div');pnlNote.className='muted';pnlNote.textContent='سود تحقق‌یافته صرفاً از معاملات جدید با مبنای خرید قابل‌ردیابی محاسبه می‌شود؛ فروش دارایی‌های قدیمی بدون مبنای خرید قطعی محسوب نمی‌شود.';$('holdings').append(pnlNote);
+  const realized=[...pnl.entries()].map(([coin,x])=>coin+': '+num(x.realized)+' USD'+(x.unverified>0?' | مقدار بدون مبنای خرید: '+num(x.unverified):'')).join(' · ');
+  const realizedNode=document.createElement('div');realizedNode.className='row';realizedNode.textContent='سود تحقق‌یافته دفتر جدید: '+(realized||'هنوز معامله‌ای ثبت نشده');$('holdings').append(realizedNode);
+  const member=document.createElement('div');member.className='muted';member.textContent='وضعیت عضویت: '+d.membership.status+' | طرح: '+d.membership.plan;$('loginState').append(member);
   renderRows('trades',d.trades.slice(0,15),x=>[x.coin+' · '+x.side+' · '+num(x.qty),num(x.unit_price)+' USD · '+fmt(x.traded_at)]);
   $('referrals').textContent='دعوت‌های ثبت‌شده: '+d.referral_count;
  }catch(e){$('loginState').textContent='دسترسی به اطلاعات خصوصی: '+String(e.message||e)}
