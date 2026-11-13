@@ -69,7 +69,7 @@ for sym,c in valid.items():
     vol=abs(h24) if h24 is not None else abs(h1)
     score=min(100,round(abs(h1 or 0)*7+abs(h24 or 0)*3,2))
     if (h24 or 0)<-5 or (h1 or 0)<-2:level="high"
-    elif score>=35:level="medium"
+    elif score>=35:level="moderate"
     else:level="low"
     radar.append({"symbol":sym,"asset_group":"crypto","captured_at":stamp,"price":p,
         "change_1h_pct":h1,"volatility_24h_pct":vol,"risk_score":score,
