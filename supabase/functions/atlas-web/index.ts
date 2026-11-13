@@ -125,8 +125,8 @@ Deno.serve(async(req:Request)=>{
 
 
  if(url.pathname.endsWith("/api/us-markets")){
-  const symbols=["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","AMEX:SPY","NASDAQ:QQQ","AMEX:DIA","AMEX:IWM","AMEX:GLD","AMEX:SLV","AMEX:TLT","TVC:SPX","NASDAQ:NDX","TVC:DJI","TVC:VIX","TVC:DXY","CME_MINI:ES1!","CME_MINI:NQ1!"];
-  return json({market:"US",source:"TradingView external charts",symbols,mode:"external_chart",notice:"Quotes and trading hours are provided by the external chart provider, not ATLAS."});
+  const groups={indices:["TVC:SPX","NASDAQ:NDX","TVC:DJI","TVC:VIX","TVC:DXY"],mega_cap:["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","NASDAQ:AVGO","NASDAQ:AMD","NYSE:BRK.B","NYSE:JPM","NYSE:V","NYSE:UNH"],etfs:["AMEX:SPY","NASDAQ:QQQ","AMEX:DIA","AMEX:IWM","AMEX:GLD","AMEX:SLV","NASDAQ:TLT","AMEX:XLF","AMEX:XLK","AMEX:XLE","AMEX:XLV"],futures:["CME_MINI:ES1!","CME_MINI:NQ1!","CBOT_MINI:YM1!"]};const symbols=Object.values(groups).flat();
+  return json({market:"US",source:"TradingView external charts",symbols,groups,session_timezone:"America/New_York",regular_session:"09:30–16:00 ET, weekdays excluding exchange holidays",quotes:"provider-dependent, may be delayed",mode:"external_chart",notice:"Quotes and trading hours are provided by the external chart provider, not ATLAS."});
  }
  if(url.pathname.endsWith("/api/crypto-news")){
   const requested=String(url.searchParams.get("symbol")||"").toUpperCase().trim();
