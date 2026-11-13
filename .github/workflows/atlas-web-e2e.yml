@@ -10,14 +10,14 @@ permissions:
   contents: read
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm install --no-save playwright
+      - run: npm install --no-save playwright@1.58.2
       - run: npx playwright install --with-deps chromium
       - name: Serve checked-out PWA (avoid GitHub Pages deployment race)
         run: python3 -m http.server 8765 --directory docs > /tmp/atlas-web-http.log 2>&1 &
