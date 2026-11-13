@@ -138,7 +138,7 @@ Deno.serve(async(req:Request)=>{
    if(!res.ok)throw Error("feed_unavailable");
    const xml=await res.text();
    const decode=(v:string)=>v.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").trim();
-   const field=(item:string,name:string)=>decode(item.match(new RegExp("<"+name+"(?:\\\\s[^>]*)?>([\\\\s\\\\S]*?)</"+name+">","i"))?.[1]||"");
+   const field=(item:string,name:string)=>decode(item.match(new RegExp("<"+name+"[^>]*>([^]*?)</"+name+">","i"))?.[1]||"");
    const items=[...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0,20).map(m=>{
     const raw=m[1],link=field(raw,"link"),title=field(raw,"title"),published=field(raw,"pubDate"),source=field(raw,"source");
     return {title,link:link.startsWith("https://")?link:null,published,source,impact:"unverified",language:"en"};
