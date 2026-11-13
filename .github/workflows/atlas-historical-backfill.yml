@@ -1,0 +1,29 @@
+name: ATLAS Historical Market Backfill
+on:
+  schedule:
+    - cron: '37 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: atlas-historical-market-backfill
+  cancel-in-progress: false
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile backfill script
+        run: python -m py_compile research/atlas-historical-backfill.py
+      - name: Backfill closed daily historical prices
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          ATLAS_HISTORY_DAYS: '120'
+          ATLAS_HISTORY_SYMBOLS: '40'
+        run: python research/atlas-historical-backfill.py
