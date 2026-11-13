@@ -123,6 +123,29 @@ Deno.serve(async(req:Request)=>{
 
 
 
+
+ if(url.pathname.endsWith("/api/us-markets")){
+  const symbols=["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","AMEX:SPY","NASDAQ:QQQ","AMEX:DIA","AMEX:IWM","AMEX:GLD","AMEX:SLV","AMEX:TLT","TVC:SPX","NASDAQ:NDX","TVC:DJI","TVC:VIX","TVC:DXY","CME_MINI:ES1!","CME_MINI:NQ1!"];
+  return json({market:"US",source:"TradingView external charts",symbols,mode:"external_chart",notice:"Quotes and trading hours are provided by the external chart provider, not ATLAS."});
+ }
+ if(url.pathname.endsWith("/api/crypto-news")){
+  const requested=String(url.searchParams.get("symbol")||"").toUpperCase().trim();
+  if(requested&&!/^[A-Z0-9]{2,15}$/.test(requested))return json({error:"invalid_symbol"},400);
+  const query=requested?requested+" cryptocurrency crypto market":"bitcoin ethereum crypto market SEC Federal Reserve ETF";
+  const rss="https://news.google.com/rss/search?q="+encodeURIComponent(query)+"&hl=en-US&gl=US&ceid=US:en";
+  try{
+   const res=await fetch(rss,{headers:{"User-Agent":"ATLAS-NewsReader/1.0"},signal:AbortSignal.timeout(7000)});
+   if(!res.ok)throw Error("feed_unavailable");
+   const xml=await res.text();
+   const decode=(v:string)=>v.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").trim();
+   const field=(item:string,name:string)=>decode(item.match(new RegExp("<"+name+"(?:\\\\s[^>]*)?>([\\\\s\\\\S]*?)</"+name+">","i"))?.[1]||"");
+   const items=[...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0,20).map(m=>{
+    const raw=m[1],link=field(raw,"link"),title=field(raw,"title"),published=field(raw,"pubDate"),source=field(raw,"source");
+    return {title,link:link.startsWith("https://")?link:null,published,source,impact:"unverified",language:"en"};
+   }).filter(x=>x.title&&x.link);
+   return json({symbol:requested||null,source:"Google News RSS",items,impact_note:"Keyword-matched headlines; market impact has not been verified.",fetched_at:new Date().toISOString()});
+  }catch(e){console.error("news source unavailable",String(e));return json({symbol:requested||null,items:[],error:"news_feed_temporarily_unavailable",fetched_at:new Date().toISOString()},503)}
+ }
  if(url.pathname.endsWith("/api/futures")){
   const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
   if(!base||!key)return json({error:"service_unavailable"},503);
