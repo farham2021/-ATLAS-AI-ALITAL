@@ -37,7 +37,7 @@ for c in coins:
     if prior:
         try:
             age=(now-datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))).total_seconds()
-            if age<40*3600:continue
+            latest_prior=datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))\n            if age<40*3600:continue
         except Exception:pass
     pair=sym+"USDT"
     url="https://api.binance.com/api/v3/klines?"+urllib.parse.urlencode({"symbol":pair,"interval":"1d","limit":DAYS+2})
@@ -49,13 +49,13 @@ for c in coins:
             opened=datetime.datetime.fromtimestamp(int(k[0])/1000,datetime.timezone.utc)
             closed=datetime.datetime.fromtimestamp(int(k[6])/1000,datetime.timezone.utc)
             price=float(k[4]);volume=float(k[5])
-            if closed>=now or price<=0 or not math.isfinite(price) or volume<0:continue
+            if (latest_prior and closed<=latest_prior) or closed>=now or price<=0 or not math.isfinite(price) or volume<0:continue
             rows.append({"captured_at":closed.isoformat(),"symbol":sym,"asset":c.get("id"),"price":price,"value":price,
                 "payload":{"source":"binance_daily_ohlcv","research_only":True,"exchange":"Binance",
                 "pair":pair,"quote_currency":"USDT","interval":"1d","open":float(k[1]),"high":float(k[2]),
                 "low":float(k[3]),"close":price,"base_volume":volume,"open_at":opened.isoformat(),
                 "closed_candle":True,"coin_gecko_rank":c.get("market_cap_rank")}})
-        if len(rows)<30:raise ValueError("too few closed candles")
+        if not rows:continue
         post(rows);done+=1;stored+=len(rows)
     except Exception as e:errors.append(pair+":"+str(e)[:70])
     time.sleep(.12)
