@@ -336,7 +336,7 @@ $('usChartBtn').onclick=showUsChart;loadUs();
 async function loadCryptoNews(){
  const list=$('newsRows');list.replaceChildren(node('div',currentLang==='en'?'Loading headlines…':'در حال دریافت تیترها…'));
  try{
- const res=await fetch(BASE+'/api/crypto-news?symbol='+encodeURIComponent($('newsSymbol').value),{cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);
+ const res=await fetch(BASE+'/api/crypto-news?symbol='+encodeURIComponent($('newsSymbol').value),{cache:'no-store'});if(!res.ok){if(res.status===503){list.replaceChildren(node('div',currentLang==='en'?'News provider temporarily unavailable. Select a coin to see related TradingView news.':'منبع خبر موقتاً در دسترس نیست. برای دیدن اخبار مرتبط TradingView یک ارز انتخاب کنید.','warn'));return}throw Error('HTTP '+res.status)}
  const data=await res.json();list.replaceChildren();
  if(!data.items?.length){list.append(node('div',currentLang==='en'?'No headlines found.':'تیتر خبری یافت نشد.'));return}
  for(const x of data.items){const div=node('div','','row');const a=document.createElement('a');a.textContent=x.title;a.href=x.link;a.target='_blank';a.rel='noopener noreferrer';a.style.color='#9de0ff';div.append(a,node('small',(x.source||'Google News')+' · '+x.published));list.append(div)}
@@ -353,10 +353,11 @@ function ensureNewsWidget(){
  });return newsWidgetLoader;
 }
 async function renderNewsWidget(id,symbol){
- const target=$(id);target.replaceChildren(node('div',currentLang==='en'?'Loading TradingView news…':'در حال بارگذاری اخبار TradingView…','muted'));
+ const target=$(id);if(id==='tvNewsFeed'&&!symbol){target.replaceChildren(node('div',currentLang==='en'?'Select a cryptocurrency to view its TradingView news; broad global stories are hidden.':'برای نمایش اخبار مرتبط TradingView یک ارز انتخاب کنید؛ اخبار عمومی نامرتبط پنهان شده‌اند.','muted'));return}target.replaceChildren(node('div',currentLang==='en'?'Loading TradingView news…':'در حال بارگذاری اخبار TradingView…','muted'));
  try{
   await ensureNewsWidget();const w=document.createElement('tv-news-feed');
   if(symbol)w.setAttribute('symbol',symbol);
+  w.setAttribute('theme','dark');
   w.setAttribute('style','display:block;width:100%;min-height:360px');
   target.replaceChildren(w);
  }catch(e){target.replaceChildren(node('div',currentLang==='en'?'TradingView news unavailable.':'اخبار TradingView در دسترس نیست.','warn'))}
