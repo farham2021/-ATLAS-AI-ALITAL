@@ -124,6 +124,37 @@ Deno.serve(async(req:Request)=>{
 
 
 
+
+ if(url.pathname.endsWith("/api/metals-analysis")){
+  const symbol=String(url.searchParams.get("symbol")||"XAUUSD").toUpperCase();
+  if(!["XAUUSD","XAGUSD","COPPER","SILVER999_FAIR","GOLD18","COIN_EMAMI"].includes(symbol))return json({error:"unsupported_metal"},400);
+  const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+  if(!base||!key)return json({error:"service_unavailable"},503);
+  try{
+   const filter="symbol=eq."+encodeURIComponent(symbol);
+   const [market,mtf]=await Promise.all([
+    readTable(base,key,"atlas_market_snapshots?select=symbol,price,captured_at&"+filter+"&order=captured_at.desc&limit=250"),
+    readTable(base,key,"atlas_mtf_snapshots?select=symbol,timestamp,direction,h1,h4,d1,w1,agreement_pct&"+filter+"&order=timestamp.desc&limit=1")
+   ]);
+   const points=market.filter((r:any)=>Number.isFinite(Number(r.price))&&Number(r.price)>0).map((r:any)=>({price:Number(r.price),time:Date.parse(r.captured_at)})).filter((r:any)=>Number.isFinite(r.time));
+   const newest=points[0],oldest=points.at(-1),hours=points.length>1?(newest.time-oldest.time)/3600000:0;
+   const changes=[1,4,12,24,168].map(h=>{
+    if(!newest)return {hours:h,status:"no_data"};
+    const target=newest.time-h*3600000;
+    const candidate=points.filter((r:any)=>r.time<=target).sort((a:any,b:any)=>b.time-a.time)[0];
+    if(!candidate||newest.time-candidate.time>h*3600000+Math.max(3600000,h*3600000*.35))return {hours:h,status:"insufficient_history"};
+    const changePct=(newest.price/candidate.price-1)*100;
+    return {hours:h,status:"observed",change_pct:Math.round(changePct*1000)/1000,
+      direction:changePct>.15?"up":changePct<-.15?"down":"flat",reference_at:new Date(candidate.time).toISOString()};
+   });
+   const lastMtf=mtf[0]||null;
+   return json({symbol,latest_price:newest?.price??null,latest_at:newest?new Date(newest.time).toISOString():null,
+    sample_count:points.length,coverage_hours:Math.round(hours*10)/10,changes,mtf:lastMtf,
+    stale:!newest||Date.now()-newest.time>4*3600000,method:"Observed price changes, not a technical-indicator forecast",
+    unit:symbol==="COPPER"?"USD/lb (futures proxy)":symbol==="XAUUSD"?"USD/troy oz":symbol==="XAGUSD"?"USD/troy oz":symbol==="SILVER999_FAIR"?"IRR or Toman per stored source metadata (verify source)": "source-dependent",
+    disclaimer:"Insufficient time-series history is never replaced by fabricated multi-timeframe indicators."});
+  }catch(e){console.error("metal analysis unavailable",String(e));return json({error:"metals_analysis_unavailable"},503)}
+ }
  if(url.pathname.endsWith("/api/us-markets")){
   const groups={indices:["TVC:SPX","NASDAQ:NDX","TVC:DJI","TVC:VIX","TVC:DXY"],mega_cap:["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","NASDAQ:AVGO","NASDAQ:AMD","NYSE:BRK.B","NYSE:JPM","NYSE:V","NYSE:UNH"],etfs:["AMEX:SPY","NASDAQ:QQQ","AMEX:DIA","AMEX:IWM","AMEX:GLD","AMEX:SLV","NASDAQ:TLT","AMEX:XLF","AMEX:XLK","AMEX:XLE","AMEX:XLV"],futures:["CME_MINI:ES1!","CME_MINI:NQ1!","CBOT_MINI:YM1!"]};const symbols=Object.values(groups).flat();
   return json({market:"US",source:"TradingView external charts",symbols,groups,session_timezone:"America/New_York",regular_session:"09:30–16:00 ET, weekdays excluding exchange holidays",quotes:"provider-dependent, may be delayed",mode:"external_chart",notice:"Quotes and trading hours are provided by the external chart provider, not ATLAS."});
