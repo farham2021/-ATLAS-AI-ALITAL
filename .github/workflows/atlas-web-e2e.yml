@@ -1,0 +1,28 @@
+name: ATLAS Web E2E Smoke (desktop + mobile)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - docs/index.html
+      - tests/atlas-web-smoke.cjs
+      - .github/workflows/atlas-web-e2e.yml
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save playwright@1.58.2
+      - run: npx playwright install --with-deps chromium
+      - run: node tests/atlas-web-smoke.cjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-web-smoke-screenshots
+          path: atlas-*.png
+          if-no-files-found: ignore
