@@ -109,16 +109,71 @@ const EN={
 'ارسال هشدار به‌صورت دوره‌ای اجرا می‌شود؛ تحویل واقعی به وضعیت سرویس وابسته است.':'Automated alert delivery is not yet fully verified.'
 };
 let currentLang='fa';const originalText=new WeakMap(),originalPlaceholders=new WeakMap();
+
+const DYNAMIC_EN={
+'وضعیت موتور':'Engine status','فعال':'Active','تعداد هشدارهای نمایشی':'Displayed alerts','نمادهای کریپتو':'Crypto assets','نمادهای بورس ایران':'Iran market assets',
+'قیمت ذخیره‌شده':'Saved price','قیمت ثبت‌شده':'Recorded price','روند':'Trend','هم‌سویی چندبازه‌ای':'Multi-timeframe alignment',
+'زمان ثبت':'Recorded at','آخرین ثبت':'Last recorded','داده موجود نیست':'No data available',
+'داده تحلیلی موجود نیست':'No analysis available','داده مستقیم این بازه موجود نیست':'No direct data for this timeframe',
+'داده مستقیم این بازه هنوز موجود نیست':'No direct data for this timeframe',
+'اطمینان':'Confidence','قیمت':'Price','ورود':'Entry','حدضرر':'Stop loss','هدف':'Target',
+'سود تحقق‌یافته دفتر جدید':'Realized P&L (new ledger)','هنوز معامله‌ای ثبت نشده':'No transactions recorded',
+'مقدار بدون مبنای خرید':'Quantity without verified cost basis','وزن':'Weight','سود/زیان':'Profit/Loss',
+'مبنای خرید ناموجود':'Cost basis unavailable','واحد':'units','وضعیت عضویت':'Membership status','طرح':'Plan',
+'ورود تأییدشده تلگرام':'Verified Telegram login','شناسه کاربر':'User ID','دسترسی به اطلاعات خصوصی':'Private data access',
+'لینک کپی شد.':'Link copied.','لینک دعوت':'Invite link','خطا در دریافت داده':'Data retrieval failed',
+'اطلاعات ثبت شد.':'Saved successfully.','دعوت‌های ثبت‌شده':'Registered referrals',
+'آخرین اجرای موفق':'Latest successful run','در حال دریافت گزارش…':'Loading report…',
+'رکورد تحلیلی مرتبط با این اجرا یافت نشد.':'No analytical records found for this run.',
+'خطای گزارش':'Report error','این‌ها رکوردهای تحلیلی نزدیک به زمان چرخه هستند، نه متن کامل گزارش اصلی.':'These are snapshots near the cycle, not the complete original report.',
+'داده‌ای برای نمایش موجود نیست':'No data available',
+'فولاد':'Foolad','فملی':'National Copper','شستا':'SHASTA','خودرو':'Khodro','خساپا':'Khasapa',
+'طلا':'Gold','نقره':'Silver','مس':'Copper','سکه':'Gold coin','دلار':'Dollar','تتر':'Tether',
+'صعودی':'Bullish','نزولی':'Bearish','خنثی':'Neutral','خرید':'Buy','فروش':'Sell',
+'انتظار':'Wait','رشد':'Rise','ریزش':'Fall','بالا':'Up','پایین':'Down',
+'بله':'Yes','خیر':'No','نامشخص':'Unknown','ناموجود':'Unavailable',
+'هشدار':'Alert','پایگاه داده':'Database','داده':'Data',
+'قیمت خرید':'Purchase price','تاریخ':'Date','ثبت':'Recorded',
+'این قابلیت فقط در مینی‌اپ تأییدشده تلگرام فعال است.':'This feature is available only in the verified Telegram Mini App.',
+'سود تحقق‌یافته صرفاً از معاملات جدید با مبنای خرید قابل‌ردیابی محاسبه می‌شود؛ فروش دارایی‌های قدیمی بدون مبنای خرید قطعی محسوب نمی‌شود.':'Realized P&L uses traceable cost basis. Legacy sales without a verified cost basis are excluded.',
+'در این نسخه، دارایی‌های خصوصی بدون ورود تأییدشده قابل نمایش نیستند.':'Private holdings require verified authentication.'
+};
+const faChars=/[\u0600-\u06FF]/;
+const transPairs=Object.entries({...EN,...DYNAMIC_EN}).sort((a,b)=>b[0].length-a[0].length);
+function translateValue(input){
+ const original=String(input??'');
+ if(currentLang!=='en'||!faChars.test(original))return original;
+ let value=original;
+ for(const [fa,en] of transPairs)if(value.includes(fa))value=value.split(fa).join(en);
+ value=value.replace(/[۰-۹]/g,x=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(x))).replace(/[٠-٩]/g,x=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(x))).replace(/٪/g,'%').replace(/،/g,',').replace(/؛/g,';');
+ // Never show untranslated Persian fragments in English mode. Unsupported labels are explicit, not silently mixed-language.
+ value=value.replace(/[\u0600-\u06FF]+(?:[‌\s]+[\u0600-\u06FF]+)*/g,'[translation unavailable]');
+ return value;
+}
 function translateUI(){
  document.documentElement.lang=currentLang;document.documentElement.dir=currentLang==='fa'?'rtl':'ltr';
  const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
- while(walk.nextNode()){const n=walk.currentNode;if(n.parentElement?.closest('script,style'))continue;
+ while(walk.nextNode()){
+  const n=walk.currentNode;if(n.parentElement?.closest('script,style'))continue;
   if(!originalText.has(n))originalText.set(n,n.textContent);
-  const orig=originalText.get(n);if(orig.trim() in EN){const before=orig.match(/^\s*/)[0],after=orig.match(/\s*$/)[0];n.textContent=before+(currentLang==='en'?EN[orig.trim()]:orig.trim())+after}
+  n.textContent=translateValue(originalText.get(n));
  }
- document.querySelectorAll('input[placeholder]').forEach(el=>{if(!originalPlaceholders.has(el))originalPlaceholders.set(el,el.placeholder);const x=originalPlaceholders.get(el);el.placeholder=currentLang==='en'?(EN[x]||x):x});
- document.querySelectorAll('#nav button').forEach(b=>{const x=tabs.find(z=>z[0]===b.dataset.tab);if(x)b.textContent=currentLang==='en'?(EN[x[1]]||x[1]):x[1]});
+ document.querySelectorAll('input[placeholder]').forEach(el=>{if(!originalPlaceholders.has(el))originalPlaceholders.set(el,el.placeholder);el.placeholder=translateValue(originalPlaceholders.get(el))});
+ document.querySelectorAll('#nav button').forEach(b=>{const x=tabs.find(z=>z[0]===b.dataset.tab);if(x)b.textContent=translateValue(x[1])});
 }
+const observer=new MutationObserver(changes=>{
+ if(currentLang!=='en')return;
+ for(const change of changes){
+  if(change.type==='childList'){
+   for(const child of change.addedNodes){
+    if(child.nodeType===Node.TEXT_NODE){if(!originalText.has(child))originalText.set(child,child.textContent);const translated=translateValue(originalText.get(child));if(child.textContent!==translated)child.textContent=translated}
+    else if(child.nodeType===Node.ELEMENT_NODE&&!child.closest('script,style')){const walker=document.createTreeWalker(child,NodeFilter.SHOW_TEXT);while(walker.nextNode()){const n=walker.currentNode;if(!originalText.has(n))originalText.set(n,n.textContent);const v=translateValue(originalText.get(n));if(n.textContent!==v)n.textContent=v}}
+   }
+  }
+  if(change.type==='characterData'){const n=change.target;if(n.parentElement?.closest('script,style'))continue;const v=translateValue(n.textContent);if(v!==n.textContent){originalText.set(n,n.textContent);n.textContent=v}}
+ }
+});
+observer.observe(document.body,{subtree:true,childList:true,characterData:true});
 function setLang(lang,persist=true){currentLang=lang==='en'?'en':'fa';$('language').value=currentLang;try{localStorage.setItem('atlas_language',currentLang)}catch{}translateUI();if(persist&&initData)privateRequest({action:'language',language:currentLang}).catch(()=>{});}
 $('language').onchange=()=>setLang($('language').value);
 try{setLang(localStorage.getItem('atlas_language')||'fa',false)}catch{setLang('fa',false)}
