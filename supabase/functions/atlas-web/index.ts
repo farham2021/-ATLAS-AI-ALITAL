@@ -56,7 +56,7 @@ async function privateRoute(req:Request,url:URL){
  if(req.method!=="POST")return json({error:"method_not_allowed"},405);
  let body:any;try{body=await req.json()}catch{return json({error:"invalid_json"},400)}
  const action=String(body?.action||""),coin=String(body?.coin||"").toUpperCase();
- if(!/^[A-Z0-9]{2,20}$/.test(coin)&&action!=="referral")return json({error:"invalid_symbol"},400);
+ if(!/^[A-Z0-9]{2,20}$/.test(coin)&&!["referral","language"].includes(action))return json({error:"invalid_symbol"},400);
  if(action==="language"){
   const language=String(body.language||"");
   if(!["fa","en"].includes(language))return json({error:"invalid_language"},400);
