@@ -8,7 +8,8 @@ async function load(){el('error').textContent='';try{const r=await fetch('/funct
 </script></body></html>`;
 // Use ASCII-safe HTML entities and JS Unicode escapes to prevent intermediary Latin-1 mojibake.
 const HEAD={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Access-Control-Allow-Origin":"https://farham2021.github.io","Access-Control-Allow-Methods":"GET, POST, OPTIONS","Access-Control-Allow-Headers":"X-Telegram-Init-Data, Content-Type","Vary":"Origin"};
-const json=(v:unknown,status=200)=>new Response(JSON.stringify(v),{status,headers:HEAD});
+const corsHeaders=(origin:string|null)=>{const allowed=origin==="https://farham2021.github.io"||origin==="http://127.0.0.1:8765"||origin==="http://localhost:8765";return {...HEAD,...(allowed&&origin?{"Access-Control-Allow-Origin":origin}:{})};};
+const json=(v:unknown,status=200,origin:string|null=null)=>new Response(JSON.stringify(v),{status,headers:corsHeaders(origin)});
 async function readTable(url:string,key:string,path:string){
  const res=await fetch(url+"/rest/v1/"+path,{headers:{"apikey":key,"Authorization":"Bearer "+key},signal:AbortSignal.timeout(9000)});
  if(!res.ok)throw Error("database unavailable");
@@ -114,8 +115,9 @@ async function privateRoute(req:Request,url:URL){
 }
 
 Deno.serve(async(req:Request)=>{
+ const origin=req.headers.get("origin");
  const url=new URL(req.url);
- if(req.method==="OPTIONS")return new Response(null,{status:204,headers:{...HEAD,"Access-Control-Allow-Headers":"X-Telegram-Init-Data, Content-Type"}});
+ if(req.method==="OPTIONS")return new Response(null,{status:204,headers:{...corsHeaders(origin),"Access-Control-Allow-Headers":"X-Telegram-Init-Data, Content-Type"}});
  if(url.pathname.endsWith("/api/private")){try{return await privateRoute(req,url)}catch(e){console.error("private ATLAS route error",String(e));return json({error:"private_data_unavailable"},503)}}
  if(req.method!=="GET"&&req.method!=="HEAD")return json({error:"method_not_allowed"},405);
  if(url.pathname.endsWith("/manifest.webmanifest"))return new Response(JSON.stringify({name:"ATLAS AI Dashboard",short_name:"ATLAS",start_url:"./",scope:"./",display:"standalone",background_color:"#091324",theme_color:"#101b32",lang:"fa",dir:"rtl"}),{headers:{"Content-Type":"application/manifest+json","Cache-Control":"public, max-age=3600"}});
@@ -127,9 +129,9 @@ Deno.serve(async(req:Request)=>{
 
  if(url.pathname.endsWith("/api/metals-analysis")){
   const symbol=String(url.searchParams.get("symbol")||"XAUUSD").toUpperCase();
-  if(!["XAUUSD","XAGUSD","COPPER","SILVER999_FAIR","GOLD18","COIN_EMAMI"].includes(symbol))return json({error:"unsupported_metal"},400);
+  if(!["XAUUSD","XAGUSD","COPPER","SILVER999_FAIR","GOLD18","COIN_EMAMI"].includes(symbol))return json({error:"unsupported_metal"},400,origin);
   const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
-  if(!base||!key)return json({error:"service_unavailable"},503);
+  if(!base||!key)return json({error:"service_unavailable"},503,origin);
   try{
    const filter="symbol=eq."+encodeURIComponent(symbol);
    const [market,mtf]=await Promise.all([
@@ -152,8 +154,8 @@ Deno.serve(async(req:Request)=>{
     sample_count:points.length,coverage_hours:Math.round(hours*10)/10,changes,mtf:lastMtf,
     stale:!newest||Date.now()-newest.time>4*3600000,method:"Observed price changes, not a technical-indicator forecast",
     unit:symbol==="COPPER"?"USD/lb (futures proxy)":symbol==="XAUUSD"?"USD/troy oz":symbol==="XAGUSD"?"USD/troy oz":symbol==="SILVER999_FAIR"?"IRR or Toman per stored source metadata (verify source)": "source-dependent",
-    disclaimer:"Insufficient time-series history is never replaced by fabricated multi-timeframe indicators."});
-  }catch(e){console.error("metal analysis unavailable",String(e));return json({error:"metals_analysis_unavailable"},503)}
+    disclaimer:"Insufficient time-series history is never replaced by fabricated multi-timeframe indicators."},200,origin);
+  }catch(e){console.error("metal analysis unavailable",String(e));return json({error:"metals_analysis_unavailable"},503,origin)}
  }
  if(url.pathname.endsWith("/api/us-markets")){
   const groups={indices:["TVC:SPX","NASDAQ:NDX","TVC:DJI","TVC:VIX","TVC:DXY"],mega_cap:["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","NASDAQ:AVGO","NASDAQ:AMD","NYSE:BRK.B","NYSE:JPM","NYSE:V","NYSE:UNH"],etfs:["AMEX:SPY","NASDAQ:QQQ","AMEX:DIA","AMEX:IWM","AMEX:GLD","AMEX:SLV","NASDAQ:TLT","AMEX:XLF","AMEX:XLK","AMEX:XLE","AMEX:XLV"],futures:["CME_MINI:ES1!","CME_MINI:NQ1!","CBOT_MINI:YM1!"]};const symbols=Object.values(groups).flat();
