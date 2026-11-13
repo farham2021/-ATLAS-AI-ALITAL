@@ -25,5 +25,5 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           ATLAS_HISTORY_DAYS: '120'
-          ATLAS_HISTORY_SYMBOLS: '40'
+          ATLAS_HISTORY_SYMBOLS: '10'
         run: python research/atlas-historical-backfill.py
