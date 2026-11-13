@@ -6,7 +6,7 @@ Research-only; preserves observed candle timestamps and provenance.
 import os,json,urllib.request,urllib.parse,datetime,time,math
 BASE=os.environ["SUPABASE_URL"].rstrip("/")
 KEY=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-DAYS=min(180,max(30,int(os.getenv("ATLAS_HISTORY_DAYS","120"))))
+DAYS=min(365,max(30,int(os.getenv("ATLAS_HISTORY_DAYS","30"))))
 LIMIT=min(100,max(1,int(os.getenv("ATLAS_HISTORY_SYMBOLS","30"))))
 headers={"Accept":"application/json","User-Agent":"ATLAS-Research/1.0"}
 if os.getenv("COINGECKO_API_KEY"):headers["x-cg-demo-api-key"]=os.environ["COINGECKO_API_KEY"]
@@ -34,10 +34,12 @@ for c in coins:
     if not sym.isalnum() or sym in ("USDT","USDC","DAI","FDUSD","TUSD","BUSD"):continue
     # Skip already-populated recent daily series. Never rewrite historical records.
     prior=existing(sym)
+    latest_prior=None
     if prior:
         try:
             age=(now-datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))).total_seconds()
-            latest_prior=datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))\n            if age<40*3600:continue
+            latest_prior=datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))
+            if age<40*3600:continue
         except Exception:pass
     coin_id=str(c.get("id",""))
     if not coin_id:continue
@@ -61,7 +63,7 @@ for c in coins:
         if not rows:continue
         post(rows);done+=1;stored+=len(rows)
     except Exception as e:errors.append(coin_id+":"+str(e)[:70])
-    time.sleep(1.5)
+    time.sleep(2.5)
 print("Backfill assets:",done,"daily historical candles:",stored,"skipped/unavailable:",len(errors))
 if errors:print("Examples:",errors[:12])
 if done==0 and not any(existing(str(c.get("symbol","")).upper()) for c in coins[:LIMIT]):
