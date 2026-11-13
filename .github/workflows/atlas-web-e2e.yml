@@ -17,9 +17,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm install --no-save playwright@1.58.2
+      - run: npm install --no-save playwright
       - run: npx playwright install --with-deps chromium
-      - run: node tests/atlas-web-smoke.cjs
+      - name: Serve checked-out PWA (avoid GitHub Pages deployment race)
+        run: python3 -m http.server 8765 --directory docs > /tmp/atlas-web-http.log 2>&1 &
+      - name: Browser smoke on exact commit
+        env:
+          ATLAS_TEST_URL: http://127.0.0.1:8765/
+        run: node tests/atlas-web-smoke.cjs
       - if: always()
         uses: actions/upload-artifact@v4
         with:
