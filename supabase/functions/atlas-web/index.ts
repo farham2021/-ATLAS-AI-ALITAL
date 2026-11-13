@@ -41,14 +41,16 @@ async function privateRoute(req:Request,url:URL){
  const get=(table:string,query:string)=>readTable(base,key,table+"?"+query);
  const filter="user_id=eq."+encodeURIComponent(userId);
  if(req.method==="GET"){
-  const [holdings,basis,trades,prefs,referrals]=await Promise.all([
+  const [holdings,basis,trades,prefs,referrals,memberships,opening]=await Promise.all([
    get("atlas_desk_holdings",filter+"&select=coin,qty"),
    get("atlas_desk_purchase_basis",filter+"&select=coin,average_buy_price,buy_date,quote_currency"),
    get("atlas_desk_trades",filter+"&select=id,coin,side,qty,unit_price,fee,traded_at&order=traded_at.desc&limit=200"),
    get("atlas_desk_alert_preferences",filter+"&select=symbol,rise_pct,fall_pct,enabled"),
-   get("atlas_desk_referrals","inviter_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id&limit=200")
+   get("atlas_desk_referrals","inviter_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id&limit=200"),
+   get("atlas_desk_memberships",filter+"&select=status,plan,expires_at"),
+   get("atlas_desk_trade_opening",filter+"&select=coin,opening_qty,opening_cost")
   ]);
-  return json({user_id:userId,holdings,basis,trades,prefs,referral_count:referrals.length});
+  return json({user_id:userId,holdings,basis,trades,prefs,opening,membership:memberships[0]||{status:"trial",plan:"free"},referral_count:referrals.length});
  }
  if(req.method!=="POST")return json({error:"method_not_allowed"},405);
  let body:any;try{body=await req.json()}catch{return json({error:"invalid_json"},400)}
@@ -69,9 +71,10 @@ async function privateRoute(req:Request,url:URL){
  if(action==="trade"){
   const qty=Number(body.qty),price=Number(body.price),fee=Number(body.fee||0),side=String(body.side||"").toUpperCase();
   if(!["BUY","SELL"].includes(side)||!(qty>0&&qty<=1e12)||!(price>0&&price<1e12)||!(fee>=0&&fee<=1e9))return json({error:"invalid_trade"},400);
-  // Ledger is append-only. Do not overwrite legacy holdings, which remain the source of truth until reconciliation.
-  const rows=await dbWrite(base,key,"atlas_desk_trades","POST",{user_id:userId,coin,side,qty,unit_price:price,fee});
-  return json({ok:true,trade_id:rows[0]?.id,holdings_sync:"pending_reconciliation"});
+  const response=await fetch(base+"/rest/v1/rpc/atlas_desk_record_trade",{method:"POST",headers:{"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({p_user_id:userId,p_coin:coin,p_side:side,p_qty:qty,p_unit_price:price,p_fee:fee}),signal:AbortSignal.timeout(9000)});
+  if(!response.ok)return json({error:"trade_rejected",detail:response.status===400?"insufficient_quantity_or_invalid_trade":"transaction_unavailable"},400);
+  const id=await response.json();
+  return json({ok:true,trade_id:id,holdings_sync:"atomic"});
  }
  if(action==="referral"){
   const inviter=String(body.inviter||"");
