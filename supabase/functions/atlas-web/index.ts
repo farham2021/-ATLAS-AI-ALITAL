@@ -7,16 +7,87 @@ function line(left,right){const d=document.createElement('div');d.className='row
 async function load(){el('error').textContent='';try{const r=await fetch('/functions/v1/atlas-web/api/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();el('service').textContent='\u0641\u0639\u0627\u0644';el('updated').textContent=fmt(d.checked_at);el('count').textContent=String(d.alerts.length);el('runs').replaceChildren(...d.cycles.map(x=>line(x.cycle,x.completed_at?fmt(x.completed_at):'\u0628\u062f\u0648\u0646 \u0627\u062c\u0631\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647')));el('alerts').replaceChildren(...(d.alerts.length?d.alerts.map(x=>line([x.symbol,x.direction,x.timeframe].filter(Boolean).join(' | '),fmt(x.timestamp))):[document.createTextNode('\u0647\u0646\u0648\u0632 \u0647\u0634\u062f\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647 \u0627\u0633\u062a')]));}catch(e){el('service').textContent='\u0646\u0627\u0645\u0634\u062e\u0635';el('error').textContent='\u062f\u0631\u06cc\u0627\u0641\u062a \u062f\u0627\u062f\u0647 \u0645\u0645\u06a9\u0646 \u0646\u0634\u062f: '+String(e.message||e)}}el('refresh').onclick=load;load();
 </script></body></html>`;
 // Use ASCII-safe HTML entities and JS Unicode escapes to prevent intermediary Latin-1 mojibake.
-const HEAD={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Access-Control-Allow-Origin":"https://farham2021.github.io","Access-Control-Allow-Methods":"GET, OPTIONS","Vary":"Origin"};
+const HEAD={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Access-Control-Allow-Origin":"https://farham2021.github.io","Access-Control-Allow-Methods":"GET, POST, OPTIONS","Access-Control-Allow-Headers":"X-Telegram-Init-Data, Content-Type","Vary":"Origin"};
 const json=(v:unknown,status=200)=>new Response(JSON.stringify(v),{status,headers:HEAD});
 async function readTable(url:string,key:string,path:string){
  const res=await fetch(url+"/rest/v1/"+path,{headers:{"apikey":key,"Authorization":"Bearer "+key},signal:AbortSignal.timeout(9000)});
  if(!res.ok)throw Error("database unavailable");
  return await res.json();
 }
+
+async function validateTelegram(initData:string):Promise<string|null>{
+ const token=Deno.env.get("TELEGRAM_TOKEN")||"";
+ if(!token||!initData||initData.length>4096)return null;
+ const params=new URLSearchParams(initData),hash=params.get("hash"),auth=Number(params.get("auth_date"));
+ if(!hash||!/^[0-9a-f]{64}$/i.test(hash)||!Number.isFinite(auth)||Math.abs(Date.now()/1000-auth)>3600)return null;
+ params.delete("hash");params.delete("signature");
+ const data=[...params.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>k+"="+v).join("\n");
+ const enc=new TextEncoder();
+ const secret=await crypto.subtle.sign("HMAC",await crypto.subtle.importKey("raw",enc.encode("WebAppData"),{name:"HMAC",hash:"SHA-256"},false,["sign"]),enc.encode(token));
+ const signature=await crypto.subtle.sign("HMAC",await crypto.subtle.importKey("raw",secret,{name:"HMAC",hash:"SHA-256"},false,["sign"]),enc.encode(data));
+ const expected=new Uint8Array(signature),actual=Uint8Array.from(hash.match(/../g)!.map(h=>parseInt(h,16)));
+ let diff=0;for(let i=0;i<32;i++)diff|=expected[i]^actual[i];if(diff!==0)return null;
+ try{const user=JSON.parse(params.get("user")||"{}");return Number.isSafeInteger(user.id)&&user.id>0?String(user.id):null}catch{return null}
+}
+async function dbWrite(base:string,key:string,table:string,method:string,payload:unknown,query=""){
+ const res=await fetch(base+"/rest/v1/"+table+query,{method,headers:{"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json","Prefer":"return=representation"},body:JSON.stringify(payload),signal:AbortSignal.timeout(9000)});
+ if(!res.ok)throw Error("database write unavailable");return res.json();
+}
+async function privateRoute(req:Request,url:URL){
+ const userId=await validateTelegram(req.headers.get("X-Telegram-Init-Data")||"");
+ if(!userId)return json({error:"telegram_auth_required"},401);
+ const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+ if(!base||!key)return json({error:"service_unavailable"},503);
+ const get=(table:string,query:string)=>readTable(base,key,table+"?"+query);
+ const filter="user_id=eq."+encodeURIComponent(userId);
+ if(req.method==="GET"){
+  const [holdings,basis,trades,prefs,referrals]=await Promise.all([
+   get("atlas_desk_holdings",filter+"&select=coin,qty"),
+   get("atlas_desk_purchase_basis",filter+"&select=coin,average_buy_price,buy_date,quote_currency"),
+   get("atlas_desk_trades",filter+"&select=id,coin,side,qty,unit_price,fee,traded_at&order=traded_at.desc&limit=200"),
+   get("atlas_desk_alert_preferences",filter+"&select=symbol,rise_pct,fall_pct,enabled"),
+   get("atlas_desk_referrals","inviter_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id&limit=200")
+  ]);
+  return json({user_id:userId,holdings,basis,trades,prefs,referral_count:referrals.length});
+ }
+ if(req.method!=="POST")return json({error:"method_not_allowed"},405);
+ let body:any;try{body=await req.json()}catch{return json({error:"invalid_json"},400)}
+ const action=String(body?.action||""),coin=String(body?.coin||"").toUpperCase();
+ if(!/^[A-Z0-9]{2,20}$/.test(coin)&&action!=="referral")return json({error:"invalid_symbol"},400);
+ if(action==="basis"){
+  const price=Number(body.price),date=body.date===null||body.date===""?null:String(body.date||"");
+  if(!(price>0&&price<1e12)||date&&!/^\d{4}-\d{2}-\d{2}$/.test(date))return json({error:"invalid_basis"},400);
+  await dbWrite(base,key,"atlas_desk_purchase_basis","POST",{user_id:userId,coin,average_buy_price:price,buy_date:date,quote_currency:"USD"},"?on_conflict=user_id,coin");
+  return json({ok:true});
+ }
+ if(action==="alert"){
+  const rise=body.rise===null?null:Number(body.rise),fall=body.fall===null?null:Number(body.fall);
+  if((rise!==null&&!(rise>0&&rise<=100))||(fall!==null&&!(fall>0&&fall<=100)))return json({error:"invalid_threshold"},400);
+  await dbWrite(base,key,"atlas_desk_alert_preferences","POST",{user_id:userId,symbol:coin,rise_pct:rise,fall_pct:fall,enabled:body.enabled!==false},"?on_conflict=user_id,symbol");
+  return json({ok:true,delivery_automated:false});
+ }
+ if(action==="trade"){
+  const qty=Number(body.qty),price=Number(body.price),fee=Number(body.fee||0),side=String(body.side||"").toUpperCase();
+  if(!["BUY","SELL"].includes(side)||!(qty>0&&qty<=1e12)||!(price>0&&price<1e12)||!(fee>=0&&fee<=1e9))return json({error:"invalid_trade"},400);
+  // Ledger is append-only. Do not overwrite legacy holdings, which remain the source of truth until reconciliation.
+  const rows=await dbWrite(base,key,"atlas_desk_trades","POST",{user_id:userId,coin,side,qty,unit_price:price,fee});
+  return json({ok:true,trade_id:rows[0]?.id,holdings_sync:"pending_reconciliation"});
+ }
+ if(action==="referral"){
+  const inviter=String(body.inviter||"");
+  if(!/^\d{1,20}$/.test(inviter)||inviter===userId)return json({error:"invalid_inviter"},400);
+  const existing=await get("atlas_desk_referrals","invited_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id");
+  if(existing.length)return json({ok:true,already_registered:true});
+  await dbWrite(base,key,"atlas_desk_referrals","POST",{invited_user_id:userId,inviter_user_id:inviter});
+  return json({ok:true});
+ }
+ return json({error:"unknown_action"},400);
+}
+
 Deno.serve(async(req:Request)=>{
  const url=new URL(req.url);
- if(req.method==="OPTIONS")return new Response(null,{status:204,headers:HEAD});
+ if(req.method==="OPTIONS")return new Response(null,{status:204,headers:{...HEAD,"Access-Control-Allow-Headers":"X-Telegram-Init-Data, Content-Type"}});
+ if(url.pathname.endsWith("/api/private")){try{return await privateRoute(req,url)}catch(e){console.error("private ATLAS route error",String(e));return json({error:"private_data_unavailable"},503)}}
  if(req.method!=="GET"&&req.method!=="HEAD")return json({error:"method_not_allowed"},405);
  if(url.pathname.endsWith("/manifest.webmanifest"))return new Response(JSON.stringify({name:"ATLAS AI Dashboard",short_name:"ATLAS",start_url:"./",scope:"./",display:"standalone",background_color:"#091324",theme_color:"#101b32",lang:"fa",dir:"rtl"}),{headers:{"Content-Type":"application/manifest+json","Cache-Control":"public, max-age=3600"}});
 
