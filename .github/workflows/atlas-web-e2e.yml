@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - docs/index.html
+      - docs/trading-lab.html
       - tests/atlas-web-smoke.cjs
       - tests/atlas-quant-core.test.cjs
       - research/quant-core.cjs
@@ -23,6 +24,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Verify trading lab safety and static syntax
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const html=fs.readFileSync('docs/trading-lab.html','utf8');
+          const script=html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+          if(!script)throw Error('missing trading lab script');
+          new Function(script);
+          if(!html.includes('Simulation only')||!html.includes('last closed candle'))throw Error('paper trading disclosure missing');
+          if(!fs.readFileSync('docs/index.html','utf8').includes('./trading-lab.html'))throw Error('trading lab not linked');
+          NODE
       - name: Quantitative engine unit tests (no live trading)
         run: node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs
       - run: npm install --no-save playwright@1.58.2
