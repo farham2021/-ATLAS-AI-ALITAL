@@ -37,7 +37,7 @@ jobs:
           for(const provider of ['okx','bybit','binance'])if(!html.includes("id:'"+provider+"'"))throw Error('missing provider '+provider);
           if(!html.includes('DATA UNAVAILABLE — simulated execution disabled'))throw Error('missing fail-closed guard');
           const main=fs.readFileSync('docs/index.html','utf8');
-          const mainScript=main.match(/<script>([\\s\\S]*?)<\\/script>/)?.[1];
+          const mainScript=main.split('<script>')[1]?.split('</script>')[0];
           if(!mainScript)throw Error('missing main dashboard script');
           new Function(mainScript);
           for(const id of ['operations','laboratory','metals'])if(!main.includes('id="'+id+'"'))throw Error('missing dashboard section '+id);
