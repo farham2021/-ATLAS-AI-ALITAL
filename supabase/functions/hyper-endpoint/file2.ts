@@ -2041,7 +2041,7 @@ async function atlasEnhanced(env:any, userId:string, text:string):Promise<string
    if(!response.ok)throw Error("feed_unavailable");
    const xml=await response.text();
    const decode=(x:string)=>x.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&lt;/g,"<").replace(/&gt;/g,">");
-   const getField=(x:string,k:string)=>decode(x.match(new RegExp("<"+k+"(?:\\\\s[^>]*)?>([\\\\s\\\\S]*?)</"+k+">","i"))?.[1]||"").trim();
+   const getField=(x:string,k:string)=>decode(x.match(new RegExp("<"+k+"[^>]*>([^]*?)</"+k+">","i"))?.[1]||"").trim();
    const items=[...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0,8).map(m=>({title:getField(m[1],"title"),link:getField(m[1],"link"),pub:getField(m[1],"pubDate")}));
    return "📰 Crypto News "+(symbol||"Market")+"\n"+items.map((x,i)=>(i+1)+". "+x.title+"\n"+x.pub+"\n"+x.link).join("\n")+"\nHeadline relevance is not verified price impact.";
   }catch(e){return "News source temporarily unavailable. Try again later."}
