@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Historical daily closed candles for top CoinGecko-ranked assets.
-Uses licensed public exchange OHLCV, not scraped TradingView data.
+"""Historical daily CoinGecko market-chart prices for ranked assets.
+Binance is not used for primary historical ingestion.
 Research-only; preserves observed candle timestamps and provenance.
 """
 import os,json,urllib.request,urllib.parse,datetime,time,math
@@ -19,7 +19,7 @@ def post(rows):
         req=urllib.request.Request(BASE+"/rest/v1/atlas_market_snapshots",data=json.dumps(rows[i:i+100]).encode(),headers=h,method="POST")
         with urllib.request.urlopen(req,timeout=35) as response:response.read()
 def existing(sym):
-    q=urllib.parse.urlencode({"select":"captured_at","symbol":"eq."+sym,"payload->>source":"eq.binance_daily_ohlcv","order":"captured_at.desc","limit":"1"})
+    q=urllib.parse.urlencode({"select":"captured_at","symbol":"eq."+sym,"payload->>source":"eq.coingecko_market_chart","order":"captured_at.desc","limit":"1"})
     h={"apikey":KEY,"Authorization":"Bearer "+KEY}
     try:return fetch(BASE+"/rest/v1/atlas_market_snapshots?"+q,h)
     except Exception:return []
@@ -39,26 +39,29 @@ for c in coins:
             age=(now-datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))).total_seconds()
             latest_prior=datetime.datetime.fromisoformat(prior[0]["captured_at"].replace("Z","+00:00"))\n            if age<40*3600:continue
         except Exception:pass
-    pair=sym+"USDT"
-    url="https://api.binance.com/api/v3/klines?"+urllib.parse.urlencode({"symbol":pair,"interval":"1d","limit":DAYS+2})
+    coin_id=str(c.get("id",""))
+    if not coin_id:continue
+    url="https://api.coingecko.com/api/v3/coins/"+urllib.parse.quote(coin_id,safe="")+"/market_chart?"+urllib.parse.urlencode({"vs_currency":"usd","days":DAYS,"interval":"daily"})
     try:
-        candles=fetch(url)
-        if not isinstance(candles,list) or len(candles)<30:raise ValueError("insufficient candles")
+        history=fetch(url)
+        points=history.get("prices",[])
+        if not isinstance(points,list) or len(points)<20:raise ValueError("insufficient CoinGecko history")
         rows=[]
-        for k in candles:
-            opened=datetime.datetime.fromtimestamp(int(k[0])/1000,datetime.timezone.utc)
-            closed=datetime.datetime.fromtimestamp(int(k[6])/1000,datetime.timezone.utc)
-            price=float(k[4]);volume=float(k[5])
-            if (latest_prior and closed<=latest_prior) or closed>=now or price<=0 or not math.isfinite(price) or volume<0:continue
-            rows.append({"captured_at":closed.isoformat(),"symbol":sym,"asset":c.get("id"),"price":price,"value":price,
-                "payload":{"source":"binance_daily_ohlcv","research_only":True,"exchange":"Binance",
-                "pair":pair,"quote_currency":"USDT","interval":"1d","open":float(k[1]),"high":float(k[2]),
-                "low":float(k[3]),"close":price,"base_volume":volume,"open_at":opened.isoformat(),
-                "closed_candle":True,"coin_gecko_rank":c.get("market_cap_rank")}})
+        seen=set()
+        for ts,p in points:
+            captured=datetime.datetime.fromtimestamp(float(ts)/1000,datetime.timezone.utc)
+            price=float(p)
+            if (latest_prior and captured<=latest_prior) or captured>=now or price<=0 or not math.isfinite(price):continue
+            day=captured.date()
+            if day in seen:continue
+            seen.add(day)
+            rows.append({"captured_at":captured.isoformat(),"symbol":sym,"asset":coin_id,"price":price,"value":price,
+                "payload":{"source":"coingecko_market_chart","research_only":True,"currency":"USD",
+                "price_type":"aggregated_historical","historical":True,"coin_gecko_rank":c.get("market_cap_rank")}})
         if not rows:continue
         post(rows);done+=1;stored+=len(rows)
-    except Exception as e:errors.append(pair+":"+str(e)[:70])
-    time.sleep(.12)
+    except Exception as e:errors.append(coin_id+":"+str(e)[:70])
+    time.sleep(1.5)
 print("Backfill assets:",done,"daily historical candles:",stored,"skipped/unavailable:",len(errors))
 if errors:print("Examples:",errors[:12])
 if done==0 and not any(existing(str(c.get("symbol","")).upper()) for c in coins[:LIMIT]):
