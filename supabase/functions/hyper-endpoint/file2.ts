@@ -1776,6 +1776,8 @@ const ATLAS_MARKET_MENU=[
   ["🥇 فلزات و قیمت‌ها","📑 آخرین تحلیل DEEP4H"],
   ["🧠 رادار ریسک","📊 ارزیابی سیگنال‌ها"],
   ["📊 بروکر و فیوچرز","🎯 TP / SL"],
+  ["🇺🇸 بازار آمریکا","📰 اخبار کریپتو"],
+  ["📉 چارت‌های بازار","🫧 Crypto Bubbles"],
   ["⚖️ بازتعادل سبد","🏠 منوی اصلی"]
 ];
 const ATLAS_ALERT_MENU=[
@@ -1794,6 +1796,7 @@ const ATLAS_EN_LABELS:Record<string,string>={
 "🌐 زبان / Language":"🌐 Language / زبان",
 "🌐 گزارش چندبازاری":"🌐 Multi-asset report","📚 پژوهش بازار":"📚 Market research",
 "📈 تحلیل نماد":"📈 Analyze symbol","🇮🇷 بورس ایران":"🇮🇷 Iran stocks",
+"🇺🇸 بازار آمریکا":"🇺🇸 US Markets","📰 اخبار کریپتو":"📰 Crypto News","📉 چارت‌های بازار":"📉 Market Charts","🫧 Crypto Bubbles":"🫧 Crypto Bubbles",
 "📊 بروکر و فیوچرز":"📊 Broker & Futures","🎯 TP / SL":"🎯 TP / SL",
 "🧠 رادار ریسک":"🧠 Risk radar","📊 ارزیابی سیگنال‌ها":"📊 Signal audit",
 "🥇 فلزات و قیمت‌ها":"🥇 Metals & prices","📑 آخرین تحلیل DEEP4H":"📑 Latest DEEP4H",
@@ -1903,6 +1906,8 @@ function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]
     "🥇 فلزات و قیمت‌ها":"/metals","📑 آخرین تحلیل DEEP4H":"/deepreport",
     "🧠 رادار ریسک":"/radar","📊 ارزیابی سیگنال‌ها":"/audit",
     "📊 بروکر و فیوچرز":"/futures","🎯 TP / SL":"/futures",
+    "🇺🇸 بازار آمریکا":"/us","📰 اخبار کریپتو":"/news",
+    "📉 چارت‌های بازار":"/chart","🫧 Crypto Bubbles":"/bubbles",
     "⚙️ تنظیم هشدار نماد":"/watch_help"
   };
   if(commands[t])return {command:commands[t]};
@@ -2014,6 +2019,33 @@ async function atlasEnhanced(env:any, userId:string, text:string):Promise<string
 
 
 
+
+ if(cmd==="/us"){
+  const stocks=["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","AMEX:SPY","NASDAQ:QQQ","TVC:SPX","TVC:VIX"];
+  return "🇺🇸 US Market | TradingView charts\n"+stocks.map(x=>x+" https://www.tradingview.com/chart/?symbol="+encodeURIComponent(x)).join("\n")+"\nExternal quotes; ATLAS does not verify live prices.";
+ }
+ if(cmd==="/chart"||cmd==="/bubbles"){
+  const symbol=String(words[1]||"BTC").toUpperCase();
+  if(!/^[A-Z0-9]{2,15}$/.test(symbol))return "Invalid symbol. Example: /chart ETH";
+  const tv="https://www.tradingview.com/chart/?symbol="+encodeURIComponent("BINANCE:"+symbol+"USDT");
+  const search="https://www.google.com/search?q="+encodeURIComponent("TradingSignals "+symbol+" crypto chart");
+  return "📉 "+symbol+"\nTradingView: "+tv+"\nCrypto Bubbles: https://cryptobubbles.net/\nTradingSignals discovery: "+search+"\nCrypto Bubbles does not have a verified symbol-specific deep link.";
+ }
+ if(cmd==="/news"){
+  const symbol=String(words[1]||"").toUpperCase();
+  if(symbol&&!/^[A-Z0-9]{2,15}$/.test(symbol))return "Invalid symbol. Example: /news BTC";
+  const query=symbol?symbol+" cryptocurrency crypto market":"bitcoin ethereum crypto market SEC Federal Reserve ETF";
+  const feed="https://news.google.com/rss/search?q="+encodeURIComponent(query)+"&hl=en-US&gl=US&ceid=US:en";
+  try{
+   const response=await fetch(feed,{signal:AbortSignal.timeout(6500)});
+   if(!response.ok)throw Error("feed_unavailable");
+   const xml=await response.text();
+   const decode=(x:string)=>x.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&lt;/g,"<").replace(/&gt;/g,">");
+   const getField=(x:string,k:string)=>decode(x.match(new RegExp("<"+k+"(?:\\\\s[^>]*)?>([\\\\s\\\\S]*?)</"+k+">","i"))?.[1]||"").trim();
+   const items=[...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0,8).map(m=>({title:getField(m[1],"title"),link:getField(m[1],"link"),pub:getField(m[1],"pubDate")}));
+   return "📰 Crypto News "+(symbol||"Market")+"\n"+items.map((x,i)=>(i+1)+". "+x.title+"\n"+x.pub+"\n"+x.link).join("\n")+"\nHeadline relevance is not verified price impact.";
+  }catch(e){return "News source temporarily unavailable. Try again later."}
+ }
  if(cmd==="/futures"){
   const requested=words[1]?.toUpperCase();
   const rows=await get("atlas_signal_lifecycle","select=symbol,direction,entry,sl,tp1,tp2,confidence,updated_at&order=updated_at.desc&limit=120");
