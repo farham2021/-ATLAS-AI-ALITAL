@@ -7,7 +7,7 @@ function line(left,right){const d=document.createElement('div');d.className='row
 async function load(){el('error').textContent='';try{const r=await fetch('/functions/v1/atlas-web/api/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();el('service').textContent='\u0641\u0639\u0627\u0644';el('updated').textContent=fmt(d.checked_at);el('count').textContent=String(d.alerts.length);el('runs').replaceChildren(...d.cycles.map(x=>line(x.cycle,x.completed_at?fmt(x.completed_at):'\u0628\u062f\u0648\u0646 \u0627\u062c\u0631\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647')));el('alerts').replaceChildren(...(d.alerts.length?d.alerts.map(x=>line([x.symbol,x.direction,x.timeframe].filter(Boolean).join(' | '),fmt(x.timestamp))):[document.createTextNode('\u0647\u0646\u0648\u0632 \u0647\u0634\u062f\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647 \u0627\u0633\u062a')]));}catch(e){el('service').textContent='\u0646\u0627\u0645\u0634\u062e\u0635';el('error').textContent='\u062f\u0631\u06cc\u0627\u0641\u062a \u062f\u0627\u062f\u0647 \u0645\u0645\u06a9\u0646 \u0646\u0634\u062f: '+String(e.message||e)}}el('refresh').onclick=load;load();
 </script></body></html>`;
 // Use ASCII-safe HTML entities and JS Unicode escapes to prevent intermediary Latin-1 mojibake.
-const HEAD={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"};
+const HEAD={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Access-Control-Allow-Origin":"https://farham2021.github.io","Access-Control-Allow-Methods":"GET, OPTIONS","Vary":"Origin"};
 const json=(v:unknown,status=200)=>new Response(JSON.stringify(v),{status,headers:HEAD});
 async function readTable(url:string,key:string,path:string){
  const res=await fetch(url+"/rest/v1/"+path,{headers:{"apikey":key,"Authorization":"Bearer "+key},signal:AbortSignal.timeout(9000)});
@@ -16,6 +16,7 @@ async function readTable(url:string,key:string,path:string){
 }
 Deno.serve(async(req:Request)=>{
  const url=new URL(req.url);
+ if(req.method==="OPTIONS")return new Response(null,{status:204,headers:HEAD});
  if(req.method!=="GET"&&req.method!=="HEAD")return json({error:"method_not_allowed"},405);
  if(url.pathname.endsWith("/manifest.webmanifest"))return new Response(JSON.stringify({name:"ATLAS AI Dashboard",short_name:"ATLAS",start_url:"./",scope:"./",display:"standalone",background_color:"#091324",theme_color:"#101b32",lang:"fa",dir:"rtl"}),{headers:{"Content-Type":"application/manifest+json","Cache-Control":"public, max-age=3600"}});
  if(url.pathname.endsWith("/api/status")){
