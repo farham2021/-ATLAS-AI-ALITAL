@@ -33,6 +33,8 @@ jobs:
           if(!script)throw Error('missing trading lab script');
           new Function(script);
           if(!html.includes('Simulation only')||!html.includes('last closed candle'))throw Error('paper trading disclosure missing');
+          for(const provider of ['okx','bybit','binance'])if(!html.includes("id:'"+provider+"'"))throw Error('missing provider '+provider);
+          if(!html.includes('DATA UNAVAILABLE — simulated execution disabled'))throw Error('missing fail-closed guard');
           if(!fs.readFileSync('docs/index.html','utf8').includes('./trading-lab.html'))throw Error('trading lab not linked');
           NODE
       - name: Quantitative engine unit tests (no live trading)
