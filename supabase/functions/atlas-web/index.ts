@@ -41,7 +41,7 @@ async function privateRoute(req:Request,url:URL){
  const get=(table:string,query:string)=>readTable(base,key,table+"?"+query);
  const filter="user_id=eq."+encodeURIComponent(userId);
  if(req.method==="GET"){
-  const [holdings,basis,trades,prefs,referrals,memberships,opening,language]=await Promise.all([
+  const [holdings,basis,trades,prefs,referrals,memberships,opening,language,paperOrders]=await Promise.all([
    get("atlas_desk_holdings",filter+"&select=coin,qty"),
    get("atlas_desk_purchase_basis",filter+"&select=coin,average_buy_price,buy_date,quote_currency"),
    get("atlas_desk_trades",filter+"&select=id,coin,side,qty,unit_price,fee,traded_at&order=traded_at.desc&limit=200"),
@@ -49,14 +49,33 @@ async function privateRoute(req:Request,url:URL){
    get("atlas_desk_referrals","inviter_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id&limit=200"),
    get("atlas_desk_memberships",filter+"&select=status,plan,expires_at"),
    get("atlas_desk_trade_opening",filter+"&select=coin,opening_qty,opening_cost"),
-   get("atlas_desk_language_preferences",filter+"&select=language")
+   get("atlas_desk_language_preferences",filter+"&select=language"),
+   get("atlas_futures_paper_orders",filter+"&select=id,symbol,side,entry,stop_loss,take_profit_1,take_profit_2,leverage,risk_pct,equity_usdt,quantity,status,created_at&order=created_at.desc&limit=40")
   ]);
-  return json({user_id:userId,holdings,basis,trades,prefs,opening,membership:memberships[0]||{status:"trial",plan:"free"},language:language[0]?.language||"fa",referral_count:referrals.length});
+  return json({user_id:userId,holdings,basis,trades,prefs,opening,membership:memberships[0]||{status:"trial",plan:"free"},language:language[0]?.language||"fa",paper_orders:paperOrders,referral_count:referrals.length});
  }
  if(req.method!=="POST")return json({error:"method_not_allowed"},405);
  let body:any;try{body=await req.json()}catch{return json({error:"invalid_json"},400)}
  const action=String(body?.action||""),coin=String(body?.coin||"").toUpperCase();
  if(!/^[A-Z0-9]{2,20}$/.test(coin)&&!["referral","language"].includes(action))return json({error:"invalid_symbol"},400);
+ 
+ if(action==="paper_order"){
+  const symbol=String(body.symbol||"").toUpperCase().trim(),side=String(body.side||"").toUpperCase();
+  const entry=Number(body.entry),sl=Number(body.sl),tp1=Number(body.tp1);
+  const tp2=body.tp2===null||body.tp2===undefined||body.tp2===""?null:Number(body.tp2);
+  const equity=Number(body.equity_usdt),risk=Number(body.risk_pct),leverage=Number(body.leverage);
+  const valid=[entry,sl,tp1,equity,risk,leverage].every(x=>Number.isFinite(x)&&x>0)&&
+   (tp2===null||(Number.isFinite(tp2)&&tp2>0))&&/^[A-Z0-9]{2,20}$/.test(symbol)&&
+   ["LONG","SHORT"].includes(side)&&risk<=2&&Number.isInteger(leverage)&&leverage<=3&&
+   (side==="LONG"?(sl<entry&&tp1>entry&&(tp2===null||tp2>tp1)):(sl>entry&&tp1<entry&&(tp2===null||tp2<tp1)));
+  if(!valid)return json({error:"invalid_paper_trade_levels_or_limits"},400);
+  const quantity=equity*risk/100/Math.abs(entry-sl);
+  if(!Number.isFinite(quantity)||quantity<=0||quantity*entry>equity*leverage)return json({error:"insufficient_margin_for_risk_sizing"},400);
+  const order={user_id:userId,symbol,side,entry,stop_loss:sl,take_profit_1:tp1,take_profit_2:tp2,
+   leverage,risk_pct:risk,equity_usdt:equity,quantity,status:"paper_open"};
+  await dbWrite(base,key,"atlas_futures_paper_orders","POST",order);
+  return json({ok:true,mode:"paper_only",order});
+ }
  if(action==="language"){
   const language=String(body.language||"");
   if(!["fa","en"].includes(language))return json({error:"invalid_language"},400);
@@ -103,6 +122,27 @@ Deno.serve(async(req:Request)=>{
 
 
 
+
+ if(url.pathname.endsWith("/api/futures")){
+  const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+  if(!base||!key)return json({error:"service_unavailable"},503);
+  try{
+   const rows=await readTable(base,key,"atlas_signal_lifecycle?select=symbol,direction,entry,sl,tp1,tp2,confidence,updated_at,lifecycle_state&order=updated_at.desc&limit=150");
+   const valid=rows.filter((x:any)=>{
+    const side=String(x.direction||"").toUpperCase(),e=Number(x.entry),sl=Number(x.sl),tp=Number(x.tp1);
+    return ["LONG","SHORT"].includes(side)&&[e,sl,tp].every(n=>Number.isFinite(n)&&n>0)&&
+      (side==="LONG"?(sl<e&&tp>e):(sl>e&&tp<e));
+   }).map((x:any)=>{
+    const side=String(x.direction).toUpperCase(),e=Number(x.entry),sl=Number(x.sl),tp=Number(x.tp1),tp2=Number(x.tp2);
+    const second=Number.isFinite(tp2)&&tp2>0&&(side==="LONG"?tp2>tp:tp2<tp)?tp2:null;
+    return {symbol:x.symbol,side,entry:e,sl,tp1:tp,tp2:second,
+      rr1:Math.round(Math.abs(tp-e)/Math.abs(e-sl)*100)/100,confidence:x.confidence,
+      updated_at:x.updated_at,lifecycle_state:x.lifecycle_state,mode:"paper_only"};
+   });
+   return json({mode:"paper_only",max_leverage:3,max_risk_pct:2,signals:valid.slice(0,60),
+    warning:"Historical indicative levels, not executable quotes. Verify data freshness; no real broker connection."});
+  }catch(e){console.error("futures unavailable",String(e));return json({error:"futures_unavailable"},503)}
+ }
  if(url.pathname.endsWith("/api/intelligence")){
   const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
   if(!base||!key)return json({error:"service_unavailable"},503);
