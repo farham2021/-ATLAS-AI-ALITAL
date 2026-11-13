@@ -42,6 +42,7 @@ jobs:
           new Function(mainScript);
           for(const id of ['operations','laboratory','metals'])if(!main.includes('id="'+id+'"'))throw Error('missing dashboard section '+id);
           if(!main.includes('labReference')||!main.includes("BASE+'/api/status'"))throw Error('unified integrations missing');
+          if(!main.includes('per_page=100&page=1')||!main.includes('labLoadCoinCatalog')||!main.includes('labFallbackSymbols'))throw Error('top 100 coin catalog missing');
           NODE
       - name: Quantitative engine unit tests (no live trading)
         run: node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs
