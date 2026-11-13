@@ -5,6 +5,8 @@ const { chromium, devices } = require('playwright');
  for(const device of ['Desktop Chrome','iPhone 13']){
   const context=await browser.newContext(device==='Desktop Chrome'?{viewport:{width:1365,height:900}}:{...devices['iPhone 13']});
   const page=await context.newPage();const errors=[];
+  page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('metals'))errors.push('console '+msg.text())});
+  page.on('response',res=>{if(res.url().includes('/api/metals-analysis'))console.log(device+' METALS HTTP '+res.status()+' '+res.url())});
   page.on('pageerror',e=>errors.push(e.message));
   page.on('requestfailed',req=>{if(req.url().includes('/api/metals-analysis'))errors.push('METALS REQUEST '+req.failure()?.errorText+' '+req.url())});
   const url=process.env.ATLAS_TEST_URL||'https://farham2021.github.io/-ATLAS-AI-ALITAL/';
@@ -23,9 +25,15 @@ const { chromium, devices } = require('playwright');
   }
   const api=await page.request.get('https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web/api/us-markets');
   if(!api.ok())failures.push(device+' US API '+api.status());
+  const metalApi=await page.request.get('https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web/api/metals-analysis?symbol=XAUUSD',{headers:{Origin:'http://127.0.0.1:8765'}}).catch(e=>({error:e.message}));
+  if(metalApi.error)failures.push(device+' metal API network '+metalApi.error);
+  else {const body=await metalApi.text();console.log(device+' METAL API direct '+metalApi.status()+' CORS '+metalApi.headers()['access-control-allow-origin']+' '+body.slice(0,240));if(!metalApi.ok())failures.push(device+' metal API HTTP '+metalApi.status()+' '+body.slice(0,180));}
   const news=await page.request.get('https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web/api/crypto-news?symbol=BTC');
   if(!news.ok()&&news.status()!==503)failures.push(device+' news API '+news.status());
   else {const data=await news.json();if(!Array.isArray(data.items))failures.push(device+' malformed news response')}
+  await page.locator('#language').selectOption('en');await page.waitForTimeout(1500);
+  const localeCheck=await page.evaluate(()=>({en:document.documentElement.lang,utc:fmt('2026-11-13T16:26:08Z'),fa:(()=>{const saved=currentLang;currentLang='fa';const v=fmt('2026-11-13T16:26:08Z');currentLang=saved;return v})()}));
+  if(localeCheck.en!=='en'||!localeCheck.utc.includes('2026')||!localeCheck.utc.includes('UTC')||!localeCheck.fa.includes('تهران'))failures.push(device+' locale '+JSON.stringify(localeCheck));
   await page.screenshot({path:'atlas-'+device.replaceAll(' ','-')+'.png',fullPage:true});
   failures.push(...errors.filter(x=>!/(TradingView|widget|network|fetch|Failed to load)/i.test(x)).map(x=>device+' JS '+x));
   await context.close();
