@@ -1773,6 +1773,7 @@ const ATLAS_CASH_MENU=[
 const ATLAS_MARKET_MENU=[
   ["🌐 گزارش چندبازاری","📚 پژوهش بازار"],
   ["📈 تحلیل نماد","🇮🇷 بورس ایران"],
+  ["🥇 فلزات و قیمت‌ها","📑 آخرین تحلیل DEEP4H"],
   ["⚖️ بازتعادل سبد","🏠 منوی اصلی"]
 ];
 const ATLAS_ALERT_MENU=[
@@ -1807,6 +1808,7 @@ function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]
     "📊 سود و زیان سبد":"/pnl","📅 گزارش چرخه‌ها":"/reports",
     "🎯 فرصت‌های ورود و خروج":"/opportunities","🤝 دعوت کاربر":"/invite",
     "📈 تحلیل نماد":"/analyze_help","🇮🇷 بورس ایران":"/tse",
+    "🥇 فلزات و قیمت‌ها":"/metals","📑 آخرین تحلیل DEEP4H":"/deepreport",
     "⚙️ تنظیم هشدار نماد":"/watch_help"
   };
   if(commands[t])return {command:commands[t]};
@@ -1900,6 +1902,23 @@ async function atlasEnhanced(env:any, userId:string, text:string):Promise<string
  if(cmd==="/invite"){
   const me=await tg(env,"getMe",{}),username=String(me?.result?.username||"");
   return username?"لینک دعوت: https://t.me/"+username+"?start=invite_"+userId+"\nردیابی پاداش دعوت هنوز فعال نیست.":"نام بات موجود نیست.";
+ }
+
+ if(cmd==="/metals"){
+  const wanted=["XAUUSD","XAGUSD","COPPER","SILVER999_FAIR","GOLD18","COIN_EMAMI","USD_IRR","USDT_IRR"];
+  const [a,b]=await Promise.all([
+   get("atlas_market_snapshots","select=symbol,price,captured_at&order=captured_at.desc&limit=100"),
+   get("atlas_iran_fx_snapshots","select=symbol,price,captured_at&order=captured_at.desc&limit=100")
+  ]);
+  const rows=[...a,...b],out=["🥇 ATLAS | فلزات و بازار ایران","آخرین داده ذخیره‌شده (نه لزوماً قیمت لحظه‌ای):"];
+  for(const sym of wanted){const r=rows.find((x:any)=>x.symbol===sym);out.push("• "+sym+": "+(r?fmtPx(r.price)+" | "+r.captured_at:"ناموجود"))}
+  out.push("SILVER999_FAIR ارزش محاسباتی است، نه نرخ قطعی فروش.");
+  return out.join("\n");
+ }
+ if(cmd==="/deepreport"){
+  const rows=await get("atlas_deep_4h_snapshots","select=symbol,asset_group,direction,confidence,price,captured_at,decision_state&order=captured_at.desc&limit=12");
+  if(!rows.length)return "گزارش DEEP4H ذخیره‌شده موجود نیست.";
+  return "📑 آخرین تحلیل‌های DEEP4H\n"+rows.map((r:any)=>r.symbol+" | "+(r.direction||"—")+" | "+(r.decision_state||"—")+" | اطمینان "+(r.confidence??"—")+" | "+r.captured_at).join("\n");
  }
  if(cmd==="/tse")return "🇮🇷 بورس ایران: برای نماد، /analyze فولاد 24h را بفرست. داده بازه‌های فاقد پوشش ساخته نمی‌شود.";
  if(cmd==="/analyze_help")return "تحلیل نماد: /analyze BTC 1h\nبازه‌ها: 1h, 4h, 12h, 24h, 1w, 1mo";
