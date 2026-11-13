@@ -5,8 +5,8 @@
 <section id="portfolio" hidden><article class="card"><h2>💼 سبد اختصاصی و سود و زیان</h2><div id="loginState">برای نمایش دارایی‌های شخصی، این صفحه را از دکمه «اپلیکیشن ATLAS» داخل بات تلگرام باز کنید.</div><div id="holdings"></div></article><article class="card"><h2>ثبت مبنای خرید</h2><div class="controls"><input id="basisCoin" placeholder="BTC" maxlength="20"><input id="basisPrice" type="number" min="0" step="any" placeholder="قیمت خرید USD"><input id="basisDate" type="date"><button id="saveBasis">ذخیره</button></div></article><article class="card"><h2>ثبت تراکنش در دفتر مستقل</h2><div class="controls"><select id="tradeSide"><option value="BUY">خرید</option><option value="SELL">فروش</option></select><input id="tradeCoin" placeholder="BTC" maxlength="20"><input id="tradeQty" type="number" min="0" step="any" placeholder="مقدار"><input id="tradePrice" type="number" min="0" step="any" placeholder="قیمت واحد USD"><button id="saveTrade">ثبت تراکنش</button></div><small>ثبت معامله به‌صورت اتمیک موجودی را بروزرسانی می‌کند. مبنای دارایی تاریخی محفوظ می‌ماند.</small><div id="trades"></div></article></section>
 <section id="crypto" hidden><article class="card"><h2>📈 تحلیل رمزارزها</h2><div class="controls"><select id="coin"></select><select id="tf"><option value="1h">۱ ساعت</option><option value="4h">۴ ساعت</option><option value="12h">۱۲ ساعت</option><option value="24h">۲۴ ساعت</option><option value="1w">یک هفته</option><option value="1mo">یک ماه</option></select><button class="primary" id="analyze">تحلیل</button></div><div id="analysis"></div></article><article class="card"><h2>آخرین قیمت‌های ذخیره‌شده</h2><div id="cryptolist"></div></article></section>
 <section id="iran" hidden><article class="card"><h2>🇮🇷 بورس و صندوق‌های ایران</h2><div class="controls"><select id="iranSymbol"></select><button class="primary" id="iranAnalyze">بررسی نماد</button></div><div id="iranAnalysis"></div></article><article class="card"><h2>تابلوی ایران</h2><div id="iranlist"></div></article></section>
-<section id="metals" hidden><article class="card"><h2>🥇 طلا، نقره و مس</h2><p class="muted">آخرین قیمت ذخیره‌شده، با زمان ثبت و واحد منبع. قیمت محاسباتی نقره ۹۹۹ نرخ قطعی فروش نیست.</p><div id="metallist"></div></article><article class="card"><h2>تحلیل چندبازه‌ای فلزات</h2><div class="controls"><select id="metalSymbol"></select><select id="metalTf"><option value="1h">۱ ساعت</option><option value="4h">۴ ساعت</option><option value="12h">۱۲ ساعت</option><option value="24h">۲۴ ساعت</option><option value="1w">هفته</option><option value="1mo">ماه</option></select><button id="metalAnalyze">تحلیل</button></div><div id="metalAnalysis"></div></article></section><section id="radar" hidden><article class="card"><h2>🧠 رادار چندبازاری ریسک — حالت آزمایشی</h2><p class="muted">امتیاز ریسک یک شاخص ابتکاری ۰ تا ۱۰۰ است، نه احتمال موفقیت یا دستور معامله.</p><div class="controls"><select id="radarFilter"><option value="all">همه سطوح</option><option value="high">ریسک بالا</option><option value="moderate">ریسک متوسط</option><option value="low">ریسک پایین</option></select><button id="radarRefresh">بروزرسانی رادار</button></div><div id="radarRows"></div></article><article class="card"><h2>📊 ارزیابی واقعی سیگنال‌های گذشته</h2><div id="auditStats"></div><div id="auditRows"></div><p class="muted">نتایج تاریخی تضمین‌کننده بازده آینده نیستند. داده‌های ناکافی جداگانه مشخص می‌شوند.</p></article></section><section id="futures" hidden><article class="card"><h2>📊 بروکر آزمایشی و فیوچرز — Paper Trading</h2><p class="muted">بدون اتصال به صرافی و بدون اجرای معامله واقعی. سطوح تاریخی هستند؛ قبل از تصمیم باید تازگی قیمت بررسی شود.</p><div id="futuresSignals"></div></article><article class="card"><h2>محاسبه معامله و حد سود/ضرر</h2><div class="controls"><select id="fSymbol"></select><select id="fSide"><option>LONG</option><option>SHORT</option></select><input id="fEntry" type="number" step="any" placeholder="Entry"><input id="fSl" type="number" step="any" placeholder="Stop Loss"><input id="fTp1" type="number" step="any" placeholder="Take Profit 1"><input id="fTp2" type="number" step="any" placeholder="Take Profit 2"><input id="fEquity" type="number" value="1000" min="1" placeholder="Equity USDT"><input id="fRisk" type="number" value="1" min="0.1" max="2" step="0.1" placeholder="Risk %"><select id="fLeverage"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option></select><button id="fCalc">محاسبه</button><button id="fPaper">ثبت معامله آزمایشی</button></div><div id="fResult"></div></article><article class="card"><h2>معاملات آزمایشی من</h2><div id="paperOrders"></div></article></section><section id="us" hidden><article class="card"><h2>🇺🇸 بازار آمریکا</h2><p class="muted">شاخص‌های S&P 500، Nasdaq، Dow Jones، VIX، ETFها و سهام منتخب. نمودارها از TradingView دریافت می‌شوند؛ قیمت‌ها توسط ATLAS تأیید نمی‌شوند.</p><div class="controls"><select id="usSymbol"></select><button id="usChartBtn">نمایش چارت</button></div><div id="usChart" style="min-height:440px"></div></article></section>
-<section id="news" hidden><article class="card"><h2>📰 اخبار مرتبط با بازار کریپتو</h2><p class="muted">تیترهای منبع‌دار، مرتبط با ارز انتخابی. تأثیر واقعی خبر بر قیمت تأیید نشده است.</p><div class="controls"><select id="newsSymbol"><option value="">کل بازار / All crypto</option></select><button id="newsLoad">بروزرسانی اخبار</button></div><div id="newsRows"></div></article></section>
+<section id="metals" hidden><article class="card"><h2>🥇 طلا، نقره و مس</h2><p class="muted">آخرین قیمت ذخیره‌شده، با زمان ثبت و واحد منبع. قیمت محاسباتی نقره ۹۹۹ نرخ قطعی فروش نیست.</p><div id="metallist"></div></article><article class="card"><h2>تحلیل چندبازه‌ای فلزات</h2><div class="controls"><select id="metalSymbol"></select><select id="metalTf"><option value="1h">۱ ساعت</option><option value="4h">۴ ساعت</option><option value="12h">۱۲ ساعت</option><option value="24h">۲۴ ساعت</option><option value="1w">هفته</option><option value="1mo">ماه</option></select><button id="metalAnalyze">تحلیل</button></div><div id="metalAnalysis"></div></article></section><section id="radar" hidden><article class="card"><h2>🧠 رادار چندبازاری ریسک — حالت آزمایشی</h2><p class="muted">امتیاز ریسک یک شاخص ابتکاری ۰ تا ۱۰۰ است، نه احتمال موفقیت یا دستور معامله.</p><div class="controls"><select id="radarFilter"><option value="all">همه سطوح</option><option value="high">ریسک بالا</option><option value="moderate">ریسک متوسط</option><option value="low">ریسک پایین</option></select><button id="radarRefresh">بروزرسانی رادار</button></div><div id="radarRows"></div></article><article class="card"><h2>📊 ارزیابی واقعی سیگنال‌های گذشته</h2><div id="auditStats"></div><div id="auditRows"></div><p class="muted">نتایج تاریخی تضمین‌کننده بازده آینده نیستند. داده‌های ناکافی جداگانه مشخص می‌شوند.</p></article></section><section id="futures" hidden><article class="card"><h2>📊 بروکر آزمایشی و فیوچرز — Paper Trading</h2><p class="muted">بدون اتصال به صرافی و بدون اجرای معامله واقعی. سطوح تاریخی هستند؛ قبل از تصمیم باید تازگی قیمت بررسی شود.</p><div id="futuresSignals"></div></article><article class="card"><h2>محاسبه معامله و حد سود/ضرر</h2><div class="controls"><select id="fSymbol"></select><select id="fSide"><option>LONG</option><option>SHORT</option></select><input id="fEntry" type="number" step="any" placeholder="Entry"><input id="fSl" type="number" step="any" placeholder="Stop Loss"><input id="fTp1" type="number" step="any" placeholder="Take Profit 1"><input id="fTp2" type="number" step="any" placeholder="Take Profit 2"><input id="fEquity" type="number" value="1000" min="1" placeholder="Equity USDT"><input id="fRisk" type="number" value="1" min="0.1" max="2" step="0.1" placeholder="Risk %"><select id="fLeverage"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option></select><button id="fCalc">محاسبه</button><button id="fPaper">ثبت معامله آزمایشی</button></div><div id="fResult"></div></article><article class="card"><h2>معاملات آزمایشی من</h2><div id="paperOrders"></div></article></section><section id="us" hidden><article class="card"><h2>🇺🇸 بازار آمریکا</h2><p class="muted">شاخص‌های S&P 500، Nasdaq، Dow Jones، VIX، ETFها و سهام منتخب. نمودارها از TradingView دریافت می‌شوند؛ قیمت‌ها توسط ATLAS تأیید نمی‌شوند.</p><div class="controls"><select id="usSymbol"></select><button id="usChartBtn">نمایش چارت</button></div><div id="usChart" style="min-height:460px"></div><div class="controls"><button id="usNewsBtn">US market news</button><button id="usChartBtn2">US stock chart</button></div><div id="usNewsFeed"></div></article></section>
+<section id="news" hidden><article class="card"><h2>📰 اخبار مرتبط با بازار کریپتو</h2><p class="muted">تیترهای منبع‌دار، مرتبط با ارز انتخابی. تأثیر واقعی خبر بر قیمت تأیید نشده است.</p><div class="controls"><select id="newsSymbol"><option value="">کل بازار / All crypto</option></select><button id="newsLoad">بروزرسانی اخبار</button></div><div id="newsRows"></div><div id="tvNewsFeed"></div></article></section>
 <section id="charts" hidden><article class="card"><h2>📉 نمودارهای بازار بر اساس نماد</h2><div class="controls"><select id="chartSymbol"></select><select id="chartTf"><option value="60">1H</option><option value="240">4H</option><option value="D">1D</option><option value="W">1W</option></select><button id="chartShow">نمایش TradingView</button></div><div id="tvChart" style="min-height:460px"></div><div class="controls" id="externalCharts"></div><p class="muted">TradingView در همین صفحه باز می‌شود. Crypto Bubbles در وب‌سایت اصلی باز می‌شود. TradingSignals بدون نشانی رسمی تأییدشده، به جستجوی مرتبط هدایت می‌شود؛ از اتصال غیرمعتبر استفاده نشده است.</p></article></section><section id="alerts" hidden><article class="card"><h2>🔔 هشدارهای صعود و ریزش</h2><p class="muted">هشدارهای ثبت‌شده در موتور ATLAS؛ وضعیت SENT به‌تنهایی تحویل به کاربر را اثبات نمی‌کند.</p><div id="allalerts"></div><article class="card"><h2>تنظیم هشدار شخصی</h2><div class="controls"><input id="alertCoin" placeholder="BTC"><input id="risePct" type="number" step="any" min="0" max="100" placeholder="رشد ٪"><input id="fallPct" type="number" step="any" min="0" max="100" placeholder="ریزش ٪"><button id="saveAlert">ذخیره هشدار</button></div><small>ذخیره تنظیم فعال است؛ موتور ارسال خودکار بر اساس تغییر قیمت یک‌ساعته تنظیم شده است؛ زمان‌بندی GitHub Actions ممکن است تأخیر داشته باشد.</small></article><p>برای تنظیم آستانه شخصی در تلگرام: <code>/watch BTC fall 5</code> یا <code>/watch BTC rise 5</code></p><small>هشدارهای شخصی با بررسی دوره‌ای و محدودیت تکرار ارسال می‌شوند؛ تحویل نهایی به تلگرام وابسته است.</small></article></section>
 <section id="reports" hidden><article class="card"><h2>🗓 گزارش‌های زمان‌بندی‌شده</h2><div id="allcycles"></div><h2>جزئیات آخرین گزارش</h2><div class="controls"><select id="reportCycle"><option value="HOURLY">HOURLY</option><option value="DEEP4H">DEEP4H</option><option value="DAILY16">DAILY16</option><option value="NIGHTLY23">NIGHTLY23</option></select><button id="reportLoad">نمایش گزارش</button></div><div id="reportDetails"></div><h2>آخرین تحلیل DEEP4H</h2><div id="deepreports"></div><p class="muted">زمان ثبت اجرای موفق نمایش داده می‌شود؛ محتوای کامل خروجی هر چرخه هنوز در این بخش بارگذاری نشده است.</p></article></section>
 <section id="opportunities" hidden><article class="card"><h2>🎯 فرصت‌های ورود و خروج</h2><div id="signals"></div><small>این داده‌ها سیگنال‌های ذخیره‌شده هستند و توصیه قطعی سرمایه‌گذاری محسوب نمی‌شوند.</small></article></section>
@@ -251,13 +251,34 @@ function chartLink(container,label,url){
  const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=label;
  a.style.cssText='display:inline-block;color:#8dd8ff;border:1px solid #385475;border-radius:10px;padding:10px;margin:4px';container.append(a);
 }
-function tvWidget(id,symbol,interval){
- const target=$(id);target.replaceChildren();const wrap=node('div','');wrap.style.height='460px';wrap.style.width='100%';
- const inner=node('div','');inner.className='tradingview-widget-container__widget';inner.style.height='100%';inner.style.width='100%';wrap.append(inner);
- const script=document.createElement('script');script.src='https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';script.async=true;script.type='text/javascript';
- script.textContent=JSON.stringify({autosize:true,symbol,interval,timezone:'Etc/UTC',theme:'dark',style:'1',locale:currentLang==='fa'?'fa':'en',allow_symbol_change:true,hide_side_toolbar:false,calendar:false,details:true,withdateranges:true});
- wrap.append(script);wrap.className='tradingview-widget-container';target.append(wrap);
- const a=node('div','');target.append(a);chartLink(a,currentLang==='en'?'Open on TradingView':'باز کردن در TradingView','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(symbol));
+let tvLoader;
+function ensureTradingView(){
+ if(tvLoader)return tvLoader;
+ tvLoader=new Promise((resolve,reject)=>{
+  const script=document.createElement('script');script.type='module';
+  script.src='https://widgets.tradingview-widget.com/w/en/tv-advanced-chart.js';
+  script.onload=()=>resolve(true);script.onerror=()=>reject(Error('TradingView widget loader unavailable'));
+  document.head.append(script);
+ });
+ return tvLoader;
+}
+async function tvWidget(id,symbol,interval){
+ const target=$(id);target.replaceChildren();
+ const fallback=node('div',currentLang==='en'?'Loading TradingView chart…':'در حال بارگذاری نمودار TradingView…','muted');
+ target.append(fallback);
+ const link=node('div','');target.append(link);
+ chartLink(link,currentLang==='en'?'Open chart directly':'باز کردن مستقیم نمودار','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(symbol));
+ try{
+  await ensureTradingView();
+  const chart=document.createElement('tv-advanced-chart');
+  chart.setAttribute('symbol',symbol);chart.setAttribute('interval',interval);
+  chart.setAttribute('theme','dark');chart.setAttribute('timezone','Etc/UTC');
+  chart.setAttribute('style','display:block;width:100%;height:460px;min-height:460px');
+  chart.setAttribute('allow-symbol-change','true');
+  chart.setAttribute('locale',currentLang==='en'?'en':'fa');
+  target.insertBefore(chart,link);
+  fallback.remove();
+ }catch(e){fallback.textContent=(currentLang==='en'?'Chart embed blocked; use the direct link.':'نمایش داخلی مسدود است؛ از لینک مستقیم استفاده کنید.')}
 }
 function showCoinChart(){
  const symbol=$('chartSymbol').value,tf=$('chartTf').value;
@@ -287,4 +308,27 @@ async function loadCryptoNews(){
  }catch(e){list.replaceChildren(node('div',(currentLang==='en'?'News feed unavailable: ':'دریافت اخبار ممکن نیست: ')+e.message,'warn'))}
 }
 $('newsLoad').onclick=loadCryptoNews;$('newsSymbol').onchange=loadCryptoNews;loadCryptoNews();
+
+let newsWidgetLoader;
+function ensureNewsWidget(){
+ if(newsWidgetLoader)return newsWidgetLoader;
+ newsWidgetLoader=new Promise((resolve,reject)=>{
+  const s=document.createElement('script');s.type='module';s.src='https://widgets.tradingview-widget.com/w/en/tv-news-feed.js';
+  s.onload=()=>resolve(true);s.onerror=()=>reject(Error('News widget unavailable'));document.head.append(s);
+ });return newsWidgetLoader;
+}
+async function renderNewsWidget(id,symbol){
+ const target=$(id);target.replaceChildren(node('div',currentLang==='en'?'Loading TradingView news…':'در حال بارگذاری اخبار TradingView…','muted'));
+ try{
+  await ensureNewsWidget();const w=document.createElement('tv-news-feed');
+  if(symbol)w.setAttribute('symbol',symbol);
+  w.setAttribute('style','display:block;width:100%;min-height:360px');
+  target.replaceChildren(w);
+ }catch(e){target.replaceChildren(node('div',currentLang==='en'?'TradingView news unavailable.':'اخبار TradingView در دسترس نیست.','warn'))}
+}
+const oldNewsChange=$('newsSymbol').onchange;
+$('newsSymbol').onchange=()=>{oldNewsChange();renderNewsWidget('tvNewsFeed',$('newsSymbol').value?'BINANCE:'+$('newsSymbol').value+'USDT':'')};
+renderNewsWidget('tvNewsFeed','');
+$('usNewsBtn').onclick=()=>renderNewsWidget('usNewsFeed',$('usSymbol').value);
+$('usChartBtn2').onclick=showUsChart;
 </script></body></html>
