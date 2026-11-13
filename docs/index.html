@@ -20,7 +20,28 @@ function switchTab(id){tabs.forEach(([k])=>{$(k).hidden=k!==id});document.queryS
 tabs.forEach(([id,label])=>{const b=node('button',label);b.dataset.tab=id;b.onclick=()=>switchTab(id);$('nav').append(b)});switchTab('home');
 const coins=['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','TRX','LINK','SUI','AVAX','LTC','DOT','TON','NEAR','TAO','ONDO','ZEC','XMR'];coins.forEach(c=>{const o=node('option',c);o.value=c;$('coin').append(o)});
 function analysis(){const sym=$('coin').value,tf=$('tf').value,r=(state.mtf||[]).find(x=>x.symbol===sym),p=(state.crypto||[]).find(x=>x.symbol===sym);const field={'1h':'h1','4h':'h4','24h':'d1','1w':'w1'}[tf];const trend=field?r?.[field]||'داده موجود نیست':'داده مستقیم این بازه هنوز موجود نیست';$('analysis').replaceChildren(node('div','قیمت ذخیره‌شده: '+num(p?.price)),node('div','روند '+tf+': '+trend),node('div','هم‌سویی چندبازه‌ای: '+(r?.agreement_pct??'—')+'٪'),node('small','زمان ثبت: '+fmt(r?.timestamp||p?.captured_at)))}
-function metalAnalysis(){const sym=$('metalSymbol').value,tf=$('metalTf').value,x=(state.metals||[]).find(v=>v.symbol===sym),m=(state.mtf||[]).find(v=>v.symbol===sym),field={'1h':'h1','4h':'h4','24h':'d1','1w':'w1'}[tf];$('metalAnalysis').replaceChildren(node('div',sym+' | قیمت ثبت‌شده: '+num(x?.price)),node('div','روند '+tf+': '+(field?(m?.[field]||'داده تحلیلی موجود نیست'):'داده مستقیم این بازه موجود نیست')),node('small','آخرین ثبت: '+fmt(x?.captured_at)))}$('metalAnalyze').onclick=metalAnalysis;
+async function metalAnalysis(){
+ const sym=$('metalSymbol').value,tf=$('metalTf').value,out=$('metalAnalysis');
+ if(!sym){out.replaceChildren(node('div',currentLang==='en'?'No metal symbols found.':'نماد فلزی در داده‌ها یافت نشد.','warn'));return}
+ out.replaceChildren(node('div',currentLang==='en'?'Loading recorded observations…':'در حال بررسی داده‌های واقعی ثبت‌شده…'));
+ try{
+  const res=await fetch(BASE+'/api/metals-analysis?symbol='+encodeURIComponent(sym),{cache:'no-store'});
+  if(!res.ok)throw Error('HTTP '+res.status);
+  const d=await res.json();const hours={'1h':1,'4h':4,'12h':12,'24h':24,'1w':168}[tf];
+  const c=(d.changes||[]).find(x=>x.hours===hours);
+  const isEn=currentLang==='en';
+  const title=(isEn?'Recorded price: ':'قیمت ثبت‌شده: ')+(d.latest_price===null?'—':num(d.latest_price))+' '+d.unit;
+  const trend=c?.status==='observed'?
+   (isEn?'Observed change: ':'تغییر مشاهده‌شده: ')+num(c.change_pct)+'% · '+(c.direction==='up'?(isEn?'Up':'صعودی'):c.direction==='down'?(isEn?'Down':'نزولی'):(isEn?'Flat':'خنثی')):
+   (isEn?'Insufficient observations for this timeframe':'داده‌های کافی برای تحلیل این بازه وجود ندارد');
+  out.replaceChildren(node('div',sym+' | '+title),node('div',tf+' | '+trend),
+   node('div',(isEn?'Samples: ':'تعداد نمونه: ')+d.sample_count+' | '+(isEn?'History coverage: ':'پوشش تاریخی: ')+d.coverage_hours+'h'),
+   node('div',d.stale?(isEn?'⚠ Historical data is stale':'⚠ داده‌های ذخیره‌شده قدیمی هستند'):(isEn?'Recorded data freshness acceptable':'تازگی داده ثبت‌شده قابل قبول است'),'warn'),
+   node('small',(isEn?'Latest observation: ':'آخرین ثبت: ')+fmt(d.latest_at)),
+   node('small',isEn?'Observed change is not an RSI/MACD signal or investment recommendation.':'تغییر مشاهده‌شده، سیگنال RSI/MACD یا توصیه سرمایه‌گذاری نیست.'));
+ }catch(e){out.replaceChildren(node('div',(currentLang==='en'?'Metal analysis unavailable: ':'دریافت تحلیل فلزات ناموفق بود: ')+e.message,'warn'))}
+}
+$('metalAnalyze').onclick=metalAnalysis;
 function iranAnalysis(){const sym=$('iranSymbol').value,r=(state.iran||[]).find(x=>x.symbol===sym);$('iranAnalysis').replaceChildren(node('div','قیمت ثبت‌شده '+sym+': '+num(r?.price)),node('small','زمان ثبت: '+fmt(r?.captured_at)))}
 $('analyze').onclick=analysis;$('iranAnalyze').onclick=iranAnalysis;$('refresh').onclick=load;
 $('share').onclick=async()=>{const link=location.href.split('#')[0];try{await navigator.clipboard.writeText(link);$('notice').textContent='لینک کپی شد.'}catch(e){$('notice').textContent='لینک دعوت: '+link}};
@@ -30,7 +51,7 @@ const af=x=>[[x.symbol,x.direction,x.timeframe].filter(Boolean).join(' · '),fmt
 renderRows('cryptolist',d.crypto.slice(0,30),x=>[x.symbol,num(x.price)+' USD · '+fmt(x.captured_at)]);renderRows('iranlist',d.iran.slice(0,35),x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_at)]);
 const metals=['XAUUSD','XAGUSD','COPPER','SILVER999_FAIR','GOLD18','COIN_EMAMI','USD_IRR','USDT_IRR'];const visible=(d.metals||[]).filter(x=>metals.includes(x.symbol));
 renderRows('metallist',visible,x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_at)]);
-const metalSelect=$('metalSymbol');metalSelect.replaceChildren(...visible.map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));metalAnalysis();
+const metalSelect=$('metalSymbol');metalSelect.replaceChildren(...metals.filter(sym=>visible.some(x=>x.symbol===sym)).map(sym=>{const o=node('option',sym);o.value=sym;return o}));metalAnalysis();
 renderRows('deepreports',(d.deep||[]).slice(0,25),x=>[x.symbol+' · '+(x.asset_group||'')+' · '+(x.direction||'—')+' · '+(x.decision_state||'—'),'اطمینان '+num(x.confidence)+' | قیمت '+num(x.price)+' | '+fmt(x.captured_at)]);
 renderRows('signals',d.opportunities,x=>[x.symbol+' · '+x.direction+' · '+x.lifecycle_state,'ورود '+num(x.entry)+' | حدضرر '+num(x.sl)+' | هدف '+num(x.tp1)+' | اطمینان '+num(x.confidence)]);
 const sel=$('iranSymbol'),old=sel.value;sel.replaceChildren(...d.iran.filter(x=>x.symbol&&x.price!==null).map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));if(d.iran.some(x=>x.symbol===old))sel.value=old;analysis();iranAnalysis();await privateLoad();translateUI();
