@@ -5,6 +5,8 @@ on:
     paths:
       - docs/index.html
       - tests/atlas-web-smoke.cjs
+      - tests/atlas-quant-core.test.cjs
+      - research/quant-core.cjs
       - .github/workflows/atlas-web-e2e.yml
 permissions:
   contents: read
@@ -17,6 +19,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Quantitative engine unit tests (no live trading)
+        run: node --test tests/atlas-quant-core.test.cjs
       - run: npm install --no-save playwright@1.58.2
       - run: npx playwright install --with-deps chromium
       - name: Serve checked-out PWA (avoid GitHub Pages deployment race)
