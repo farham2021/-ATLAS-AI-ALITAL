@@ -1752,6 +1752,8 @@ async function cashOnlyPlan(env:any,userId:string,cmd:any) {
 const ATLAS_MAIN_MENU=[
   ["🧭 پلن نقد جدید","📊 تخصیص سرمایه"],
   ["💼 سبد دارایی","👤 پروفایل من"],
+  ["📊 سود و زیان سبد","📅 گزارش چرخه‌ها"],
+  ["🎯 فرصت‌های ورود و خروج","🤝 دعوت کاربر"],
   ["🎯 اهداف و تنظیمات","📈 تحلیل بازار"],
   ["🔔 هشدارها","❓ راهنما"]
 ];
@@ -1769,11 +1771,13 @@ const ATLAS_CASH_MENU=[
 ];
 const ATLAS_MARKET_MENU=[
   ["🌐 گزارش چندبازاری","📚 پژوهش بازار"],
+  ["📈 تحلیل نماد","🇮🇷 بورس ایران"],
   ["⚖️ بازتعادل سبد","🏠 منوی اصلی"]
 ];
 const ATLAS_ALERT_MENU=[
   ["🔔 روشن‌کردن هشدار","🔕 خاموش‌کردن هشدار"],
-  ["📍 وضعیت بات","🏠 منوی اصلی"]
+  ["📍 وضعیت بات","🏠 منوی اصلی"],
+  ["⚙️ تنظیم هشدار نماد","🔔 آخرین هشدارها"]
 ];
 function atlasKeyboard(rows:string[][]) {
   return {keyboard:rows.map(row=>row.map(text=>({text}))),resize_keyboard:true,is_persistent:true,
@@ -1798,7 +1802,11 @@ function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]
     "🌐 گزارش چندبازاری":"/multiasset","📚 پژوهش بازار":"/research",
     "⚖️ بازتعادل سبد":"/rebalance",
     "🔔 روشن‌کردن هشدار":"/hourlyon","🔕 خاموش‌کردن هشدار":"/hourlyoff",
-    "📍 وضعیت بات":"/status","🩺 سلامت موتور":"/health","🔔 آخرین هشدارها":"/alerts"
+    "📍 وضعیت بات":"/status","🩺 سلامت موتور":"/health","🔔 آخرین هشدارها":"/alerts",
+    "📊 سود و زیان سبد":"/pnl","📅 گزارش چرخه‌ها":"/reports",
+    "🎯 فرصت‌های ورود و خروج":"/opportunities","🤝 دعوت کاربر":"/invite",
+    "📈 تحلیل نماد":"/analyze_help","🇮🇷 بورس ایران":"/tse",
+    "⚙️ تنظیم هشدار نماد":"/watch_help"
   };
   if(commands[t])return {command:commands[t]};
   const guides:Record<string,string>={
@@ -1834,6 +1842,70 @@ async function atlasSystemHealth(env:any) {
     "\\n\\nزمان‌ها UTC هستند. وضعیت اجرای Workflow به‌صورت مستقل باید بررسی شود.";
 }
 
+
+async function atlasEnhanced(env:any, userId:string, text:string):Promise<string|null>{
+ const words=normFa(text).trim().split(/\s+/),cmd=words[0].toLowerCase();
+ const get=(table:string,query:string)=>sb(env,"GET","/rest/v1/"+table+"?"+query);
+ if(cmd==="/buy"&&words.length>=3){
+  const coin=canon(words[1]),price=Number(words[2]),date=words[3]||null;
+  if(!HOLDABLE_CRYPTO.has(coin)||!Number.isFinite(price)||price<=0||date&&!/^\d{4}-\d{2}-\d{2}$/.test(date))return "نماد، قیمت یا تاریخ نامعتبر است. مثال: /buy BTC 65000 2026-01-15";
+  await sb(env,"POST","/rest/v1/atlas_desk_purchase_basis?on_conflict=user_id,coin",{user_id:userId,coin,average_buy_price:price,buy_date:date,quote_currency:"USD",updated_at:nowIso()});
+  return "قیمت خرید "+coin+" ثبت شد. برای سود و زیان /pnl";
+ }
+ if(cmd==="/pnl"){
+  const bag=await getHoldings(env,userId),symbols=Object.keys(bag).slice(0,60);
+  if(!symbols.length)return "سبد خالی است؛ /hold BTC 0.1";
+  const basis=await get("atlas_desk_purchase_basis","user_id=eq."+encodeURIComponent(userId)+"&select=coin,average_buy_price,quote_currency");
+  const prices=await Promise.all(symbols.map(async coin=>{try{const a=await latestAsset(env,coin);const p=Number(a?.row?.price);return {coin,price:Number.isFinite(p)&&p>0?p:null,crypto:a?.kind==="CRYPTO"};}catch(_e){return {coin,price:null,crypto:false};}}));
+  const total=prices.reduce((v,x)=>v+(x.crypto&&x.price!==null?x.price*bag[x.coin]:0),0);
+  const lines=["💼 ATLAS | سود و زیان سبد","ارزش و وزن تنها برای رمزارزهای دارای قیمت معتبر USD محاسبه شده‌اند."];
+  for(const x of prices){
+   const b=Array.isArray(basis)?basis.find((r:any)=>r.coin===x.coin):null;
+   const buy=Number(b?.average_buy_price),valid=!!b&&b.quote_currency==="USD"&&x.crypto&&x.price!==null;
+   const pct=valid?(x.price!/buy-1)*100:null;
+   const pnl=valid?(x.price!-buy)*bag[x.coin]:null;
+   const weight=x.crypto&&x.price!==null&&total>0?100*x.price*bag[x.coin]/total:null;
+   lines.push("• "+x.coin+" | تعداد "+fmtQty(bag[x.coin])+" | قیمت "+(x.price===null?"ناموجود":fmtPx(x.price))+" | وزن "+(weight===null?"—":weight.toFixed(1)+"%")+" | P/L "+(pnl===null?"مبنای خرید موجود نیست":fmtPx(pnl)+" USD ("+pct!.toFixed(2)+"%)"));
+  }
+  lines.push("ارزش کل قابل‌محاسبه: "+fmtPx(total)+" USD","ثبت مبنای خرید: /buy BTC 65000 2026-01-15");
+  return lines.join("\n");
+ }
+ if(cmd==="/analyze"&&words.length>=3){
+  const coin=canon(words[1]),tf=words[2].toLowerCase();
+  if(!["1h","4h","12h","24h","1w","1mo"].includes(tf))return "بازه‌ها: 1h 4h 12h 24h 1w 1mo";
+  const asset=await latestAsset(env,coin);
+  if(!asset)return "داده ذخیره‌شده برای "+coin+" موجود نیست.";
+  const rows=await get("atlas_mtf_snapshots","symbol=eq."+encodeURIComponent(coin)+"&select=timestamp,direction,h1,h4,d1,w1,agreement_pct&order=timestamp.desc&limit=1");
+  const m=Array.isArray(rows)?rows[0]:null;
+  const field:any={"1h":"h1","4h":"h4","24h":"d1","1w":"w1"};
+  return "📈 "+coin+" | "+tf+"\nقیمت ثبت‌شده: "+fmtPx(asset.row.price)+"\nروند: "+(field[tf]?String(m?.[field[tf]]||"داده موجود نیست"):"داده مستقیم این بازه هنوز موجود نیست")+"\nهمسویی MTF: "+(m?.agreement_pct??"—")+"%\nآخرین MTF: "+(m?.timestamp||"—")+"\nاین تحلیل فقط داده ذخیره‌شده است؛ سیگنال مستقل برای بازه‌های فاقد داده ساخته نمی‌شود.";
+ }
+ if(cmd==="/reports"){
+  const rows=await get("atlas_scheduler_runs","status=eq.DONE&select=cycle,completed_at&order=completed_at.desc&limit=100");
+  return "🗓 گزارش زمان اجرای چرخه‌ها\n"+["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].map(c=>{const x=(Array.isArray(rows)?rows:[]).find((r:any)=>r.cycle===c);return c+": "+(x?.completed_at||"ناموجود");}).join("\n")+"\nمحتوای کامل گزارش در این بخش هنوز پیاده‌سازی نشده است.";
+ }
+ if(cmd==="/opportunities"){
+  const rows=await get("atlas_signal_lifecycle","select=symbol,direction,lifecycle_state,confidence,entry,sl,tp1,updated_at&order=updated_at.desc&limit=8");
+  return "🎯 فرصت‌های ثبت‌شده\n"+(Array.isArray(rows)?rows:[]).map((x:any)=>x.symbol+" | "+x.direction+" | "+x.lifecycle_state+" | confidence "+(x.confidence??"—")+" | entry "+(x.entry??"—")+" | SL "+(x.sl??"—")+" | TP1 "+(x.tp1??"—")).join("\n");
+ }
+ if(cmd==="/watch"&&words.length>=4){
+  const coin=canon(words[1]),dir=words[2].toLowerCase(),pct=Number(words[3]);
+  if(!["rise","fall"].includes(dir)||!(pct>0&&pct<=100))return "مثال: /watch BTC fall 5";
+  const patch:any={user_id:userId,symbol:coin,updated_at:nowIso()};
+  patch[dir==="rise"?"rise_pct":"fall_pct"]=pct;
+  await sb(env,"POST","/rest/v1/atlas_desk_alert_preferences?on_conflict=user_id,symbol",patch);
+  return "آستانه "+coin+" ثبت شد. اتصال این تنظیم به ارسال خودکار هشدار هنوز انجام نشده است.";
+ }
+ if(cmd==="/invite"){
+  const me=await tg(env,"getMe",{}),username=String(me?.result?.username||"");
+  return username?"لینک دعوت: https://t.me/"+username+"?start=invite_"+userId+"\nردیابی پاداش دعوت هنوز فعال نیست.":"نام بات موجود نیست.";
+ }
+ if(cmd==="/tse")return "🇮🇷 بورس ایران: برای نماد، /analyze فولاد 24h را بفرست. داده بازه‌های فاقد پوشش ساخته نمی‌شود.";
+ if(cmd==="/analyze_help")return "تحلیل نماد: /analyze BTC 1h\nبازه‌ها: 1h, 4h, 12h, 24h, 1w, 1mo";
+ if(cmd==="/watch_help")return "آستانه هشدار: /watch BTC rise 5 یا /watch BTC fall 3";
+ return null;
+}
+
 async function atlasInstallCommands(env:any) {
   const commands=[
     ["start","شروع و منوی فارسی"],["menu","نمایش منوی اصلی"],
@@ -1846,6 +1918,8 @@ async function atlasInstallCommands(env:any) {
     ["platform","پلتفرم‌ها"],["multiasset","تحلیل چندبازاری"],
     ["research","پژوهش بازار"],["status","وضعیت بات"],
     ["health","سلامت موتور"],["alerts","آخرین هشدارها"],
+    ["pnl","سود و زیان سبد"],["buy","قیمت خرید"],["analyze","تحلیل نماد"],
+    ["reports","گزارش چرخه‌ها"],["opportunities","فرصت‌ها"],["invite","دعوت کاربر"],["watch","هشدار نماد"],
     ["help","راهنما"]
   ].map(([command,description])=>({command,description}));
   await tg(env,"setMyCommands",{commands,scope:{type:"all_private_chats"},language_code:"fa"});
@@ -1954,6 +2028,9 @@ async function handlePrivate(
 
   if (textForCommand==="/health") return reply(await atlasSystemHealth(env));
   if (textForCommand==="/alerts") return reply(await atlasRecentAlerts(env));
+
+  const enhanced=await atlasEnhanced(env,userId,textForCommand);
+  if(enhanced!==null)return reply(enhanced);
 
   // MULTI-ASSET INTELLIGENCE — private, read-only latest snapshot.
   if (isMultiAsset(textForCommand)) {
