@@ -102,6 +102,24 @@ Deno.serve(async(req:Request)=>{
  if(url.pathname.endsWith("/manifest.webmanifest"))return new Response(JSON.stringify({name:"ATLAS AI Dashboard",short_name:"ATLAS",start_url:"./",scope:"./",display:"standalone",background_color:"#091324",theme_color:"#101b32",lang:"fa",dir:"rtl"}),{headers:{"Content-Type":"application/manifest+json","Cache-Control":"public, max-age=3600"}});
 
 
+
+ if(url.pathname.endsWith("/api/intelligence")){
+  const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+  if(!base||!key)return json({error:"service_unavailable"},503);
+  try{
+   const [radar,latest,audits]=await Promise.all([
+    readTable(base,key,"atlas_risk_radar_snapshots?select=symbol,asset_group,captured_at,price,change_1h_pct,volatility_24h_pct,risk_score,alert_level,model_version&order=captured_at.desc&limit=400"),
+    readTable(base,key,"atlas_signal_audit?select=source,symbol,direction,score,signal_at,return_pct,directional_hit,status&order=signal_at.desc&limit=300"),
+    readTable(base,key,"atlas_signal_audit?select=directional_hit,return_pct&status=eq.evaluated&limit=1000")
+   ]);
+   const seen=new Set<string>();const unique=radar.filter((r:any)=>{if(seen.has(r.symbol))return false;seen.add(r.symbol);return true}).slice(0,100);
+   const valid=audits.filter((r:any)=>r.directional_hit!==null);
+   const hits=valid.filter((r:any)=>r.directional_hit===true).length;
+   return json({checked_at:new Date().toISOString(),mode:"shadow",radar:unique,signals:latest.slice(0,80),
+    performance:{evaluated:audits.length,directional_evaluable:valid.length,hits,hit_rate:valid.length?hits/valid.length:null},
+    disclaimer:"Heuristic risk scores are not calibrated probabilities; historical outcomes do not guarantee future results."});
+  }catch(e){console.error("ATLAS intelligence unavailable",String(e));return json({error:"intelligence_unavailable"},503)}
+ }
  if(url.pathname.endsWith("/api/reports")){
   const cycle=String(url.searchParams.get("cycle")||"").toUpperCase();
   if(!["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].includes(cycle))return json({error:"invalid_cycle"},400);
