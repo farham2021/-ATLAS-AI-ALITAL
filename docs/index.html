@@ -1,12 +1,12 @@
 <!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0d1830"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="./manifest.webmanifest"><script src="https://telegram.org/js/telegram-web-app.js"></script><title>ATLAS AI | Market Desk</title><style>
 :root{font-family:system-ui,-apple-system,sans-serif;background:#081120;color:#eaf3ff}*{box-sizing:border-box}body{margin:0;background:linear-gradient(155deg,#132b4c,#081120 45%);min-height:100vh}main{max-width:1200px;margin:auto;padding:20px 16px 80px}header{display:flex;justify-content:space-between;align-items:center;gap:12px}h1{font-size:25px;margin:5px 0}h2{font-size:18px;margin:0 0 15px}.muted,small{color:#a4b7d2}nav{display:flex;gap:8px;overflow-x:auto;padding:18px 0}button,select,input{font:inherit}button{border:1px solid #385475;border-radius:11px;background:#172b45;color:#e9f4ff;padding:10px 15px;cursor:pointer;white-space:nowrap}button.active,.primary{background:#1680bb;border-color:#1680bb}button:focus-visible{outline:2px solid #fff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#13233b;border:1px solid #29425e;border-radius:16px;padding:17px;margin:0 0 13px}.metric{font-size:25px;font-weight:750;margin:8px 0}.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #29415a}.row:last-child{border:0}.tag{background:#1e405b;border-radius:7px;padding:5px 8px;font-size:12px}.up{color:#65d7ab}.down{color:#ff969d}.warn{color:#ffcc8b}select,input{background:#0d1a2c;border:1px solid #3d5d7e;border-radius:10px;color:#fff;padding:10px;max-width:100%}.controls{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:15px}section[hidden]{display:none}#notice{color:#ffca99;min-height:20px}.empty{color:#a4b7d2;padding:16px 0}footer{color:#9fb2cc;font-size:12px;line-height:1.8;margin-top:18px}@media(max-width:480px){h1{font-size:20px}main{padding:15px 12px 75px}}
-</style></head><body><main><header><div><strong style="color:#77d8ff;letter-spacing:2px">ATLAS AI</strong><h1>میز کار هوشمند سرمایه‌گذاری</h1><small>کریپتو · بورس ایران · فرصت‌ها · هشدارها</small></div><button id="refresh">↻ بروزرسانی</button></header><nav id="nav" aria-label="بخش‌های برنامه"></nav><div id="notice" role="alert"></div>
+</style></head><body><main><header><div><strong style="color:#77d8ff;letter-spacing:2px">ATLAS AI</strong><h1>میز کار هوشمند سرمایه‌گذاری</h1><small>کریپتو · بورس ایران · فرصت‌ها · هشدارها</small></div><div class="controls"><select id="language" aria-label="Language"><option value="fa">فارسی</option><option value="en">English</option></select><button id="refresh">↻ بروزرسانی</button></div></header><nav id="nav" aria-label="بخش‌های برنامه"></nav><div id="notice" role="alert"></div>
 <section id="home"><div class="grid" id="metrics"></div><div class="grid"><article class="card"><h2>آخرین چرخه‌های تحلیل</h2><div id="cycles"></div></article><article class="card"><h2>آخرین هشدارها</h2><div id="latest"></div></article></div></section>
 <section id="portfolio" hidden><article class="card"><h2>💼 سبد اختصاصی و سود و زیان</h2><div id="loginState">برای نمایش دارایی‌های شخصی، این صفحه را از دکمه «اپلیکیشن ATLAS» داخل بات تلگرام باز کنید.</div><div id="holdings"></div></article><article class="card"><h2>ثبت مبنای خرید</h2><div class="controls"><input id="basisCoin" placeholder="BTC" maxlength="20"><input id="basisPrice" type="number" min="0" step="any" placeholder="قیمت خرید USD"><input id="basisDate" type="date"><button id="saveBasis">ذخیره</button></div></article><article class="card"><h2>ثبت تراکنش در دفتر مستقل</h2><div class="controls"><select id="tradeSide"><option value="BUY">خرید</option><option value="SELL">فروش</option></select><input id="tradeCoin" placeholder="BTC" maxlength="20"><input id="tradeQty" type="number" min="0" step="any" placeholder="مقدار"><input id="tradePrice" type="number" min="0" step="any" placeholder="قیمت واحد USD"><button id="saveTrade">ثبت تراکنش</button></div><small>ثبت معامله به‌صورت اتمیک موجودی را بروزرسانی می‌کند. مبنای دارایی تاریخی محفوظ می‌ماند.</small><div id="trades"></div></article></section>
 <section id="crypto" hidden><article class="card"><h2>📈 تحلیل رمزارزها</h2><div class="controls"><select id="coin"></select><select id="tf"><option value="1h">۱ ساعت</option><option value="4h">۴ ساعت</option><option value="12h">۱۲ ساعت</option><option value="24h">۲۴ ساعت</option><option value="1w">یک هفته</option><option value="1mo">یک ماه</option></select><button class="primary" id="analyze">تحلیل</button></div><div id="analysis"></div></article><article class="card"><h2>آخرین قیمت‌های ذخیره‌شده</h2><div id="cryptolist"></div></article></section>
 <section id="iran" hidden><article class="card"><h2>🇮🇷 بورس و صندوق‌های ایران</h2><div class="controls"><select id="iranSymbol"></select><button class="primary" id="iranAnalyze">بررسی نماد</button></div><div id="iranAnalysis"></div></article><article class="card"><h2>تابلوی ایران</h2><div id="iranlist"></div></article></section>
 <section id="metals" hidden><article class="card"><h2>🥇 طلا، نقره و مس</h2><p class="muted">آخرین قیمت ذخیره‌شده، با زمان ثبت و واحد منبع. قیمت محاسباتی نقره ۹۹۹ نرخ قطعی فروش نیست.</p><div id="metallist"></div></article><article class="card"><h2>تحلیل چندبازه‌ای فلزات</h2><div class="controls"><select id="metalSymbol"></select><select id="metalTf"><option value="1h">۱ ساعت</option><option value="4h">۴ ساعت</option><option value="12h">۱۲ ساعت</option><option value="24h">۲۴ ساعت</option><option value="1w">هفته</option><option value="1mo">ماه</option></select><button id="metalAnalyze">تحلیل</button></div><div id="metalAnalysis"></div></article></section><section id="alerts" hidden><article class="card"><h2>🔔 هشدارهای صعود و ریزش</h2><p class="muted">هشدارهای ثبت‌شده در موتور ATLAS؛ وضعیت SENT به‌تنهایی تحویل به کاربر را اثبات نمی‌کند.</p><div id="allalerts"></div><article class="card"><h2>تنظیم هشدار شخصی</h2><div class="controls"><input id="alertCoin" placeholder="BTC"><input id="risePct" type="number" step="any" min="0" max="100" placeholder="رشد ٪"><input id="fallPct" type="number" step="any" min="0" max="100" placeholder="ریزش ٪"><button id="saveAlert">ذخیره هشدار</button></div><small>ذخیره تنظیم فعال است؛ اتصال به موتور ارسال خودکار هنوز در دست تکمیل است.</small></article><p>برای تنظیم آستانه شخصی در تلگرام: <code>/watch BTC fall 5</code> یا <code>/watch BTC rise 5</code></p><small>اتصال آستانه‌های شخصی به ارسال خودکار هنوز کامل نیست.</small></article></section>
-<section id="reports" hidden><article class="card"><h2>🗓 گزارش‌های زمان‌بندی‌شده</h2><div id="allcycles"></div><h2>جزئیات آخرین تحلیل DEEP4H</h2><div id="deepreports"></div><p class="muted">زمان ثبت اجرای موفق نمایش داده می‌شود؛ محتوای کامل خروجی هر چرخه هنوز در این بخش بارگذاری نشده است.</p></article></section>
+<section id="reports" hidden><article class="card"><h2>🗓 گزارش‌های زمان‌بندی‌شده</h2><div id="allcycles"></div><h2>جزئیات آخرین گزارش</h2><div class="controls"><select id="reportCycle"><option value="HOURLY">HOURLY</option><option value="DEEP4H">DEEP4H</option><option value="DAILY16">DAILY16</option><option value="NIGHTLY23">NIGHTLY23</option></select><button id="reportLoad">نمایش گزارش</button></div><div id="reportDetails"></div><h2>آخرین تحلیل DEEP4H</h2><div id="deepreports"></div><p class="muted">زمان ثبت اجرای موفق نمایش داده می‌شود؛ محتوای کامل خروجی هر چرخه هنوز در این بخش بارگذاری نشده است.</p></article></section>
 <section id="opportunities" hidden><article class="card"><h2>🎯 فرصت‌های ورود و خروج</h2><div id="signals"></div><small>این داده‌ها سیگنال‌های ذخیره‌شده هستند و توصیه قطعی سرمایه‌گذاری محسوب نمی‌شوند.</small></article></section>
 <section id="invite" hidden><article class="card"><h2>🤝 دعوت از کاربران</h2><p>نسخه عمومی داشبورد را با دیگران به اشتراک بگذارید. اطلاعات خصوصی کاربران نمایش داده نمی‌شود.</p><button class="primary" id="share">کپی لینک دعوت وب</button><p id="referrals"></p><p class="muted">مدیریت عضویت، هویت‌سنجی و پرداخت اشتراک هنوز به نسخه وب متصل نشده‌اند.</p></article></section>
 <footer>داده‌ها از آخرین رکوردهای ذخیره‌شده در ATLAS خوانده می‌شوند و الزاماً قیمت لحظه‌ای بازار نیستند. زمان نمایش به وقت تهران است. این برنامه سفارش خرید یا فروش ارسال نمی‌کند.</footer></main><script>
@@ -31,7 +31,7 @@ renderRows('metallist',visible,x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_a
 const metalSelect=$('metalSymbol');metalSelect.replaceChildren(...visible.map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));metalAnalysis();
 renderRows('deepreports',(d.deep||[]).slice(0,25),x=>[x.symbol+' · '+(x.asset_group||'')+' · '+(x.direction||'—')+' · '+(x.decision_state||'—'),'اطمینان '+num(x.confidence)+' | قیمت '+num(x.price)+' | '+fmt(x.captured_at)]);
 renderRows('signals',d.opportunities,x=>[x.symbol+' · '+x.direction+' · '+x.lifecycle_state,'ورود '+num(x.entry)+' | حدضرر '+num(x.sl)+' | هدف '+num(x.tp1)+' | اطمینان '+num(x.confidence)]);
-const sel=$('iranSymbol'),old=sel.value;sel.replaceChildren(...d.iran.filter(x=>x.symbol&&x.price!==null).map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));if(d.iran.some(x=>x.symbol===old))sel.value=old;analysis();iranAnalysis();await privateLoad();
+const sel=$('iranSymbol'),old=sel.value;sel.replaceChildren(...d.iran.filter(x=>x.symbol&&x.price!==null).map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));if(d.iran.some(x=>x.symbol===old))sel.value=old;analysis();iranAnalysis();await privateLoad();translateUI();
 }catch(e){$('notice').textContent='خطا در دریافت داده: '+String(e.message||e)}}load();
 
 const initData=window.Telegram?.WebApp?.initData||"";let privateState=null;
@@ -58,7 +58,7 @@ function computeTradePnL(trades,opening){
 async function privateLoad(){
  if(!initData)return;
  try{
-  const d=await privateRequest();privateState=d;
+  const d=await privateRequest();privateState=d;if(d.language&&d.language!==currentLang&&!localStorage.getItem('atlas_language'))setLang(d.language,false);
   $('loginState').textContent="ورود تأییدشده تلگرام | شناسه کاربر "+d.user_id;
   const basis=new Map(d.basis.map(x=>[x.coin,x])),prices=new Map((state.crypto||[]).map(x=>[x.symbol,Number(x.price)]));
   const pnl=computeTradePnL(d.trades,d.opening);const total=d.holdings.reduce((n,x)=>n+(Number.isFinite(prices.get(x.coin))?Number(x.qty)*prices.get(x.coin):0),0);
@@ -83,4 +83,54 @@ $('saveAlert').onclick=()=>savePrivate({action:'alert',coin:$('alertCoin').value
 window.Telegram?.WebApp?.ready();window.Telegram?.WebApp?.expand();
 const startRef=new URLSearchParams(location.search).get('ref');
 if(startRef&&initData)privateRequest({action:'referral',inviter:startRef}).catch(()=>{});
+
+const EN={
+'میز کار هوشمند سرمایه‌گذاری':'Intelligent Investment Desk',
+'کریپتو · بورس ایران · فرصت‌ها · هشدارها':'Crypto · Iran Markets · Opportunities · Alerts',
+'↻ بروزرسانی':'↻ Refresh',
+'🏠 خانه':'🏠 Home','💼 دارایی‌ها':'💼 Portfolio','📈 کریپتو':'📈 Crypto','🇮🇷 بورس ایران':'🇮🇷 Iran Stocks','🥇 فلزات':'🥇 Metals','🔔 هشدارها':'🔔 Alerts','🗓 گزارش‌ها':'🗓 Reports','🎯 فرصت‌ها':'🎯 Opportunities','🤝 دعوت':'🤝 Invite',
+'آخرین چرخه‌های تحلیل':'Latest analysis cycles','آخرین هشدارها':'Latest alerts','💼 سبد اختصاصی و سود و زیان':'💼 Personal portfolio & P/L',
+'ثبت مبنای خرید':'Set purchase cost basis','ثبت تراکنش در دفتر مستقل':'Record trade','ثبت':'Save','ذخیره':'Save',
+'📈 تحلیل رمزارزها':'📈 Crypto analysis','تحلیل':'Analyze','آخرین قیمت‌های ذخیره‌شده':'Latest saved prices',
+'🇮🇷 بورس و صندوق‌های ایران':'🇮🇷 Iran equities and funds','بررسی نماد':'Analyze symbol','تابلوی ایران':'Iran market board',
+'🥇 طلا، نقره و مس':'🥇 Gold, silver and copper','تحلیل چندبازه‌ای فلزات':'Multi-timeframe metals analysis',
+'🔔 هشدارهای صعود و ریزش':'🔔 Rise and fall alerts','تنظیم هشدار شخصی':'Personal alert thresholds','ذخیره هشدار':'Save alert',
+'🗓 گزارش‌های زمان‌بندی‌شده':'🗓 Scheduled reports','جزئیات آخرین گزارش':'Latest report details','نمایش گزارش':'Show report',
+'آخرین تحلیل DEEP4H':'Latest DEEP4H analysis','🎯 فرصت‌های ورود و خروج':'🎯 Entry and exit opportunities',
+'🤝 دعوت از کاربران':'🤝 Invite users','کپی لینک دعوت وب':'Copy web invite link',
+'یک ساعت':'One hour','۱ ساعت':'1 hour','۴ ساعت':'4 hours','۱۲ ساعت':'12 hours','۲۴ ساعت':'24 hours','یک هفته':'One week','یک ماه':'One month','هفته':'Week','ماه':'Month',
+'خرید':'Buy','فروش':'Sell','قیمت خرید USD':'Purchase price USD','مقدار':'Quantity','قیمت واحد USD':'Unit price USD','رشد ٪':'Rise %','ریزش ٪':'Fall %',
+'داده‌ای برای نمایش موجود نیست':'No data available','قیمت ذخیره‌شده':'Saved price','اطمینان':'Confidence',
+'برای نمایش دارایی‌های شخصی، این صفحه را از دکمه «اپلیکیشن ATLAS» داخل بات تلگرام باز کنید.':'To access your private portfolio, open this page using the ATLAS App button inside Telegram.',
+'این دفتر فعلاً موجودی‌های قبلی را تغییر نمی‌دهد؛ تطبیق حساب ضروری است.':'Legacy holdings are preserved; trade reconciliation is required.',
+'ثبت معامله به‌صورت اتمیک موجودی را بروزرسانی می‌کند. مبنای دارایی تاریخی محفوظ می‌ماند.':'Trades update holdings atomically. Legacy cost basis is preserved.',
+'قیمت محاسباتی نقره ۹۹۹ نرخ قطعی فروش نیست.':'Calculated silver 999 value is not an executable selling price.',
+'برای تنظیم آستانه شخصی در تلگرام:':'Set a personal alert threshold in Telegram:',
+'ارسال خودکار هشدار هنوز در دست تکمیل است.':'Automated alert delivery is not yet fully verified.'
+};
+let currentLang='fa';const originalText=new WeakMap(),originalPlaceholders=new WeakMap();
+function translateUI(){
+ document.documentElement.lang=currentLang;document.documentElement.dir=currentLang==='fa'?'rtl':'ltr';
+ const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+ while(walk.nextNode()){const n=walk.currentNode;if(n.parentElement?.closest('script,style'))continue;
+  if(!originalText.has(n))originalText.set(n,n.textContent);
+  const orig=originalText.get(n);if(orig.trim() in EN){const before=orig.match(/^\s*/)[0],after=orig.match(/\s*$/)[0];n.textContent=before+(currentLang==='en'?EN[orig.trim()]:orig.trim())+after}
+ }
+ document.querySelectorAll('input[placeholder]').forEach(el=>{if(!originalPlaceholders.has(el))originalPlaceholders.set(el,el.placeholder);const x=originalPlaceholders.get(el);el.placeholder=currentLang==='en'?(EN[x]||x):x});
+ document.querySelectorAll('#nav button').forEach(b=>{const x=tabs.find(z=>z[0]===b.dataset.tab);if(x)b.textContent=currentLang==='en'?(EN[x[1]]||x[1]):x[1]});
+}
+function setLang(lang,persist=true){currentLang=lang==='en'?'en':'fa';$('language').value=currentLang;try{localStorage.setItem('atlas_language',currentLang)}catch{}translateUI();if(persist&&initData)privateRequest({action:'language',language:currentLang}).catch(()=>{});}
+$('language').onchange=()=>setLang($('language').value);
+try{setLang(localStorage.getItem('atlas_language')||'fa',false)}catch{setLang('fa',false)}
+async function loadReport(){
+ const cycle=$('reportCycle').value,el=$('reportDetails');el.replaceChildren(node('div',currentLang==='en'?'Loading report…':'در حال دریافت گزارش…'));
+ try{
+  const r=await fetch(BASE+'/api/reports?cycle='+encodeURIComponent(cycle),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);
+  const d=await r.json();el.replaceChildren(node('div',(currentLang==='en'?'Latest completed: ':'آخرین اجرای موفق: ')+fmt(d.run?.completed_at)));
+  if(d.disclaimer)el.append(node('p',currentLang==='en'?'Showing snapshots near this cycle, not a complete original report.':'این‌ها رکوردهای تحلیلی نزدیک به زمان چرخه هستند، نه متن کامل گزارش اصلی.','warn'));
+  const list=node('div','');el.append(list);if(!d.rows?.length){list.append(node('p',currentLang==='en'?'No stored report rows found for this run.':'رکورد تحلیلی مرتبط با این اجرا یافت نشد.','empty'));return}
+  for(const x of d.rows){const row=node('div','','row');row.append(node('span',x.symbol+' · '+(x.direction||'—')+' · '+(x.decision_state||'—')),node('span',(currentLang==='en'?'Confidence ':'اطمینان ')+num(x.confidence)+' · '+num(x.price),'tag'));list.append(row)}
+ }catch(e){el.replaceChildren(node('p',(currentLang==='en'?'Report error: ':'خطای گزارش: ')+String(e.message),'warn'))}
+}
+$('reportLoad').onclick=loadReport;$('reportCycle').onchange=loadReport;loadReport();
 </script></body></html>
