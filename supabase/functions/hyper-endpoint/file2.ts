@@ -1753,7 +1753,7 @@ const ATLAS_MAIN_MENU=[
   ["🧭 پلن نقد جدید","📊 تخصیص سرمایه"],
   ["💼 سبد دارایی","👤 پروفایل من"],
   ["📱 اپلیکیشن ATLAS","📊 سود و زیان سبد"],
-  ["📅 گزارش چرخه‌ها","🤝 دعوت کاربر"],
+  ["📅 گزارش چرخه‌ها","🌐 زبان / Language"],
   ["🎯 فرصت‌های ورود و خروج","🤝 دعوت کاربر"],
   ["🎯 اهداف و تنظیمات","📈 تحلیل بازار"],
   ["🔔 هشدارها","❓ راهنما"]
@@ -1781,11 +1781,65 @@ const ATLAS_ALERT_MENU=[
   ["📍 وضعیت بات","🏠 منوی اصلی"],
   ["⚙️ تنظیم هشدار نماد","🔔 آخرین هشدارها"]
 ];
-function atlasKeyboard(rows:string[][]) {
-  return {keyboard:rows.map(row=>row.map(text=>text==="📱 اپلیکیشن ATLAS"?{text,web_app:{url:"https://farham2021.github.io/-ATLAS-AI-ALITAL/"}}:{text})),resize_keyboard:true,is_persistent:true,
-    input_field_placeholder:"از منوی فارسی انتخاب کنید"};
+
+const ATLAS_EN_LABELS:Record<string,string>={
+"🧭 پلن نقد جدید":"🧭 New cash plan","📊 تخصیص سرمایه":"📊 Allocation",
+"💼 سبد دارایی":"💼 Portfolio","👤 پروفایل من":"👤 My profile",
+"📱 اپلیکیشن ATLAS":"📱 ATLAS App","📊 سود و زیان سبد":"📊 Portfolio P&L",
+"📅 گزارش چرخه‌ها":"📅 Cycle reports","🤝 دعوت کاربر":"🤝 Invite users",
+"🎯 فرصت‌های ورود و خروج":"🎯 Opportunities","🎯 اهداف و تنظیمات":"🎯 Goals & settings",
+"📈 تحلیل بازار":"📈 Market analysis","🔔 هشدارها":"🔔 Alerts","❓ راهنما":"❓ Help",
+"🌐 زبان / Language":"🌐 Language / زبان",
+"🌐 گزارش چندبازاری":"🌐 Multi-asset report","📚 پژوهش بازار":"📚 Market research",
+"📈 تحلیل نماد":"📈 Analyze symbol","🇮🇷 بورس ایران":"🇮🇷 Iran stocks",
+"🥇 فلزات و قیمت‌ها":"🥇 Metals & prices","📑 آخرین تحلیل DEEP4H":"📑 Latest DEEP4H",
+"⚖️ بازتعادل سبد":"⚖️ Rebalance","🏠 منوی اصلی":"🏠 Main menu",
+"⚙️ تنظیم هشدار نماد":"⚙️ Alert settings","🔔 آخرین هشدارها":"🔔 Recent alerts",
+"📍 وضعیت بات":"📍 Bot status","🔔 روشن‌کردن هشدار":"🔔 Enable alerts",
+"🔕 خاموش‌کردن هشدار":"🔕 Disable alerts",
+"🎯 هدف رشد":"🎯 Growth goal","🛡 حفظ سرمایه":"🛡 Capital preservation",
+"⚡ سود سریع":"⚡ Fast profit","🧩 تنوع‌بخشی":"🧩 Diversification",
+"📅 افق میان‌مدت":"📅 Medium horizon","⚖️ ریسک متوسط":"⚖️ Moderate risk",
+"💰 سرمایه جدید":"💰 New capital","📐 درصد بازارها":"📐 Market weights",
+"🚫 محدودیت‌ها":"🚫 Exclusions","🏦 پلتفرم‌ها":"🏦 Platforms",
+"💵 پلن ۲۰۰۰ دلار":"💵 $2000 plan","💳 نقد ثبت‌شده":"💳 Saved cash",
+"💰 مبلغ دلخواه":"💰 Custom amount"
+};
+function atlasLabelOriginal(t:string){return Object.entries(ATLAS_EN_LABELS).find(([,v])=>v===t)?.[0]||t}
+function atlasLocalized(body:string,lang:string){
+ if(lang!=="en")return body;
+ const replacements:Record<string,string>={
+ "سبد خالی است":"Portfolio is empty","قیمت خرید":"Purchase price",
+ "ثبت شد":"saved","برای مشاهده":"To view","برای سود و زیان":"For P&L",
+ "قیمت ثبت‌شده":"Saved price","قیمت ذخیره‌شده":"Saved price",
+ "آخرین داده ذخیره‌شده":"Latest stored data","نه لزوماً قیمت لحظه‌ای":"not necessarily live price",
+ "ناموجود":"Unavailable","موجود نیست":"Not available",
+ "داده مستقیم این بازه هنوز موجود نیست":"Direct timeframe data unavailable",
+ "روند":"Trend","همسویی":"Alignment","اطمینان":"Confidence",
+ "آخرین تحلیل":"Latest analysis","آخرین":"Latest",
+ "گزارش زمان اجرای چرخه‌ها":"Cycle run timestamps",
+ "گزارش":"Report","چرخه‌ها":"Cycles","فلزات و بازار ایران":"Metals and Iran markets",
+ "ارزش محاسباتی است، نه نرخ قطعی فروش":"is a calculated value, not an executable sale price",
+ "فرصت‌های ثبت‌شده":"Saved opportunities","هشدار":"Alert",
+ "آستانه":"Threshold","هنوز":"Not yet","ارسال خودکار":"Automatic delivery",
+ "زمان اجرای":"Execution time","نماد":"Symbol",
+ "ورود":"Entry","حدضرر":"Stop loss","هدف":"Target",
+ "تحلیل":"Analysis","بازه‌ها":"Timeframes","برای":"For",
+ "سود و زیان سبد":"Portfolio profit and loss","مقدار":"Quantity",
+ "وزن":"Weight","قیمت":"Price","مبنای خرید":"Cost basis",
+ "موجودی":"Balance","دارایی":"Asset","ثبت نشده":"Not recorded",
+ "در دسترس نیست":"Unavailable","را بفرست":"send",
+ "آماده نیست":"Not ready","ذخیره می‌شود":"will be saved"
+ };
+ let out=body;for(const [a,b] of Object.entries(replacements))out=out.split(a).join(b);
+ return out;
+}
+function atlasKeyboard(rows:string[][],lang="fa") {
+  return {keyboard:rows.map(row=>row.map(text=>text==="📱 اپلیکیشن ATLAS"?{text:lang==="en"?ATLAS_EN_LABELS[text]:text,web_app:{url:"https://farham2021.github.io/-ATLAS-AI-ALITAL/"}}:{text:lang==="en"?(ATLAS_EN_LABELS[text]||text):text})),resize_keyboard:true,is_persistent:true,
+    input_field_placeholder:lang==="en"?"Choose an option":"از منوی فارسی انتخاب کنید"};
 }
 function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]}|null {
+  t=atlasLabelOriginal(t);
   const menus:Record<string,{menu:string;rows:string[][]}>={
     "🏠 منوی اصلی":{menu:"🏠 منوی اصلی ATLAS",rows:ATLAS_MAIN_MENU},
     "🎯 اهداف و تنظیمات":{menu:"تنظیم هدف، ریسک، افق و سرمایه:",rows:ATLAS_SETTINGS_MENU},
@@ -1805,7 +1859,7 @@ function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]
     "⚖️ بازتعادل سبد":"/rebalance",
     "🔔 روشن‌کردن هشدار":"/hourlyon","🔕 خاموش‌کردن هشدار":"/hourlyoff",
     "📍 وضعیت بات":"/status","🩺 سلامت موتور":"/health","🔔 آخرین هشدارها":"/alerts",
-    "📊 سود و زیان سبد":"/pnl","📅 گزارش چرخه‌ها":"/reports",
+    "📊 سود و زیان سبد":"/pnl","📅 گزارش چرخه‌ها":"/reports","🌐 زبان / Language":"/language",
     "🎯 فرصت‌های ورود و خروج":"/opportunities","🤝 دعوت کاربر":"/invite",
     "📈 تحلیل نماد":"/analyze_help","🇮🇷 بورس ایران":"/tse",
     "🥇 فلزات و قیمت‌ها":"/metals","📑 آخرین تحلیل DEEP4H":"/deepreport",
@@ -1883,9 +1937,23 @@ async function atlasEnhanced(env:any, userId:string, text:string):Promise<string
   const field:any={"1h":"h1","4h":"h4","24h":"d1","1w":"w1"};
   return "📈 "+coin+" | "+tf+"\nقیمت ثبت‌شده: "+fmtPx(asset.row.price)+"\nروند: "+(field[tf]?String(m?.[field[tf]]||"داده موجود نیست"):"داده مستقیم این بازه هنوز موجود نیست")+"\nهمسویی MTF: "+(m?.agreement_pct??"—")+"%\nآخرین MTF: "+(m?.timestamp||"—")+"\nاین تحلیل فقط داده ذخیره‌شده است؛ سیگنال مستقل برای بازه‌های فاقد داده ساخته نمی‌شود.";
  }
+
+ if(cmd==="/report"&&words[1]){
+  const cycle=words[1].toUpperCase();
+  if(!["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].includes(cycle))return "Valid cycles: HOURLY, DEEP4H, DAILY16, NIGHTLY23";
+  const runs=await get("atlas_scheduler_runs","cycle=eq."+cycle+"&status=eq.DONE&select=completed_at&order=completed_at.desc&limit=1");
+  const completed=runs?.[0]?.completed_at;
+  if(!completed)return "No completed run found for "+cycle;
+  const end=new Date(completed),start=new Date(end.getTime()-90*60000);
+  const table=cycle==="DEEP4H"?"atlas_deep_4h_snapshots":"atlas_hourly_signal_snapshots";
+  const query="select=symbol,asset_group,direction,confidence,price,captured_at,decision_state&captured_at=gte."+encodeURIComponent(start.toISOString())+"&captured_at=lte."+encodeURIComponent(new Date(end.getTime()+300000).toISOString())+"&order=captured_at.desc&limit=80";
+  const rows=await get(table,query),seen=new Set<string>(),uniq=rows.filter((r:any)=>{if(seen.has(r.symbol))return false;seen.add(r.symbol);return true}).slice(0,20);
+  const disclaimer=cycle==="DAILY16"||cycle==="NIGHTLY23"?"\nNote: Nearby stored snapshots, not the full original report.":"";
+  return "📑 "+cycle+" | "+completed+"\n"+uniq.map((r:any)=>r.symbol+" | "+(r.direction||"—")+" | "+(r.decision_state||"—")+" | confidence "+(r.confidence??"—")+" | price "+(r.price??"—")).join("\n")+disclaimer;
+ }
  if(cmd==="/reports"){
   const rows=await get("atlas_scheduler_runs","status=eq.DONE&select=cycle,completed_at&order=completed_at.desc&limit=100");
-  return "🗓 گزارش زمان اجرای چرخه‌ها\n"+["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].map(c=>{const x=(Array.isArray(rows)?rows:[]).find((r:any)=>r.cycle===c);return c+": "+(x?.completed_at||"ناموجود");}).join("\n")+"\nمحتوای کامل گزارش در این بخش هنوز پیاده‌سازی نشده است.";
+  return "🗓 گزارش زمان اجرای چرخه‌ها\n"+["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].map(c=>{const x=(Array.isArray(rows)?rows:[]).find((r:any)=>r.cycle===c);return c+": "+(x?.completed_at||"ناموجود");}).join("\n")+"\nجزئیات: /report HOURLY یا /report DEEP4H یا /report DAILY16 یا /report NIGHTLY23";
  }
  if(cmd==="/opportunities"){
   const rows=await get("atlas_signal_lifecycle","select=symbol,direction,lifecycle_state,confidence,entry,sl,tp1,updated_at&order=updated_at.desc&limit=8");
@@ -2030,6 +2098,17 @@ async function handlePrivate(
     }
   }
 
+  let lang="fa";
+  try{const lp=await sb(env,"GET","/rest/v1/atlas_desk_language_preferences?user_id=eq."+encodeURIComponent(userId)+"&select=language");lang=lp?.[0]?.language==="en"?"en":"fa"}catch(e){console.error("language preference read unavailable",String(e))}
+  if(["/language","/lang","🌐 زبان / Language","🌐 Language / زبان"].includes(routedText)){
+    return tg(env,"sendMessage",{chat_id:chatId,text:"Choose your language / زبان را انتخاب کنید:",reply_markup:{keyboard:[[{text:"🇮🇷 فارسی"},{text:"🇬🇧 English"}]],resize_keyboard:true}});
+  }
+  if(["🇮🇷 فارسی","🇬🇧 English"].includes(text)||/^\/lang\s+(fa|en)$/i.test(text)){
+    const next=text==="🇬🇧 English"||/en$/i.test(text)?"en":"fa";
+    await sb(env,"POST","/rest/v1/atlas_desk_language_preferences?on_conflict=user_id",{user_id:userId,language:next,updated_at:nowIso()});
+    return tg(env,"sendMessage",{chat_id:chatId,text:next==="en"?"Language changed to English.":"زبان به فارسی تغییر کرد.",reply_markup:atlasKeyboard(ATLAS_MAIN_MENU,next)});
+  }
+
   const reply =
     async (body:string) =>
       await tg(
@@ -2037,17 +2116,17 @@ async function handlePrivate(
         "sendMessage",
         {
           chat_id:chatId,
-          text:body,
-          reply_markup:atlasKeyboard(ATLAS_MAIN_MENU)
+          text:atlasLocalized(body,lang),
+          reply_markup:atlasKeyboard(ATLAS_MAIN_MENU,lang)
         }
       );
 
-  if(menuRoute?.menu)return tg(env,"sendMessage",{chat_id:chatId,text:menuRoute.menu,
-    reply_markup:atlasKeyboard(menuRoute.rows||ATLAS_MAIN_MENU)});
+  if(menuRoute?.menu)return tg(env,"sendMessage",{chat_id:chatId,text:atlasLocalized(menuRoute.menu,lang),
+    reply_markup:atlasKeyboard(menuRoute.rows||ATLAS_MAIN_MENU,lang)});
   if(text==="/menu"||text==="/start"||text.startsWith("/start@")) {
     try {await atlasInstallCommands(env);} catch(e){console.error("Telegram command menu: "+String(e));}
-    return tg(env,"sendMessage",{chat_id:chatId,text:"به ATLAS خوش آمدید. گزینه موردنظر را از منوی فارسی انتخاب کنید.",
-      reply_markup:atlasKeyboard(ATLAS_MAIN_MENU)});
+    return tg(env,"sendMessage",{chat_id:chatId,text:lang==="en"?"Welcome to ATLAS. Choose an option from the menu.":"به ATLAS خوش آمدید. گزینه موردنظر را از منوی فارسی انتخاب کنید.",
+      reply_markup:atlasKeyboard(ATLAS_MAIN_MENU,lang)});
   }
   // Persian keyboard labels dispatch to existing command handlers without duplicating business logic.
   const textForCommand=routedText;
