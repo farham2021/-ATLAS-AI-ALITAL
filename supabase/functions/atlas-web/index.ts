@@ -19,6 +19,25 @@ Deno.serve(async(req:Request)=>{
  if(req.method==="OPTIONS")return new Response(null,{status:204,headers:HEAD});
  if(req.method!=="GET"&&req.method!=="HEAD")return json({error:"method_not_allowed"},405);
  if(url.pathname.endsWith("/manifest.webmanifest"))return new Response(JSON.stringify({name:"ATLAS AI Dashboard",short_name:"ATLAS",start_url:"./",scope:"./",display:"standalone",background_color:"#091324",theme_color:"#101b32",lang:"fa",dir:"rtl"}),{headers:{"Content-Type":"application/manifest+json","Cache-Control":"public, max-age=3600"}});
+
+ if(url.pathname.endsWith("/api/overview")){
+  const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+  if(!base||!key)return json({error:"service_unavailable"},503);
+  try{
+   const queries=[
+    "atlas_scheduler_runs?select=cycle,completed_at&status=eq.DONE&order=completed_at.desc&limit=120",
+    "atlas_free_alert_events?select=symbol,direction,timeframe,severity,confidence,timestamp&telegram_status=eq.SENT&order=timestamp.desc&limit=30",
+    "atlas_hourly_signal_snapshots?select=symbol,price,captured_at&order=captured_at.desc&limit=200",
+    "atlas_tse_snapshots?select=symbol,price,captured_at&order=captured_at.desc&limit=200",
+    "atlas_mtf_snapshots?select=symbol,timestamp,direction,h1,h4,d1,w1,agreement_pct&order=timestamp.desc&limit=200",
+    "atlas_signal_lifecycle?select=symbol,direction,lifecycle_state,confidence,entry,sl,tp1,updated_at&order=updated_at.desc&limit=20"
+   ];
+   const [runs,alerts,cryptorows,iranrows,mtfrows,opportunities]=await Promise.all(queries.map(q=>readTable(base,key,q)));
+   const unique=(rows:any[],limit:number)=>{const seen=new Set<string>();return rows.filter((x:any)=>{const k=String(x.symbol||"");if(!k||seen.has(k))return false;seen.add(k);return true}).slice(0,limit)};
+   const cycles=["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].map(cycle=>({cycle,completed_at:runs.find((r:any)=>r.cycle===cycle)?.completed_at||null}));
+   return json({checked_at:new Date().toISOString(),cycles,alerts,crypto:unique(cryptorows,100),iran:unique(iranrows,100),mtf:unique(mtfrows,100),opportunities});
+  }catch(e){console.error("ATLAS overview unavailable",String(e));return json({error:"data_unavailable"},503)}
+ }
  if(url.pathname.endsWith("/api/status")){
   const base=Deno.env.get("SUPABASE_URL")||"";const key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
   if(!base||!key)return json({error:"service_unavailable"},503);
