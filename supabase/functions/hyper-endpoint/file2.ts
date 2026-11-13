@@ -2002,6 +2002,15 @@ async function handlePrivate(
     }
   );
 
+  const inviteMatch=text.match(/^\/start\s+invite_(\d{1,20})$/);
+  if(inviteMatch&&inviteMatch[1]!==userId){
+    const inviter=await getUser(env,inviteMatch[1]);
+    if(inviter){
+      const prev=await sb(env,"GET","/rest/v1/atlas_desk_referrals?invited_user_id=eq."+encodeURIComponent(userId)+"&select=invited_user_id");
+      if(!Array.isArray(prev)||prev.length===0)await sb(env,"POST","/rest/v1/atlas_desk_referrals?on_conflict=invited_user_id",{invited_user_id:userId,inviter_user_id:inviteMatch[1]});
+    }
+  }
+
   const reply =
     async (body:string) =>
       await tg(
