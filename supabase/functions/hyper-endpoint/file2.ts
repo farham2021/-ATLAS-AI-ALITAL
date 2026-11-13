@@ -1806,32 +1806,66 @@ const ATLAS_EN_LABELS:Record<string,string>={
 "💰 مبلغ دلخواه":"💰 Custom amount"
 };
 function atlasLabelOriginal(t:string){return Object.entries(ATLAS_EN_LABELS).find(([,v])=>v===t)?.[0]||t}
+
 function atlasLocalized(body:string,lang:string){
  if(lang!=="en")return body;
- const replacements:Record<string,string>={
- "سبد خالی است":"Portfolio is empty","قیمت خرید":"Purchase price",
- "ثبت شد":"saved","برای مشاهده":"To view","برای سود و زیان":"For P&L",
- "قیمت ثبت‌شده":"Saved price","قیمت ذخیره‌شده":"Saved price",
+ const dict:Record<string,string>={
+ "سبد خالی است":"Portfolio is empty","قیمت خرید":"Purchase price","قیمت فروش":"Sale price",
+ "ثبت شد":"saved","ثبت شده":"recorded","برای مشاهده":"To view","برای سود و زیان":"For P&L",
+ "قیمت ثبت‌شده":"Recorded price","قیمت ذخیره‌شده":"Saved price",
  "آخرین داده ذخیره‌شده":"Latest stored data","نه لزوماً قیمت لحظه‌ای":"not necessarily live price",
- "ناموجود":"Unavailable","موجود نیست":"Not available",
- "داده مستقیم این بازه هنوز موجود نیست":"Direct timeframe data unavailable",
- "روند":"Trend","همسویی":"Alignment","اطمینان":"Confidence",
+ "ناموجود":"Unavailable","موجود نیست":"Not available","یافت نشد":"Not found",
+ "داده مستقیم این بازه هنوز موجود نیست":"No direct data for this timeframe",
+ "داده تحلیلی موجود نیست":"No analytical data available",
+ "روند":"Trend","همسویی":"Alignment","هم‌سویی":"Alignment","اطمینان":"Confidence",
  "آخرین تحلیل":"Latest analysis","آخرین":"Latest",
- "گزارش زمان اجرای چرخه‌ها":"Cycle run timestamps",
+ "گزارش زمان اجرای چرخه‌ها":"Cycle run timestamps","گزارش‌های ثبت‌شده":"Saved reports",
  "گزارش":"Report","چرخه‌ها":"Cycles","فلزات و بازار ایران":"Metals and Iran markets",
  "ارزش محاسباتی است، نه نرخ قطعی فروش":"is a calculated value, not an executable sale price",
- "فرصت‌های ثبت‌شده":"Saved opportunities","هشدار":"Alert",
- "آستانه":"Threshold","هنوز":"Not yet","ارسال خودکار":"Automatic delivery",
- "زمان اجرای":"Execution time","نماد":"Symbol",
- "ورود":"Entry","حدضرر":"Stop loss","هدف":"Target",
+ "فرصت‌های ثبت‌شده":"Saved opportunities","هشدارهای ثبت‌شده":"Saved alerts",
+ "هشدار":"Alert","آستانه":"Threshold","هنوز":"Not yet","ارسال خودکار":"Automated delivery",
+ "زمان اجرای":"Execution time","زمان ثبت":"Recorded at","نماد":"Symbol",
+ "ورود":"Entry","حدضرر":"Stop loss","حد ضرر":"Stop loss","هدف":"Target",
  "تحلیل":"Analysis","بازه‌ها":"Timeframes","برای":"For",
- "سود و زیان سبد":"Portfolio profit and loss","مقدار":"Quantity",
- "وزن":"Weight","قیمت":"Price","مبنای خرید":"Cost basis",
+ "سود و زیان سبد":"Portfolio profit and loss","سود و زیان":"Profit and loss",
+ "مقدار":"Quantity","وزن":"Weight","قیمت":"Price","مبنای خرید":"Cost basis",
  "موجودی":"Balance","دارایی":"Asset","ثبت نشده":"Not recorded",
- "در دسترس نیست":"Unavailable","را بفرست":"send",
- "آماده نیست":"Not ready","ذخیره می‌شود":"will be saved"
+ "در دسترس نیست":"Unavailable","را بفرست":"send","آماده نیست":"Not ready",
+ "ذخیره می‌شود":"will be saved","خرید":"Buy","فروش":"Sell",
+ "صعودی":"Bullish","نزولی":"Bearish","خنثی":"Neutral","رشد":"Rise","ریزش":"Fall",
+ "فعال":"Active","غیرفعال":"Inactive","ساعت":"hour","روز":"day","هفته":"week","ماه":"month",
+ "دلار":"USD","تومان":"toman","ریال":"rial","طلا":"Gold","نقره":"Silver","مس":"Copper",
+ "بورس":"Stock market","صندوق":"Fund","سهام":"Stocks",
+ "به ATLAS خوش آمدید. گزینه موردنظر را از منوی فارسی انتخاب کنید.":"Welcome to ATLAS. Choose an option.",
+ "تنظیم هدف، ریسک، افق و سرمایه:":"Set your goal, risk, horizon and capital:",
+ "پلن سرمایه نقد جدید؛ بدون احتساب دارایی‌های قبلی:":"New cash investment plan (excluding existing holdings):",
+ "گزارش‌ها و تحلیل‌های بازار:":"Market reports and analysis:",
+ "تنظیم هشدارهای شخصی:":"Configure personal alerts:",
+ "قیمت یا تاریخ نامعتبر است":"Invalid price or date",
+ "معتبر نیست":"Invalid","وارد کن":"Enter","مثال":"Example",
+ "اطلاعات سلامت زمان‌بند در دسترس نیست.":"Scheduler health information unavailable.",
+ "وضعیت اجرای Workflow به‌صورت مستقل باید بررسی شود.":"Workflow execution must be verified separately.",
+ "زمان‌ها UTC هستند.":"Times are UTC.",
+ "دریافت در دستگاه را تضمین نمی‌کند.":"does not guarantee delivery to the device.",
+ "در ۸۰ رکورد اخیر یافت نشد":"Not found in the latest 80 records",
+ "در پایگاه داده ثبت نشده است":"not recorded in the database",
+ "در پایگاه داده ثبت شده است":"recorded in the database",
+ "تغییر":"Change","محدودیت":"Limit","سرمایه":"Capital","ریسک":"Risk",
+ "قابل مشاهده":"Visible","اطلاعات":"Information","ثبت":"Save",
+ "فولاد":"Foolad","فملی":"National Copper","شستا":"SHASTA",
+ "خودرو":"Khodro","خساپا":"Khasapa","سکه":"Gold coin",
+ "روزانه":"Daily","چهارساعته":"Four-hour","یک‌ساعته":"Hourly",
+ "سیگنال":"Signal","تایید":"Confirmation","تأیید":"Confirmation",
+ "درصد":"Percent","ارز":"Currency","جدید":"New","قدیمی":"Legacy",
+ "شما":"You","لطفا":"Please","لطفاً":"Please",
+ "موفق":"Successful","خطا":"Error","ناموفق":"Failed",
+ "پیشنهاد":"Suggestion","قابل اجرا":"Executable","منتظر":"Waiting"
  };
- let out=body;for(const [a,b] of Object.entries(replacements))out=out.split(a).join(b);
+ let out=body;
+ for(const [a,b] of Object.entries(dict).sort((x,y)=>y[0].length-x[0].length))out=out.split(a).join(b);
+ out=out.replace(/[۰-۹]/g,c=>String("۰۱۲۳۴۵۶۷۸۹".indexOf(c))).replace(/[٠-٩]/g,c=>String("٠١٢٣٤٥٦٧٨٩".indexOf(c))).replace(/٪/g,"%").replace(/،/g,",").replace(/؛/g,";");
+ // Explicitly label unsupported text instead of sending mixed Persian/English reports.
+ out=out.replace(/[\u0600-\u06FF]+(?:[\u200c\s]+[\u0600-\u06FF]+)*/g,"[untranslated report text]");
  return out;
 }
 function atlasKeyboard(rows:string[][],lang="fa") {
