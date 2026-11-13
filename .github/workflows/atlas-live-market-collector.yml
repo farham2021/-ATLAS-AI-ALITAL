@@ -19,6 +19,14 @@ jobs:
           python-version: '3.11'
       - name: Verify collector syntax
         run: python -m py_compile research/atlas-live-market-collector.py
+      - name: Verify PolySignals collector syntax
+        run: python -m py_compile research/atlas-polysignals-collector.py
+      - name: Collect PolySignals research observations
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python research/atlas-polysignals-collector.py
       - name: Ingest market data and evaluate matured signals
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
