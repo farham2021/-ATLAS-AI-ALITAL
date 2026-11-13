@@ -1752,7 +1752,8 @@ async function cashOnlyPlan(env:any,userId:string,cmd:any) {
 const ATLAS_MAIN_MENU=[
   ["🧭 پلن نقد جدید","📊 تخصیص سرمایه"],
   ["💼 سبد دارایی","👤 پروفایل من"],
-  ["📊 سود و زیان سبد","📅 گزارش چرخه‌ها"],
+  ["📱 اپلیکیشن ATLAS","📊 سود و زیان سبد"],
+  ["📅 گزارش چرخه‌ها","🤝 دعوت کاربر"],
   ["🎯 فرصت‌های ورود و خروج","🤝 دعوت کاربر"],
   ["🎯 اهداف و تنظیمات","📈 تحلیل بازار"],
   ["🔔 هشدارها","❓ راهنما"]
@@ -1780,7 +1781,7 @@ const ATLAS_ALERT_MENU=[
   ["⚙️ تنظیم هشدار نماد","🔔 آخرین هشدارها"]
 ];
 function atlasKeyboard(rows:string[][]) {
-  return {keyboard:rows.map(row=>row.map(text=>({text}))),resize_keyboard:true,is_persistent:true,
+  return {keyboard:rows.map(row=>row.map(text=>text==="📱 اپلیکیشن ATLAS"?{text,web_app:{url:"https://farham2021.github.io/-ATLAS-AI-ALITAL/"}}:{text})),resize_keyboard:true,is_persistent:true,
     input_field_placeholder:"از منوی فارسی انتخاب کنید"};
 }
 function atlasMenuRoute(t:string):{command?:string;menu?:string;rows?:string[][]}|null {
