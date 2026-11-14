@@ -26,8 +26,8 @@ def candles(raw,now_ms):
   except (TypeError,ValueError,IndexError):continue
  return sorted({x[0]:x for x in out}.values())
 def indicators(bars):
- if len(bars)<250:raise ValueError("Need >=250 closed bars")
- a=bars[-250:]
+ if len(bars)<220:raise ValueError("Need >=220 closed bars")
+ a=bars[-min(250,len(bars)):]
  if any(a[i][0]-a[i-1][0]!=MS for i in range(1,len(a))):raise ValueError("Non-contiguous 4h candles")
  c=[x[4] for x in a];p=c[-1]
  ema=mean(c[:200])
@@ -127,12 +127,12 @@ def main():
  for rec in records:
   try:
    bars=candles(rec["rows_json"],now_ms)
-   if len(bars)<250:continue
+   if len(bars)<220:continue
    symbol=rec["symbol"].upper().replace("USDT","")
    # Respect provider order; cached LBANK remains eligible as untrusted research fallback only.
    rank={"OKX":0,"BYBIT":1,"BINANCE":2}.get(str(rec["provider"]).upper(),3)
    old=by_symbol.get(symbol)
-   if old is None or rank<old[0]:by_symbol[symbol]=(rank,rec["provider"],bars)
+   if old is None or (bars[-1][0],-rank)>(old[2][-1][0],-old[0]):by_symbol[symbol]=(rank,rec["provider"],bars)
   except (ValueError,KeyError,TypeError):continue
  setups=[]
  for symbol,(_,provider,bars) in by_symbol.items():
