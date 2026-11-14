@@ -1,7 +1,7 @@
 /* ATLAS progressive enhancement: no credentials, no Supabase writes, no simulated health. */
 (()=>{'use strict';
 if(window.__atlasUiUpgradeLoaded)return;window.__atlasUiUpgradeLoaded=true;
-const SYMBOLS=['BTC','ETH','SOL','TON','SUI','LINK'];
+const SYMBOLS=['BTC','ETH','SOL','TON','SUI','LINK','XRP','ADA'];
 const EXCHANGE='wss://stream.binance.com:9443/stream?streams='+SYMBOLS.map(s=>s.toLowerCase()+'usdt@miniTicker').join('/');
 const state={ws:null,stopped:false,retry:0,lastSeen:0,quotes:new Map()};
 const text=(el,value)=>{if(el)el.textContent=value};
