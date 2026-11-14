@@ -17,9 +17,11 @@ const { chromium, devices } = require('playwright');
   }
   await page.waitForTimeout(4000);
   for(const [tab,button,output] of [['metals','metalAnalyze','metalAnalysis'],['us','usChartBtn','usChart'],['charts','chartShow','tvChart'],['news','newsLoad','newsRows']]){
-   const all=page.locator('#atlas-ui-groups button').first();
-   if(await all.count()){await all.click();await page.waitForFunction(()=>[...document.querySelectorAll('#nav button')].every(b=>!b.hidden),null,{timeout:5000});}
+   const primary=page.locator('#atlas-primary-nav button[data-group="markets"]');
+   if(await primary.count()){await primary.click({timeout:10000});}
+   else {const all=page.locator('#atlas-ui-groups button').first();if(await all.count())await all.click();}
    const tabButton=page.locator('#nav button[data-tab="'+tab+'"]');
+   await tabButton.waitFor({state:'visible',timeout:10000});
    await tabButton.click({timeout:10000});
    await page.locator('#'+tab).waitFor({state:'visible',timeout:10000});
    await page.locator('#'+button).click();
