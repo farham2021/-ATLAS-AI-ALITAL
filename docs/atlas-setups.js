@@ -59,7 +59,7 @@ function apply(s){
 async function official(){
  const list=$('atlasLiveSetupsList');
  try{
-  const response=await fetch('/api/futures',{cache:'no-store',credentials:'same-origin'});
+  const response=await fetch('https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web/api/futures',{cache:'no-store'});
   if(!response.ok)throw Error('official endpoint unavailable');
   const payload=await response.json();
   const arr=Array.isArray(payload)?payload:(payload.signals||payload.futures_signals||payload.setups||[]);
