@@ -217,6 +217,14 @@ def main():
  from collections import Counter
  counts=dict(sorted(Counter(x["status"] for x in diagnostics).items()))
  print("ATLAS_V2_FILTER_DIAGNOSTICS="+json.dumps({"counts":counts,"assets":sorted(diagnostics,key=lambda x:x["symbol"])},separators=(",",":"),sort_keys=True))
+ health=[]
+ for d in diagnostics:
+  bars=by_symbol.get(d["symbol"],(None,None,None))[2]
+  closed_at=(datetime.datetime.fromtimestamp((bars[-1][0]+MS)/1000,UTC).isoformat() if bars else None)
+  health.append({"symbol":d["symbol"],"provider":str(d["provider"]),"bars":int(d["bars"]),"last_closed_at":closed_at,"age_minutes":d.get("age_minutes"),"status":d["status"],"checked_at":datetime.datetime.now(UTC).isoformat()})
+ if health:
+  api("atlas_futures_v2_data_health","on_conflict=symbol",health,"POST")
+  print("ATLAS_V2_HEALTH_PERSISTED="+str(len(health)))
 
  # Do not overwrite SENT/CLOSED statuses on re-runs: only insert if absent.
  for s in setups:
