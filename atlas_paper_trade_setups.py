@@ -40,7 +40,7 @@ def main():
    if direction:
     entry=p;stop=p-direction*1.5*atr;tp1=p+direction*3*atr;tp2=p+direction*4.5*atr
     if stop<=0 or tp1<=0 or tp2<=0:continue
-    result.update(entry=round(entry,8),sl=round(stop,8),tp1=round(tp1,8),tp2=round(tp2,8),rr=2.0,
+    result.update(entry=round(entry,8),sl=round(stop,8),tp1=round(tp1,8),tp2=round(tp2,8),rr=2.0,leverage_cap=min(3,max(1,int(4/max(100*abs(entry-stop)/entry,0.01)))),
                   side="LONG" if direction==1 else "SHORT (derivatives only)")
    elif near:result["watch_trigger"]=round(hi if near==1 else lo,8)
    outputs.append(result)
@@ -56,14 +56,14 @@ def main():
  for x in outputs[:30]:
   s=f'{x["symbol"]} {x["tf"]}: {x["status"]} | {x["price"]:.7g}'
   if x["status"] in ("BUY","SELL"):
-   s+=f' | Entry {x["entry"]} SL {x["sl"]} TP1 {x["tp1"]} TP2 {x["tp2"]} | {x["side"]}'
+   s+=f' | Entry {x["entry"]} SL {x["sl"]} TP1 {x["tp1"]} TP2 {x["tp2"]} | {x["side"]} | Leverage CAP {x["leverage_cap"]}x | Isolated | TradingView https://www.tradingview.com/chart/?symbol=BINANCE%3A{x["symbol"]}USDT'
   elif x["status"]=="WATCH":s+=f' | trigger {x["watch_trigger"]}'
   lines.append(s)
  if not outputs:lines.append("NO TRADE: no sufficiently fresh valid closed candles.")
  msg="\n".join(lines)
  print(json.dumps({"assets":len(outputs),"statuses":{s:sum(x["status"]==s for x in outputs) for s in ("BUY","SELL","WATCH","WAIT")}},ensure_ascii=False))
  # CSV export of the exact same signals; image generation is best-effort.
- csvbuf=io.StringIO();cols=["symbol","tf","status","price","volume_ratio","entry","sl","tp1","tp2","rr","watch_trigger","side","source"]
+ csvbuf=io.StringIO();cols=["symbol","tf","status","price","volume_ratio","entry","sl","tp1","tp2","rr","leverage_cap","watch_trigger","side","source"]
  writer=csv.DictWriter(csvbuf,fieldnames=cols,extrasaction="ignore");writer.writeheader();writer.writerows(outputs)
  def multipart(method,filename,blob,mime,caption):
   import uuid
@@ -94,14 +94,17 @@ def main():
   buf=io.BytesIO();fig.savefig(buf,format="png",bbox_inches="tight");plt.close(fig)
   return buf.getvalue()
  if os.getenv("ATLAS_PAPER_TELEGRAM","0")=="1":
-  token=os.environ["TELEGRAM_TOKEN"];chat=os.environ["TELEGRAM_CHAT_ID"]
-  response=multipart("sendDocument","atlas_paper_setups.csv",csvbuf.getvalue().encode("utf-8-sig"),"text/csv","ATLAS PAPER | CSV")
-  print("CSV delivered message_id",response["result"]["message_id"])
-  response=multipart("sendPhoto","atlas_paper_setups.png",render_png(),"image/png","ATLAS PAPER | PNG")
-  print("PNG delivered message_id",response["result"]["message_id"])
-  for part in [msg[i:i+3500] for i in range(0,len(msg),3500)]:
-   result=request("https://api.telegram.org/bot"+token+"/sendMessage",data=urllib.parse.urlencode({"chat_id":chat,"text":part}).encode())
-   if not result.get("ok"):raise RuntimeError("Telegram send rejected")
-   print("Telegram message_id",result["result"]["message_id"])
+  token=os.environ["TELEGRAM_TOKEN"]
+  targets=list(dict.fromkeys(c for c in (os.getenv("TELEGRAM_CHAT_ID"),os.getenv("TELEGRAM_GROUP_CHAT_ID")) if c))
+  if not targets:raise RuntimeError("No Telegram destinations configured")
+  for chat in targets:
+   response=multipart("sendDocument","atlas_paper_setups.csv",csvbuf.getvalue().encode("utf-8-sig"),"text/csv","ATLAS PAPER | CSV")
+   print("CSV delivered",chat,response["result"]["message_id"])
+   response=multipart("sendPhoto","atlas_paper_setups.png",render_png(),"image/png","ATLAS PAPER | PNG")
+   print("PNG delivered",chat,response["result"]["message_id"])
+   for part in [msg[i:i+3500] for i in range(0,len(msg),3500)]:
+    result=request("https://api.telegram.org/bot"+token+"/sendMessage",data=urllib.parse.urlencode({"chat_id":chat,"text":part}).encode())
+    if not result.get("ok"):raise RuntimeError("Telegram send rejected")
+    print("Telegram message delivered",chat,result["result"]["message_id"])
  else:print(msg)
 if __name__=="__main__":main()
