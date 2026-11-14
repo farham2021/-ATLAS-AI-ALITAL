@@ -20,7 +20,13 @@
 @media(max-width:480px){
  #atlas-primary-nav,#nav{gap:6px;padding-block:6px}
  #atlas-primary-nav button,#nav button{font-size:12px;padding:7px 10px}
- main{padding-inline:10px;padding-bottom:calc(96px + env(safe-area-inset-bottom,0px))}
- .card{padding:12px;margin-bottom:10px}
  #atlas-ui-status{left:10px;bottom:calc(10px + env(safe-area-inset-bottom,0px));font-size:11px;padding:7px 10px}
+}
+
+/* Mobile layout: no floating overlap with quant text or other cards. */
+@media(max-width:480px){
+ main>header{flex-direction:column;align-items:stretch;min-width:0}
+ main>header>div:first-child{min-width:0;width:100%}
+ main>header .controls{width:100%;justify-content:space-between;min-width:0;margin-bottom:0}
+ #atlas-ui-status{position:static;display:flex;width:fit-content;max-width:calc(100% - 24px);margin:12px 12px calc(12px + env(safe-area-inset-bottom,0px));background:rgba(11,19,34,.96);border-color:#385475;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(0,0,0,.35)}
 }
