@@ -32,14 +32,16 @@ $('nav').before(atlasPrimary);$('nav').dataset.atlasGrouped='true';
 tabs.forEach(([id,label])=>{const b=node('button',label);b.dataset.tab=id;b.onclick=()=>switchTab(id);$('nav').append(b)});switchTab('home');
 const coins=['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','TRX','LINK','SUI','AVAX','LTC','DOT','TON','NEAR','TAO','ONDO','ZEC','XMR'];coins.forEach(c=>{const o=node('option',c);o.value=c;$('coin').append(o)});
 function analysis(){const sym=$('coin').value,tf=$('tf').value,r=(state.mtf||[]).find(x=>x.symbol===sym),p=(state.crypto||[]).find(x=>x.symbol===sym);const field={'1h':'h1','4h':'h4','24h':'d1','1w':'w1'}[tf];const trend=field?r?.[field]||'داده موجود نیست':'داده مستقیم این بازه هنوز موجود نیست';$('analysis').replaceChildren(node('div','قیمت ذخیره‌شده: '+num(p?.price)),node('div','روند '+tf+': '+trend),node('div','هم‌سویی چندبازه‌ای: '+(r?.agreement_pct??'—')+'٪'),node('small','زمان ثبت: '+fmt(r?.timestamp||p?.captured_at)))}
+let metalAnalysisRequest=0;
 async function metalAnalysis(){
+ const requestId=++metalAnalysisRequest;
  const sym=$('metalSymbol').value,tf=$('metalTf').value,out=$('metalAnalysis');
  if(!sym){out.replaceChildren(node('div',currentLang==='en'?'No metal symbols found.':'نماد فلزی در داده‌ها یافت نشد.','warn'));return}
  out.replaceChildren(node('div',currentLang==='en'?'Loading recorded observations…':'در حال بررسی داده‌های واقعی ثبت‌شده…'));
  try{
-  const res=await fetch(BASE+'/api/metals-analysis?symbol='+encodeURIComponent(sym),{cache:'no-store'});
+  const res=await fetch(BASE+'/api/metals-analysis?symbol='+encodeURIComponent(sym),{cache:'no-store',signal:AbortSignal.timeout(18000)});
   if(!res.ok)throw Error('HTTP '+res.status);
-  const d=await res.json();const hours={'1h':1,'4h':4,'12h':12,'24h':24,'1w':168}[tf];
+  const d=await res.json();if(requestId!==metalAnalysisRequest)return;const hours={'1h':1,'4h':4,'12h':12,'24h':24,'1w':168}[tf];
   const c=(d.changes||[]).find(x=>x.hours===hours);
   const isEn=currentLang==='en';
   const title=(isEn?'Recorded price: ':'قیمت ثبت‌شده: ')+(d.latest_price===null?'—':num(d.latest_price))+' '+d.unit;
@@ -51,7 +53,7 @@ async function metalAnalysis(){
    node('div',d.stale?(isEn?'⚠ Historical data is stale':'⚠ داده‌های ذخیره‌شده قدیمی هستند'):(isEn?'Recorded data freshness acceptable':'تازگی داده ثبت‌شده قابل قبول است'),'warn'),
    node('small',(isEn?'Latest observation: ':'آخرین ثبت: ')+fmt(d.latest_at)),
    node('small',isEn?'Observed change is not an RSI/MACD signal or investment recommendation.':'تغییر مشاهده‌شده، سیگنال RSI/MACD یا توصیه سرمایه‌گذاری نیست.'));
- }catch(e){out.replaceChildren(node('div',(currentLang==='en'?'Metal analysis unavailable: ':'دریافت تحلیل فلزات ناموفق بود: ')+e.message,'warn'))}
+ }catch(e){if(requestId!==metalAnalysisRequest)return;out.replaceChildren(node('div',(currentLang==='en'?'Metal analysis unavailable: ':'دریافت تحلیل فلزات ناموفق بود: ')+String(e.message||e),'warn'))}
 }
 $('metalAnalyze').onclick=metalAnalysis;
 const METAL_SYMBOLS=['XAUUSD','XAGUSD','COPPER','SILVER999_FAIR','GOLD18','COIN_EMAMI'];
