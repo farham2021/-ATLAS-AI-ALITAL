@@ -1,0 +1,22 @@
+/* ATLAS progressive enhancement: no credentials, no Supabase writes, no simulated health. */
+(()=>{'use strict';
+if(window.__atlasUiUpgradeLoaded)return;window.__atlasUiUpgradeLoaded=true;
+const SYMBOLS=['BTC','ETH','SOL','TON','SUI','LINK'];
+const EXCHANGE='wss://stream.binance.com:9443/stream?streams='+SYMBOLS.map(s=>s.toLowerCase()+'usdt@miniTicker').join('/');
+const state={ws:null,stopped:false,retry:0,lastSeen:0,quotes:new Map()};
+const text=(el,value)=>{if(el)el.textContent=value};
+function init(){
+ if(!document.body||document.getElementById('atlas-live-ticker'))return;
+ const ticker=document.createElement('div');ticker.id='atlas-live-ticker';ticker.setAttribute('aria-label','Crypto reference prices, Binance backup feed');
+ for(const symbol of SYMBOLS){const item=document.createElement('div');item.className='atlas-quote';const label=document.createElement('span');label.className='atlas-symbol';label.textContent=symbol;const price=document.createElement('span');price.id='atlas-quote-'+symbol;price.className='atlas-stale';price.textContent='—';item.append(label,price);ticker.append(item)}
+ document.body.prepend(ticker);
+ const status=document.createElement('button');status.type='button';status.id='atlas-ui-status';status.innerHTML='<span class="atlas-dot"></span><span>وضعیت داده: نامشخص</span>';status.title='وضعیت اتصال قیمت پشتیبان، نه سلامت کل Supabase';status.onclick=()=>{const original=[...document.querySelectorAll('nav button')].find(b=>/وضعیت|status/i.test(b.textContent));if(original)original.click()};document.body.append(status);
+ const nav=document.querySelector('nav[aria-label="بخش‌های برنامه"]');if(nav&&!nav.dataset.atlasGrouped){const buttons=[...nav.querySelectorAll('button')];if(buttons.length){const group=document.createElement('div');group.id='atlas-ui-groups';group.setAttribute('role','group');group.setAttribute('aria-label','فیلتر بخش‌ها');const configs=[['all','همه',null],['markets','بازارها',/رمزارز|کریپتو|بورس|طلا|آمریکا|نمودار|اخبار|market|crypto|gold|stock/i],['lab','سبد و آزمایشگاه',/سبد|معاملات|آزمایشگاه|بروکر|portfolio|paper|lab/i],['radar','رادار هوشمند',/رادار|هشدار|گزارش|فرصت|سیگنال|risk|radar|signal|report/i]];for(const [key,label,re] of configs){const btn=document.createElement('button');btn.type='button';btn.textContent=label;btn.setAttribute('aria-pressed',String(key==='all'));btn.onclick=()=>{for(const other of group.querySelectorAll('button'))other.setAttribute('aria-pressed',String(other===btn));for(const old of buttons)old.hidden=!!re&&!re.test(old.textContent);if(re&&!buttons.some(old=>!old.hidden)){for(const old of buttons)old.hidden=false;group.querySelector('button').click()}};group.append(btn)}nav.before(group)}}
+ connect();
+}
+function status(message,good){const node=document.querySelector('#atlas-ui-status');if(!node)return;text(node.lastElementChild,message);node.querySelector('.atlas-dot').style.background=good?'#10b981':'#f59e0b'}
+function connect(){if(state.stopped||document.hidden)return;try{const ws=new WebSocket(EXCHANGE);state.ws=ws;ws.onopen=()=>{state.retry=0;status('قیمت پشتیبان: متصل',true)};ws.onmessage=e=>{try{const data=JSON.parse(e.data).data;if(!data||!data.s||!data.c)return;const symbol=data.s.toUpperCase().replace(/USDT$/,'');if(!SYMBOLS.includes(symbol))return;const price=Number(data.c);if(!Number.isFinite(price)||price<=0)return;const node=document.getElementById('atlas-quote-'+symbol);const prev=state.quotes.get(symbol);state.quotes.set(symbol,price);state.lastSeen=Date.now();if(node){node.textContent='$'+price.toLocaleString('en-US',{maximumFractionDigits:price<1?6:price<10?4:2});node.className=prev==null?'':price>prev?'atlas-up':price<prev?'atlas-down':''}}catch(_){}};ws.onerror=()=>status('قیمت پشتیبان: خطای اتصال',false);ws.onclose=()=>{status('قیمت پشتیبان: قطع',false);if(!state.stopped&&!document.hidden)setTimeout(connect,Math.min(30000,1000*2**Math.min(++state.retry,5)))}}catch(_){status('قیمت پشتیبان: در دسترس نیست',false)}}
+document.addEventListener('visibilitychange',()=>{if(document.hidden){if(state.ws)state.ws.close()}else if(!state.ws||state.ws.readyState>1)connect()});
+setInterval(()=>{if(state.lastSeen&&Date.now()-state.lastSeen>60000){status('قیمت پشتیبان: داده قدیمی',false);for(const el of document.querySelectorAll('#atlas-live-ticker [id^=atlas-quote-]'))el.classList.add('atlas-stale')}},15000);
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+})();
