@@ -1,0 +1,45 @@
+name: ATLAS Validation (main)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'tests/**'
+      - '.github/workflows/atlas-validation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Static JavaScript syntax
+        run: |
+          node --check tests/atlas-web-smoke.cjs
+          node --check docs/atlas-upgrade.js
+          node --check docs/atlas-quant.js
+          node --check docs/atlas-paper-risk.js
+      - name: Install browser
+        run: |
+          npm install --no-save playwright@1.58.2
+          npx playwright install --with-deps chromium
+      - name: Serve exact checkout
+        run: |
+          python3 -m http.server 8765 --directory docs > /tmp/atlas-http.log 2>&1 &
+          sleep 3
+          curl --fail http://127.0.0.1:8765/ > /dev/null
+      - name: Desktop and mobile smoke
+        env:
+          ATLAS_TEST_URL: http://127.0.0.1:8765/
+        run: node tests/atlas-web-smoke.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atlas-validation-screenshots
+          path: atlas-*.png
+          if-no-files-found: ignore
