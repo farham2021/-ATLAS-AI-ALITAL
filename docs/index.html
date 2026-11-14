@@ -243,12 +243,20 @@ async function loadIntelligence(){
  try{
   const res=await fetch(BASE+'/api/intelligence',{cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);
   intelligence=await res.json();renderIntelligence();
- }catch(e){list.replaceChildren(node('div',(currentLang==='en'?'Radar unavailable: ':'رادار در دسترس نیست: ')+e.message,'warn'))}
+ }catch(e){intelligence=null;list.replaceChildren(node('div',(currentLang==='en'?'Radar unavailable: ':'رادار در دسترس نیست: ')+e.message,'warn'));const freshness=$('atlas-radar-freshness');if(freshness)freshness.textContent=currentLang==='en'?'Radar status: unavailable':'وضعیت رادار: در دسترس نیست'}
 }
 function renderIntelligence(){
  if(!intelligence)return;
- const rows=intelligence.radar.filter(r=>$('radarFilter').value==='all'||r.alert_level===$('radarFilter').value);
- if(!rows.length){$('radarRows').replaceChildren(node('p','هیچ رکوردی در جدول رادار ریسک ثبت نشده است. این بخش هنوز داده عملیاتی ندارد؛ ابتدا باید گردآوری قیمت‌ها و محاسبه ریسک در موتور ATLAS فعال و صحت‌سنجی شود.','warn'))}else renderRows('radarRows',rows.slice(0,70),r=>[r.symbol+' · '+r.alert_level+' · '+r.risk_score+'/100',
+ const radarData=Array.isArray(intelligence.radar)?intelligence.radar:[];
+ const latestMs=Math.max(0,...radarData.map(r=>Date.parse(r.captured_at)).filter(Number.isFinite));
+ const ageHours=latestMs?(Date.now()-latestMs)/3600000:Infinity;
+ const stale=!Number.isFinite(ageHours)||ageHours>6||ageHours<-.0833;
+ let radarInfo=$('atlas-radar-freshness');
+ if(!radarInfo){radarInfo=document.createElement('p');radarInfo.id='atlas-radar-freshness';radarInfo.className='muted';$('radarRows').before(radarInfo)}
+ radarInfo.textContent=(currentLang==='en'?'Radar snapshot: ':'آخرین ثبت رادار: ')+(latestMs?new Intl.DateTimeFormat(currentLang==='en'?'en-GB':'fa-IR',{timeZone:'Asia/Tehran',dateStyle:'short',timeStyle:'short'}).format(new Date(latestMs)):'—')+' | '+(stale?(currentLang==='en'?'STALE / UNVERIFIED':'داده قدیمی یا نامعتبر'):(currentLang==='en'?'recent snapshot (not live signal)':'داده اخیر؛ نه سیگنال لحظه‌ای'));
+ radarInfo.style.color=stale?'#ffcc8b':'#a4b7d2';
+ const rows=radarData.filter(r=>$('radarFilter').value==='all'||r.alert_level===$('radarFilter').value);
+ if(!rows.length){$('radarRows').replaceChildren(node('p','هیچ رکوردی در جدول رادار ریسک ثبت نشده است. این بخش هنوز داده عملیاتی ندارد؛ ابتدا باید گردآوری قیمت‌ها و محاسبه ریسک در موتور ATLAS فعال و صحت‌سنجی شود.','warn'))}else renderRows('radarRows',rows.slice(0,70),r=>[r.symbol+' · '+r.alert_level+' · '+r.risk_score+'/100'+(stale?' · STALE':''),
  (r.model_version?.includes('historical')?(currentLang==='en'?'Historical daily change (research): ':'تغییر روزانه تاریخی (پژوهشی): ')+num(r.volatility_24h_pct)+'%':(currentLang==='en'?'1h change: ':'تغییر ۱ ساعته: ')+num(r.change_1h_pct)+'% | '+(currentLang==='en'?'24h movement: ':'حرکت ۲۴ ساعته: ')+num(r.volatility_24h_pct)+'%')+' | '+fmt(r.captured_at)]);
  const p=intelligence.performance;
  $('auditStats').replaceChildren(node('div',(currentLang==='en'?'Evaluated signals: ':'سیگنال‌های ارزیابی‌شده: ')+p.evaluated+' | '+(currentLang==='en'?'Directional hit rate: ':'نرخ جهت درست: ')+(p.hit_rate===null?'N/A':(p.hit_rate*100).toFixed(1)+'%')));
