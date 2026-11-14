@@ -17,6 +17,7 @@ const { chromium, devices } = require('playwright');
   }
   await page.waitForTimeout(4000);
   for(const [tab,button,output] of [['metals','metalAnalyze','metalAnalysis'],['us','usChartBtn','usChart'],['charts','chartShow','tvChart'],['news','newsLoad','newsRows']]){
+   const all=page.locator('#atlas-ui-groups button').first();if(await all.count())await all.click();
    await page.locator('#nav button[data-tab="'+tab+'"]').click();
    await page.locator('#'+button).click();
    await page.waitForTimeout(2500);
