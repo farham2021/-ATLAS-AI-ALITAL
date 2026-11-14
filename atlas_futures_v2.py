@@ -138,15 +138,41 @@ def fresh_exchange_bars(symbol,now_ms):
   except (OSError,ValueError,KeyError,TypeError):continue
  return None
 
+def diagnose(symbol,provider,bars,now_ms):
+ """One mutually exclusive reason per asset; do not relax strategy thresholds."""
+ info={"symbol":symbol,"provider":provider,"bars":len(bars),"status":None}
+ if len(bars)<220:
+  info["status"]="INSUFFICIENT_CANDLES";return info,None
+ try:
+  x=indicators(bars)
+ except ValueError:
+  info["status"]="NON_CONTIGUOUS_CANDLES";return info,None
+ age=now_ms-(bars[-1][0]+MS)
+ info["age_minutes"]=round(age/60000,1)
+ if age<0 or age>MS+300000:
+  info["status"]="STALE_DATA";return info,None
+ p=x["price"];r=x["rsi14"];b=x["percent_b"]
+ trend=(p>x["ema200"] and (35<=r<=55 or b<.2)) or (p<x["ema200"] and (55<=r<=72 or b>.85))
+ if not trend:
+  info["status"]="NO_SETUP";return info,None
+ if x["atr14"]<=0 or x["volume_ratio"]<.6:
+  info["status"]="VOLUME_REJECTED" if x["volume_ratio"]<.6 else "INVALID_ATR";return info,None
+ candidate=make_setup(symbol,provider,bars,now_ms)
+ info["status"]="SETUP_READY" if candidate else "INVALID_LEVELS"
+ return info,candidate
+
 def main():
  now_ms=int(datetime.datetime.now(UTC).timestamp()*1000)
  records=api("atlas_ohlcv_closed_cache","select=symbol,timeframe,provider,rows_json,updated_at&timeframe=eq.4h&limit=500")
  by_symbol={}
+ rejected_cache={}
  for rec in records:
   try:
    bars=candles(rec["rows_json"],now_ms)
-   if len(bars)<220:continue
    symbol=rec["symbol"].upper().replace("USDT","")
+   if len(bars)<220:
+    rejected_cache.setdefault(symbol,{"symbol":symbol,"provider":rec["provider"],"bars":len(bars),"status":"INSUFFICIENT_CANDLES"})
+    continue
    # Respect provider order; cached LBANK remains eligible as untrusted research fallback only.
    rank={"OKX":0,"BYBIT":1,"BINANCE":2}.get(str(rec["provider"]).upper(),3)
    old=by_symbol.get(symbol)
@@ -160,11 +186,17 @@ def main():
    provider,bars=fresh
    by_symbol[symbol]=({"OKX":0,"BYBIT":1,"BINANCE":2}[provider],provider,bars)
  setups=[]
- for symbol,(_,provider,bars) in by_symbol.items():
-  try:
-   s=make_setup(symbol,provider,bars,now_ms)
-   if s:setups.append(s)
-  except ValueError:continue
+ diagnostics=[]
+ for symbol,(_,provider,bars) in sorted(by_symbol.items()):
+  info,candidate=diagnose(symbol,provider,bars,now_ms)
+  diagnostics.append(info)
+  if candidate:setups.append(candidate)
+ for symbol,info in sorted(rejected_cache.items()):
+  if symbol not in by_symbol:diagnostics.append(info)
+ from collections import Counter
+ counts=dict(sorted(Counter(x["status"] for x in diagnostics).items()))
+ print("ATLAS_V2_FILTER_DIAGNOSTICS="+json.dumps({"counts":counts,"assets":sorted(diagnostics,key=lambda x:x["symbol"])},separators=(",",":"),sort_keys=True))
+
  # Do not overwrite SENT/CLOSED statuses on re-runs: only insert if absent.
  for s in setups:
   insert_new(s)
