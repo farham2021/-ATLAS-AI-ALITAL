@@ -34,7 +34,7 @@ async function load(symbol,tf){
   if(response.ok){const raw=await response.json();if(Array.isArray(raw)){
    const series=raw.map(r=>({time:+r[0]-ms,high:+r[2],low:+r[3],close:+r[4]})).filter(r=>r.time+ms<=now).sort((a,b)=>a.time-b.time);
    const spacing=series.length>1?series[1].time-series[0].time:0;
-   if(series.length>=250&&spacing===ms)return {data:indicators(series),source:'CoinGecko OHLC',asof:new Date(series.at(-1).time+ms).toISOString(),count:series.length};
+   if(series.length>=250&&spacing===ms&&series.slice(-250).every((r,i,a)=>i===0||r.time-a[i-1].time===ms)&&now-(series.at(-1).time+ms)<=ms+120000)return {data:indicators(series),source:'CoinGecko OHLC',asof:new Date(series.at(-1).time+ms).toISOString(),count:series.length};
   }}
  }catch(_){/* unsupported or throttled public history: continue to exchanges */ }
  const sources=[
@@ -46,6 +46,8 @@ async function load(symbol,tf){
  for(const src of sources){try{const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),9000);let response;try{response=await fetch(src.url,{signal:ctrl.signal,cache:'no-store'})}finally{clearTimeout(timer)}if(!response.ok)throw Error('HTTP '+response.status);const raw=src.parse(await response.json());
  const unique=[...new Map(raw.filter(r=>r.time+ms<=now&&r.time>0&&r.high>=r.low&&r.low>0&&r.close>=r.low&&r.close<=r.high).map(r=>[r.time,r])).values()].sort((a,b)=>a.time-b.time);
  if(unique.length<250)throw Error('insufficient closed candles: '+unique.length);
+ const tail=unique.slice(-250);if(tail.some((r,i)=>i>0&&r.time-tail[i-1].time!==ms))throw Error('gaps in last 250 closed candles');
+ if(now-(unique.at(-1).time+ms)>ms+120000)throw Error('latest candle stale');
  return {data:indicators(unique),source:src.name,asof:new Date(unique.at(-1).time+ms).toISOString(),count:unique.length};
  }catch(e){errors.push(src.name+': '+e.message)}}
  throw Error('داده کافی نیست ('+errors.join('; ')+')');
@@ -53,13 +55,19 @@ async function load(symbol,tf){
 function render(d,symbol,tf){const el=$('atlas-quant-live');if(!el)return;const x=d.data,fmt=n=>n.toLocaleString('en-US',{maximumFractionDigits:4});
  el.replaceChildren();const title=document.createElement('strong');title.textContent=symbol+' '+tf+' — ریسک نوسان/روند: '+x.score+'/100';el.append(title);
  const bar=document.createElement('div');bar.style='height:9px;border-radius:8px;background:#29394b;margin:10px 0';const fill=document.createElement('div');fill.style='height:100%;width:'+x.score+'%;background:'+(x.score>=70?'#ef4444':x.score>=40?'#f59e0b':'#10b981')+';border-radius:8px';bar.append(fill);el.append(bar);
- const p=document.createElement('p');p.textContent='قیمت $'+fmt(x.price)+' | RSI14 '+x.rsi.toFixed(1)+' | EMA200 $'+fmt(x.ema)+' | فاصله '+x.dist.toFixed(2)+'% | ATR14 '+x.vol.toFixed(2)+'% | Bollinger %B '+x.band.toFixed(2);el.append(p);
- const foot=document.createElement('small');foot.textContent='منبع کندل: '+d.source+' | آخرین کندل بسته‌شده: '+d.asof+' | '+d.count+' کندل. شاخص اکتشافی؛ توصیه خرید/فروش یا احتمال زیان نیست.';el.append(foot);
+ const p=document.createElement('p');p.textContent='آخرین قیمت بسته‌شدن $'+fmt(x.price)+' | RSI14 '+x.rsi.toFixed(1)+' | EMA200 $'+fmt(x.ema)+' | فاصله '+x.dist.toFixed(2)+'% | ATR14 '+x.vol.toFixed(2)+'% | Bollinger %B '+x.band.toFixed(2);el.append(p);
+ const foot=document.createElement('small');foot.textContent='منبع: '+d.source+' | بسته‌شدن آخرین کندل (UTC): '+d.asof+' | '+d.count+' کندل | آخرین بررسی: '+new Date().toISOString()+' | به‌روزرسانی خودکار هر ۶۰ ثانیه. محاسبه فقط با کندل بسته‌شده؛ تغییر شاخص‌ها در طول کندل جاری الزامی نیست. این شاخص احتمال زیان یا توصیه معامله نیست.';el.append(foot);
 }
 function init(){const anchor=$('quantRiskOutput');if(!anchor||$('atlas-quant-live'))return;
- const wrap=document.createElement('section');wrap.className='card';wrap.style.marginTop='12px';wrap.innerHTML='<h3>ATLAS Client-Side Quant Risk (آزمایشی)</h3><label>بازه <select id="atlas-quant-tf"><option value="4h">4H</option><option value="1d">1D</option></select></label> <button type="button" id="atlas-quant-refresh">محاسبه با کندل بسته‌شده</button><div id="atlas-quant-live" role="status" aria-live="polite">منتظر دریافت داده</div>';
- anchor.after(wrap);const select=$('quantRiskSymbol'),run=async()=>{const symbol=select.value,tf=$('atlas-quant-tf').value,el=$('atlas-quant-live');el.textContent='در حال دریافت داده…';try{const result=await load(symbol,tf);if(select.value===symbol&&$('atlas-quant-tf').value===tf)render(result,symbol,tf)}catch(e){el.textContent=e.message+'؛ این نماد بدون امتیاز باقی می‌ماند.'}};
- $('atlas-quant-refresh').onclick=run;$('atlas-quant-tf').onchange=run;select.addEventListener('change',run);run();
+ const wrap=document.createElement('section');wrap.className='card';wrap.style.marginTop='12px';wrap.innerHTML='<h3>ATLAS Quant Risk | پایش خودکار کندل‌های بسته‌شده</h3><label>بازه <select id="atlas-quant-tf"><option value="4h">4H</option><option value="1d">1D</option></select></label> <button type="button" id="atlas-quant-refresh">به‌روزرسانی فوری</button><div id="atlas-quant-live" role="status" aria-live="polite">منتظر دریافت داده</div>';
+ anchor.after(wrap);const select=$('quantRiskSymbol');let generation=0,busy=false,lastRun=0;
+ const run=async(force=false)=>{if(document.hidden&&!force)return;if(busy&&!force)return;const id=++generation,symbol=select.value,tf=$('atlas-quant-tf').value,el=$('atlas-quant-live');busy=true;lastRun=Date.now();el.textContent='در حال بررسی آخرین کندل بسته‌شده…';
+ try{const result=await load(symbol,tf);if(id===generation&&select.value===symbol&&$('atlas-quant-tf').value===tf)render(result,symbol,tf)}
+ catch(e){if(id===generation)el.textContent='داده کافی نیست یا منبع در دسترس نیست: '+e.message+' | آخرین بررسی: '+new Date().toISOString()+'؛ امتیاز محاسبه نشد.'}
+ finally{if(id===generation)busy=false}};
+ $('atlas-quant-refresh').onclick=()=>run(true);$('atlas-quant-tf').onchange=()=>run(true);select.addEventListener('change',()=>run(true));
+ setInterval(()=>{if(!document.hidden&&Date.now()-lastRun>=60000)run()},15000);
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Date.now()-lastRun>=60000)run()});run(true);
 }
 window.ATLASQuant={indicators,load};if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
