@@ -3,6 +3,12 @@ on:
   schedule:
     - cron: '25 * * * *'
   workflow_dispatch:
+    inputs:
+      telegram_diagnostic:
+        description: "Send one explicit transport-test message to private and group Telegram"
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -11,7 +17,7 @@ concurrency:
 jobs:
   calculate-and-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,4 +33,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
           ATLAS_V2_TELEGRAM: "1"
+          ATLAS_V2_MAX_REFRESH: "100"
+          ATLAS_V2_TELEGRAM_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_diagnostic && '1' || '0' }}
         run: python atlas_futures_v2.py
