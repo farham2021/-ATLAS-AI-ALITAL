@@ -84,8 +84,8 @@ def upsert_outcome(outcome):
 def deliver_telegram():
  token=os.getenv("TELEGRAM_TOKEN","")
  targets=list(dict.fromkeys(x for x in (os.getenv("TELEGRAM_CHAT_ID"),os.getenv("TELEGRAM_GROUP_CHAT_ID")) if x))
- if not token or not targets:
-  print("Telegram disabled: token or destination missing");return
+ if not token or len(targets)<2:
+  print("Telegram disabled: token or BOTH destinations missing");return
  # No uncalibrated probability or fabricated confidence; alerts explicitly shadow research.
  now=datetime.datetime.now(UTC)
  recent=api("atlas_futures_setups_v2","select=*&status=eq.NEW&order=signal_at.desc&limit=100")
@@ -96,7 +96,7 @@ def deliver_telegram():
   if age<0 or age>6*3600:continue
   symbol=sig["symbol"];side=sig["side"]
   tv="https://www.tradingview.com/chart/?symbol=BINANCE%3A"+symbol+"USDT"
-  message=(f"ATLAS v2 | PAPER RESEARCH (not validated)\\n{symbol}/USDT {side} 4H\\n"
+  message=(f"ATLAS v2 | PAPER RESEARCH (not validated)\n{symbol}/USDT {side} 4H\n"
    f"Entry {sig['entry']} | SL {sig['sl']}\\nTP1 {sig['tp1']} | TP2 {sig['tp2']}\\n"
    f"RR 1.5 / 2.5 | Max leverage {sig['suggested_leverage']}x\\n"
    f"Model {MODEL} | {sig['signal_at']}\\n{tv}\\nNo real order; profitability unverified.")
@@ -120,6 +120,24 @@ def deliver_telegram():
 def request_telegram(token,payload):
  with urllib.request.urlopen(urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=payload),timeout=30) as r:return json.load(r)
 
+WATCHLIST=("BTC","ETH","SOL","BNB","XRP","ADA","DOGE","TRX","LINK","SUI","AVAX","LTC","DOT","BCH","NEAR","ATOM","TON","HBAR","XLM","TAO","ZEC")
+def fresh_exchange_bars(symbol,now_ms):
+ """Use closed spot candles as research proxy; derivatives basis may differ."""
+ pair=symbol+"USDT"
+ sources=[
+  ("OKX","https://www.okx.com/api/v5/market/history-candles?"+urllib.parse.urlencode({"instId":symbol+"-USDT","bar":"4H","limit":300}),lambda x:x["data"] if x.get("code")=="0" else []),
+  ("BYBIT","https://api.bybit.com/v5/market/kline?"+urllib.parse.urlencode({"category":"spot","symbol":pair,"interval":"240","limit":300}),lambda x:x["result"]["list"] if x.get("retCode")==0 else []),
+  ("BINANCE","https://api.binance.com/api/v3/klines?"+urllib.parse.urlencode({"symbol":pair,"interval":"4h","limit":300}),lambda x:x)
+ ]
+ for name,url,parse in sources:
+  try:
+   req=urllib.request.Request(url,headers={"User-Agent":"ATLAS-Research/2.0"})
+   with urllib.request.urlopen(req,timeout=12) as response:rows=parse(json.load(response))
+   bars=candles(rows,now_ms)
+   if len(bars)>=220 and now_ms-(bars[-1][0]+MS)<=MS+300000:return (name,bars)
+  except (OSError,ValueError,KeyError,TypeError):continue
+ return None
+
 def main():
  now_ms=int(datetime.datetime.now(UTC).timestamp()*1000)
  records=api("atlas_ohlcv_closed_cache","select=symbol,timeframe,provider,rows_json,updated_at&timeframe=eq.4h&limit=500")
@@ -134,6 +152,13 @@ def main():
    old=by_symbol.get(symbol)
    if old is None or (bars[-1][0],-rank)>(old[2][-1][0],-old[0]):by_symbol[symbol]=(rank,rec["provider"],bars)
   except (ValueError,KeyError,TypeError):continue
+ # Refresh from primary public providers before relying on the legacy cache.
+ # Fail closed on stale data: never emit a signal from an outdated snapshot.
+ for symbol in WATCHLIST:
+  fresh=fresh_exchange_bars(symbol,now_ms)
+  if fresh:
+   provider,bars=fresh
+   by_symbol[symbol]=({"OKX":0,"BYBIT":1,"BINANCE":2}[provider],provider,bars)
  setups=[]
  for symbol,(_,provider,bars) in by_symbol.items():
   try:
@@ -155,7 +180,7 @@ def main():
    upsert_outcome(outcome)
    audited+=1
  if os.getenv("ATLAS_V2_TELEGRAM","0")=="1":deliver_telegram()
- print(json.dumps({"model":MODEL,"mode":"SHADOW_NO_TELEGRAM","cache_symbols":len(by_symbol),"new_candidates":len(setups),"audited":audited,"notes":"No win-rate promotion without costs and holdout."}))
+ print(json.dumps({"model":MODEL,"mode":"SHADOW_PAPER_TELEGRAM" if os.getenv("ATLAS_V2_TELEGRAM")=="1" else "SHADOW_NO_TELEGRAM","available_symbols":len(by_symbol),"new_candidates":len(setups),"audited":audited,"notes":"No win-rate promotion without costs and holdout."}))
 def insert_new(s):
  # POST without merge is idempotent only when absent. Prefer duplicate-ignore resolution.
  url=BASE+"/rest/v1/atlas_futures_setups_v2?on_conflict=id"
