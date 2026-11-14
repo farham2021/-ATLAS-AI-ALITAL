@@ -96,7 +96,7 @@ def deliver_telegram():
   if age<0 or age>6*3600:continue
   symbol=sig["symbol"];side=sig["side"]
   tv="https://www.tradingview.com/chart/?symbol=BINANCE%3A"+symbol+"USDT"
-  message=(f"ATLAS v2 | PAPER RESEARCH (not validated)\n{symbol}/USDT {side} 4H\n"
+  message=(f"ATLAS v2 | PAPER RESEARCH (not validated)\\n{symbol}/USDT {side} 4H\\n"
    f"Entry {sig['entry']} | SL {sig['sl']}\\nTP1 {sig['tp1']} | TP2 {sig['tp2']}\\n"
    f"RR 1.5 / 2.5 | Max leverage {sig['suggested_leverage']}x\\n"
    f"Model {MODEL} | {sig['signal_at']}\\n{tv}\\nNo real order; profitability unverified.")
