@@ -1,0 +1,13 @@
+/* ATLAS progressive UI layer — scoped; no changes to existing app semantics */
+:root{--atlas-bg:#090d16;--atlas-panel:#111827;--atlas-border:#2d3748;--atlas-muted:#94a3b8;--atlas-blue:#3b82f6;--atlas-green:#10b981;--atlas-red:#ef4444}
+#atlas-live-ticker{display:flex;gap:12px;overflow-x:auto;position:sticky;top:0;z-index:1000;padding:9px 16px;background:#05080f;color:#f8fafc;border-bottom:1px solid var(--atlas-border);font:600 13px system-ui,sans-serif;direction:ltr}
+#atlas-live-ticker .atlas-quote{display:flex;gap:9px;align-items:center;white-space:nowrap;padding:4px 10px;border:1px solid var(--atlas-border);border-radius:8px}
+#atlas-live-ticker .atlas-symbol{color:var(--atlas-muted)}
+#atlas-live-ticker .atlas-up{color:var(--atlas-green)}#atlas-live-ticker .atlas-down{color:var(--atlas-red)}
+#atlas-live-ticker .atlas-stale{color:#f59e0b}
+#atlas-ui-groups{display:flex;gap:8px;flex-wrap:wrap;padding:10px;background:var(--atlas-panel);border:1px solid var(--atlas-border);border-radius:12px;margin:12px 0}
+#atlas-ui-groups button{border:1px solid var(--atlas-border);background:#1f2937;color:#f8fafc;border-radius:8px;padding:8px 12px;cursor:pointer}
+#atlas-ui-groups button[aria-pressed=true]{background:var(--atlas-blue)}
+#atlas-ui-status{position:fixed;left:14px;bottom:14px;z-index:1001;background:var(--atlas-panel);border:1px solid var(--atlas-border);border-radius:22px;padding:8px 12px;color:#f8fafc;font-size:12px;cursor:pointer}
+#atlas-ui-status .atlas-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;margin-inline-end:7px}
+@media(max-width:600px){#atlas-live-ticker{padding:7px 9px;font-size:12px}#atlas-ui-groups{overflow-x:auto;flex-wrap:nowrap}#atlas-ui-groups button{white-space:nowrap}}
