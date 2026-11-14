@@ -18,9 +18,9 @@ const { chromium, devices } = require('playwright');
   await page.waitForTimeout(4000);
   for(const [tab,button,output] of [['metals','metalAnalyze','metalAnalysis'],['us','usChartBtn','usChart'],['charts','chartShow','tvChart'],['news','newsLoad','newsRows']]){
    const all=page.locator('#atlas-ui-groups button').first();
-   if(await all.count()){await all.click();await page.waitForFunction(()=>[...document.querySelectorAll('#nav button')].every(b=>!b.hidden),{timeout:5000}).catch(()=>{});}
+   if(await all.count()){await all.click();await page.waitForFunction(()=>[...document.querySelectorAll('#nav button')].every(b=>!b.hidden),null,{timeout:5000});}
    const tabButton=page.locator('#nav button[data-tab="'+tab+'"]');
-   await tabButton.evaluate(button=>{button.hidden=false;button.click()});
+   await tabButton.click({timeout:10000});
    await page.locator('#'+tab).waitFor({state:'visible',timeout:10000});
    await page.locator('#'+button).click();
    await page.waitForTimeout(2500);
