@@ -56,11 +56,29 @@ function apply(s){
  $('fCalc')?.click();
  $('fResult')?.scrollIntoView({behavior:'smooth',block:'center'});
 }
+async function official(){
+ const list=$('atlasLiveSetupsList');
+ try{
+  const response=await fetch('/api/futures',{cache:'no-store',credentials:'same-origin'});
+  if(!response.ok)throw Error('official endpoint unavailable');
+  const payload=await response.json();
+  const arr=Array.isArray(payload)?payload:(payload.signals||payload.futures_signals||payload.setups||[]);
+  const recent=arr.filter(x=>x&&['LONG','SHORT'].includes(String(x.side||'').toUpperCase())&&x.entry&&x.sl&&x.tp1&&x.tp2&&x.signal_at&&Date.now()-Date.parse(x.signal_at)<21600000).slice(0,5);
+  if(!recent.length)throw Error('No current official signals');
+  list.replaceChildren();
+  for(const s of recent){
+   const card=document.createElement('div');card.className='row';card.style.cssText='display:flex;gap:10px;flex-wrap:wrap;margin:8px 0';
+   const label=document.createElement('span');label.textContent='سرور ATLAS | '+String(s.symbol)+' '+String(s.side)+' | Entry '+s.entry+' | SL '+s.sl+' | TP1 '+s.tp1+' | TP2 '+s.tp2;
+   const btn=document.createElement('button');btn.type='button';btn.textContent='ماشین‌حساب Paper';btn.onclick=()=>apply({...s,leverage:Math.min(3,Math.max(1,Number(s.suggested_leverage||s.leverage||1)))});
+   card.append(label,btn);list.append(card);
+  }
+ }catch(_){list.textContent='سیگنال رسمی تازه در دسترس نیست؛ برای بررسی محلی، «اسکن زنده دستی» را انتخاب کنید.'}
+}
 let busy=false;
 async function scan(){
  if(busy)return;busy=true;
  const list=$('atlasLiveSetupsList');if(!list){busy=false;return}
- list.textContent='در حال بررسی کندل‌های بسته‌شده ۴ ساعته…';
+ list.textContent='محاسبه محلی (خارج از چرخه سرور) — بررسی کندل‌های بسته‌شده ۴ ساعته…';
  try{
  const results=await Promise.all(symbols.map(async s=>{try{return setup(s,await load(s))}catch(_){return null}}));
  const candidates=results.filter(Boolean).sort((a,b)=>b.vr-a.vr).slice(0,5);
@@ -80,10 +98,10 @@ function mount(){
  const parent=$('opportunities');if(!parent||$('atlasLiveSetupsCard'))return;
  const card=document.createElement('article');card.className='card';card.id='atlasLiveSetupsCard';
  const title=document.createElement('h2');title.textContent='⚡ ستاپ‌های پژوهشی LONG / SHORT — کندل بسته‌شده 4H';
- const btn=document.createElement('button');btn.type='button';btn.textContent='اسکن مجدد';btn.onclick=scan;
+ const btn=document.createElement('button');btn.type='button';btn.textContent='اسکن زنده دستی (محاسبه محلی)';btn.onclick=()=>{const list=$('atlasLiveSetupsList');list.textContent='محاسبه محلی (خارج از چرخه سرور)';scan()};
  const list=document.createElement('div');list.id='atlasLiveSetupsList';
  const note=document.createElement('small');note.textContent='منبع اولیه OKX، پشتیبان Bybit و Binance. سیگنال‌ها بدون تضمین سود؛ فقط Paper Trading. اهرم تضمین‌کننده فاصله امن لیکوئیدیشن نیست.';
- card.append(title,btn,list,note);parent.prepend(card);scan();
+ card.append(title,btn,list,note);parent.prepend(card);official();
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount,{once:true});else mount();
 })();
