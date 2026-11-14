@@ -81,6 +81,18 @@ def upsert_outcome(outcome):
  url=BASE+"/rest/v1/atlas_futures_outcomes_v2?on_conflict=signal_id"
  headers={"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=minimal"}
  with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps([outcome]).encode(),headers=headers,method="POST"),timeout=40):pass
+def telegram_diagnostic():
+ """Explicit manual-only transport test, not a trading signal."""
+ token=os.getenv("TELEGRAM_TOKEN","")
+ targets=list(dict.fromkeys(x for x in (os.getenv("TELEGRAM_CHAT_ID"),os.getenv("TELEGRAM_GROUP_CHAT_ID")) if x))
+ if not token or len(targets)!=2:
+  raise RuntimeError("Telegram diagnostic requires token and two distinct destinations")
+ for chat in targets:
+  payload=urllib.parse.urlencode({"chat_id":chat,"text":"ATLAS v2 connectivity test | Diagnostic only. No trade signal, no order."}).encode()
+  response=request_telegram(token,payload)
+  if not response.get("ok") or not response.get("result",{}).get("message_id"):
+   raise RuntimeError("Telegram diagnostic failed")
+  print("ATLAS_V2_TELEGRAM_DIAGNOSTIC="+json.dumps({"delivered":True,"destination":"private" if chat==targets[0] else "group","message_id":response["result"]["message_id"]}))
 def deliver_telegram():
  token=os.getenv("TELEGRAM_TOKEN","")
  targets=list(dict.fromkeys(x for x in (os.getenv("TELEGRAM_CHAT_ID"),os.getenv("TELEGRAM_GROUP_CHAT_ID")) if x))
@@ -121,6 +133,7 @@ def request_telegram(token,payload):
  with urllib.request.urlopen(urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=payload),timeout=30) as r:return json.load(r)
 
 WATCHLIST=("BTC","ETH","SOL","BNB","XRP","ADA","DOGE","TRX","LINK","SUI","AVAX","LTC","DOT","BCH","NEAR","ATOM","TON","HBAR","XLM","TAO","ZEC")
+MAX_REFRESH=int(os.getenv("ATLAS_V2_MAX_REFRESH","100"))
 def fresh_exchange_bars(symbol,now_ms):
  """Use closed spot candles as research proxy; derivatives basis may differ."""
  pair=symbol+"USDT"
@@ -180,11 +193,19 @@ def main():
   except (ValueError,KeyError,TypeError):continue
  # Refresh from primary public providers before relying on the legacy cache.
  # Fail closed on stale data: never emit a signal from an outdated snapshot.
- for symbol in WATCHLIST:
+ refresh_symbols=list(dict.fromkeys([*WATCHLIST,*sorted(by_symbol)]))[:MAX_REFRESH]
+ refresh_stats={"attempted":0,"fresh":0,"failed":0}
+ for symbol in refresh_symbols:
+  # Do not send arbitrary cached labels to external market APIs.
+  if not symbol.isascii() or not symbol.isalnum() or len(symbol)>16:continue
+  refresh_stats["attempted"]+=1
   fresh=fresh_exchange_bars(symbol,now_ms)
   if fresh:
    provider,bars=fresh
    by_symbol[symbol]=({"OKX":0,"BYBIT":1,"BINANCE":2}[provider],provider,bars)
+   refresh_stats["fresh"]+=1
+  else:refresh_stats["failed"]+=1
+ print("ATLAS_V2_REFRESH="+json.dumps(refresh_stats,sort_keys=True))
  setups=[]
  diagnostics=[]
  for symbol,(_,provider,bars) in sorted(by_symbol.items()):
@@ -211,6 +232,7 @@ def main():
   if outcome:
    upsert_outcome(outcome)
    audited+=1
+ if os.getenv("ATLAS_V2_TELEGRAM_TEST","0")=="1":telegram_diagnostic()
  if os.getenv("ATLAS_V2_TELEGRAM","0")=="1":deliver_telegram()
  print(json.dumps({"model":MODEL,"mode":"SHADOW_PAPER_TELEGRAM" if os.getenv("ATLAS_V2_TELEGRAM")=="1" else "SHADOW_NO_TELEGRAM","available_symbols":len(by_symbol),"new_candidates":len(setups),"audited":audited,"notes":"No win-rate promotion without costs and holdout."}))
 def insert_new(s):
