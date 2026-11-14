@@ -77,6 +77,49 @@ def audit_one(s,bars,now_ms):
   exit_price=after[41][4];state="EXPIRED";exit_at=after[41][0]+MS
  realized=(d*(exit_price-entry)/risk) if exit_price is not None else None
  return dict(signal_id=s["id"],symbol=s["symbol"],side=s["side"],status=state,last_checked_at=datetime.datetime.now(UTC).isoformat(),exit_at=datetime.datetime.fromtimestamp(exit_at/1000,UTC).isoformat() if exit_at else None,exit_price=exit_price,realized_r=realized,details={"tp1_touched":touched,"candles_seen":len(after),"fee_funding_slippage_not_included":True})
+def upsert_outcome(outcome):
+ url=BASE+"/rest/v1/atlas_futures_outcomes_v2?on_conflict=signal_id"
+ headers={"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=minimal"}
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps([outcome]).encode(),headers=headers,method="POST"),timeout=40):pass
+def deliver_telegram():
+ token=os.getenv("TELEGRAM_TOKEN","")
+ targets=list(dict.fromkeys(x for x in (os.getenv("TELEGRAM_CHAT_ID"),os.getenv("TELEGRAM_GROUP_CHAT_ID")) if x))
+ if not token or not targets:
+  print("Telegram disabled: token or destination missing");return
+ # No uncalibrated probability or fabricated confidence; alerts explicitly shadow research.
+ now=datetime.datetime.now(UTC)
+ recent=api("atlas_futures_setups_v2","select=*&status=eq.NEW&order=signal_at.desc&limit=100")
+ receipts=api("atlas_futures_v2_delivery","select=signal_id,destination&limit=1000")
+ sent={(r["signal_id"],r["destination"]) for r in receipts}
+ for sig in recent:
+  age=(now-datetime.datetime.fromisoformat(sig["signal_at"].replace("Z","+00:00"))).total_seconds()
+  if age<0 or age>6*3600:continue
+  symbol=sig["symbol"];side=sig["side"]
+  tv="https://www.tradingview.com/chart/?symbol=BINANCE%3A"+symbol+"USDT"
+  message=(f"ATLAS v2 | PAPER RESEARCH (not validated)\\n{symbol}/USDT {side} 4H\\n"
+   f"Entry {sig['entry']} | SL {sig['sl']}\\nTP1 {sig['tp1']} | TP2 {sig['tp2']}\\n"
+   f"RR 1.5 / 2.5 | Max leverage {sig['suggested_leverage']}x\\n"
+   f"Model {MODEL} | {sig['signal_at']}\\n{tv}\\nNo real order; profitability unverified.")
+  for chat in targets:
+   # A successful Telegram response is recorded per destination. Retries after a
+   # crash between send and receipt may duplicate; Telegram offers no idempotency key.
+   if (sig["id"],chat) in sent:continue
+   payload=urllib.parse.urlencode({"chat_id":chat,"text":message}).encode()
+   response=request_telegram(token,payload)
+   if not response.get("ok"):raise RuntimeError("Telegram rejected alert")
+   mid=response["result"]["message_id"]
+   url=BASE+"/rest/v1/atlas_futures_v2_delivery?on_conflict=signal_id,destination"
+   h={"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json","Prefer":"resolution=ignore-duplicates,return=minimal"}
+   body=json.dumps([{"signal_id":sig["id"],"destination":chat,"message_id":mid}]).encode()
+   with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=h,method="POST"),timeout=40):pass
+   print("telegram delivered",symbol,side,"message_id",mid)
+  if all((sig["id"],chat) in sent or (sig["id"],chat) in {(x["signal_id"],x["destination"]) for x in api("atlas_futures_v2_delivery","select=signal_id,destination&signal_id=eq."+sig["id"])} for chat in targets):
+   url=BASE+"/rest/v1/atlas_futures_setups_v2?id=eq."+sig["id"]
+   h={"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json"}
+   with urllib.request.urlopen(urllib.request.Request(url,data=b'{"status":"SENT","sent_at":"'+now.isoformat().encode()+b'"}',headers=h,method="PATCH"),timeout=40):pass
+def request_telegram(token,payload):
+ with urllib.request.urlopen(urllib.request.Request("https://api.telegram.org/bot"+token+"/sendMessage",data=payload),timeout=30) as r:return json.load(r)
+
 def main():
  now_ms=int(datetime.datetime.now(UTC).timestamp()*1000)
  records=api("atlas_ohlcv_closed_cache","select=symbol,timeframe,provider,rows_json,updated_at&timeframe=eq.4h&limit=500")
@@ -108,8 +151,9 @@ def main():
   if not item:continue
   outcome=audit_one(s,item[2],now_ms)
   if outcome:
-   api("atlas_futures_outcomes_v2","on_conflict=signal_id",data=[outcome],method="POST")
+   upsert_outcome(outcome)
    audited+=1
+ if os.getenv("ATLAS_V2_TELEGRAM","0")=="1":deliver_telegram()
  print(json.dumps({"model":MODEL,"mode":"SHADOW_NO_TELEGRAM","cache_symbols":len(by_symbol),"new_candidates":len(setups),"audited":audited,"notes":"No win-rate promotion without costs and holdout."}))
 def insert_new(s):
  # POST without merge is idempotent only when absent. Prefer duplicate-ignore resolution.
