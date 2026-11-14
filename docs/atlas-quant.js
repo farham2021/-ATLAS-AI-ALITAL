@@ -52,18 +52,19 @@ async function load(symbol,tf){
  }catch(e){errors.push(src.name+': '+e.message)}}
  throw Error('داده کافی نیست ('+errors.join('; ')+')');
 }
+function formatQuantTime(value){const d=new Date(value);if(!Number.isFinite(d.getTime()))return 'نامعتبر';return new Intl.DateTimeFormat('fa-IR',{timeZone:'Asia/Tehran',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d)+' (تهران)'}
 function render(d,symbol,tf){const el=$('atlas-quant-live');if(!el)return;const x=d.data,fmt=n=>n.toLocaleString('en-US',{maximumFractionDigits:4});
  el.replaceChildren();const title=document.createElement('strong');title.textContent=symbol+' '+tf+' — ریسک نوسان/روند: '+x.score+'/100';el.append(title);
  const bar=document.createElement('div');bar.style='height:9px;border-radius:8px;background:#29394b;margin:10px 0';const fill=document.createElement('div');fill.style='height:100%;width:'+x.score+'%;background:'+(x.score>=70?'#ef4444':x.score>=40?'#f59e0b':'#10b981')+';border-radius:8px';bar.append(fill);el.append(bar);
  const p=document.createElement('p');p.textContent='آخرین قیمت بسته‌شدن $'+fmt(x.price)+' | RSI14 '+x.rsi.toFixed(1)+' | EMA200 $'+fmt(x.ema)+' | فاصله '+x.dist.toFixed(2)+'% | ATR14 '+x.vol.toFixed(2)+'% | Bollinger %B '+x.band.toFixed(2);el.append(p);
- const foot=document.createElement('small');foot.textContent='منبع: '+d.source+' | بسته‌شدن آخرین کندل (UTC): '+d.asof+' | '+d.count+' کندل | آخرین بررسی: '+new Date().toISOString()+' | به‌روزرسانی خودکار هر ۶۰ ثانیه. محاسبه فقط با کندل بسته‌شده؛ تغییر شاخص‌ها در طول کندل جاری الزامی نیست. این شاخص احتمال زیان یا توصیه معامله نیست.';el.append(foot);
+ const foot=document.createElement('small');foot.textContent='منبع: '+d.source+' | بسته‌شدن آخرین کندل: '+formatQuantTime(d.asof)+' | '+d.count+' کندل | آخرین بررسی: '+formatQuantTime(Date.now())+' | به‌روزرسانی خودکار هر ۶۰ ثانیه. محاسبه فقط با کندل بسته‌شده؛ تغییر شاخص‌ها در طول کندل جاری الزامی نیست. این شاخص احتمال زیان یا توصیه معامله نیست.';el.append(foot);
 }
 function init(){const anchor=$('quantRiskOutput');if(!anchor||$('atlas-quant-live'))return;
  const wrap=document.createElement('section');wrap.className='card';wrap.style.marginTop='12px';wrap.innerHTML='<h3>ATLAS Quant Risk | پایش خودکار کندل‌های بسته‌شده</h3><label>بازه <select id="atlas-quant-tf"><option value="4h">4H</option><option value="1d">1D</option></select></label> <button type="button" id="atlas-quant-refresh">به‌روزرسانی فوری</button><div id="atlas-quant-live" role="status" aria-live="polite">منتظر دریافت داده</div>';
  anchor.after(wrap);const select=$('quantRiskSymbol');let generation=0,busy=false,lastRun=0;
  const run=async(force=false)=>{if(document.hidden&&!force)return;if(busy&&!force)return;const id=++generation,symbol=select.value,tf=$('atlas-quant-tf').value,el=$('atlas-quant-live');busy=true;lastRun=Date.now();el.textContent='در حال بررسی آخرین کندل بسته‌شده…';
  try{const result=await load(symbol,tf);if(id===generation&&select.value===symbol&&$('atlas-quant-tf').value===tf)render(result,symbol,tf)}
- catch(e){if(id===generation)el.textContent='داده کافی نیست یا منبع در دسترس نیست: '+e.message+' | آخرین بررسی: '+new Date().toISOString()+'؛ امتیاز محاسبه نشد.'}
+ catch(e){if(id===generation)el.textContent='داده کافی نیست یا منبع در دسترس نیست: '+e.message+' | آخرین بررسی: '+formatQuantTime(Date.now())+'؛ امتیاز محاسبه نشد.'}
  finally{if(id===generation)busy=false}};
  $('atlas-quant-refresh').onclick=()=>run(true);$('atlas-quant-tf').onchange=()=>run(true);select.addEventListener('change',()=>run(true));
  setInterval(()=>{if(!document.hidden&&Date.now()-lastRun>=60000)run()},15000);
