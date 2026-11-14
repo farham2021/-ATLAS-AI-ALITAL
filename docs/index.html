@@ -202,7 +202,7 @@ function translateUI(){
  document.documentElement.lang=currentLang;document.documentElement.dir=currentLang==='fa'?'rtl':'ltr';
  const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
  while(walk.nextNode()){
-  const n=walk.currentNode;if(n.parentElement?.closest('script,style'))continue;
+  const n=walk.currentNode;if(n.parentElement?.closest('script,style,#atlas-ui-status'))continue;
   if(!originalText.has(n))originalText.set(n,n.textContent);
   n.textContent=translateValue(originalText.get(n));
  }
@@ -214,11 +214,11 @@ const observer=new MutationObserver(changes=>{
  for(const change of changes){
   if(change.type==='childList'){
    for(const child of change.addedNodes){
-    if(child.nodeType===Node.TEXT_NODE){if(!originalText.has(child))originalText.set(child,child.textContent);const translated=translateValue(originalText.get(child));if(child.textContent!==translated)child.textContent=translated}
-    else if(child.nodeType===Node.ELEMENT_NODE&&!child.closest('script,style')){const walker=document.createTreeWalker(child,NodeFilter.SHOW_TEXT);while(walker.nextNode()){const n=walker.currentNode;if(!originalText.has(n))originalText.set(n,n.textContent);const v=translateValue(originalText.get(n));if(n.textContent!==v)n.textContent=v}}
+    if(child.nodeType===Node.TEXT_NODE){if(child.parentElement?.closest('#atlas-ui-status'))continue;if(!originalText.has(child))originalText.set(child,child.textContent);const translated=translateValue(originalText.get(child));if(child.textContent!==translated)child.textContent=translated}
+    else if(child.nodeType===Node.ELEMENT_NODE&&!child.closest('script,style,#atlas-ui-status')){const walker=document.createTreeWalker(child,NodeFilter.SHOW_TEXT);while(walker.nextNode()){const n=walker.currentNode;if(n.parentElement?.closest('#atlas-ui-status'))continue;if(!originalText.has(n))originalText.set(n,n.textContent);const v=translateValue(originalText.get(n));if(n.textContent!==v)n.textContent=v}}
    }
   }
-  if(change.type==='characterData'){const n=change.target;if(n.parentElement?.closest('script,style'))continue;const v=translateValue(n.textContent);if(v!==n.textContent){originalText.set(n,n.textContent);n.textContent=v}}
+  if(change.type==='characterData'){const n=change.target;if(n.parentElement?.closest('script,style,#atlas-ui-status'))continue;const v=translateValue(n.textContent);if(v!==n.textContent){originalText.set(n,n.textContent);n.textContent=v}}
  }
 });
 observer.observe(document.body,{subtree:true,childList:true,characterData:true});
