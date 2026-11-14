@@ -270,9 +270,36 @@ let futuresSignals=[];
 async function loadFutures(){
  try{
   const r=await fetch(BASE+'/api/futures',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);
-  const d=await r.json();futuresSignals=d.signals||[];
-  renderRows('futuresSignals',futuresSignals.slice(0,35),x=>[x.symbol+' · '+x.side+' · '+(x.confidence??'—')+'/100',
-   'Entry '+num(x.entry)+' | SL '+num(x.sl)+' | TP1 '+num(x.tp1)+' | TP2 '+(x.tp2===null?'N/A':num(x.tp2))+' | R:R '+x.rr1+' | '+fmt(x.updated_at)]);
+  const d=await r.json();
+  const raw=Array.isArray(d.signals)?d.signals:[];
+  const finite=n=>n!==null&&n!==undefined&&n!==''&&Number.isFinite(Number(n));
+  const validated=raw.map(x=>{
+   const side=String(x.side||'').toUpperCase(),entry=Number(x.entry),sl=Number(x.sl),tp1=Number(x.tp1);
+   const tp2=finite(x.tp2)?Number(x.tp2):null;
+   const directionOK=side==='LONG'?(sl<entry&&tp1>entry&&(tp2===null||tp2>tp1)):(side==='SHORT'&&(sl>entry&&tp1<entry&&(tp2===null||tp2<tp1)));
+   const valid=[x.entry,x.sl,x.tp1].every(finite)&&entry>0&&sl>0&&tp1>0&&directionOK;
+   const age=Date.now()-Date.parse(x.updated_at||'');
+   const fresh=Number.isFinite(age)&&age>=-300000&&age<=6*3600000;
+   const rr=valid?Math.abs(tp1-entry)/Math.abs(entry-sl):0;
+   const confidence=finite(x.confidence)?Number(x.confidence):null;
+   const eligible=valid&&fresh&&rr>=2&&confidence!==null&&confidence>=55;
+   return {...x,_valid:valid,_fresh:fresh,_rr:rr,_eligible:eligible,_confidence:confidence};
+  });
+  futuresSignals=validated.filter(x=>x._eligible).sort((a,b)=>b._confidence-a._confidence||b._rr-a._rr);
+  const panel=$('futuresSignals');panel.replaceChildren();
+  const heading=node('p',(currentLang==='en'?'Validated paper candidates: ':'فرصت‌های واجد شرایط آزمایشی: ')+futuresSignals.length+' / '+raw.length+' | '+(currentLang==='en'?'Entry requires confirmation; no live orders.':'ورود نیازمند تأیید مستقل است؛ هیچ سفارش واقعی اجرا نمی‌شود.'));
+  panel.append(heading);
+  if(!futuresSignals.length)panel.append(node('p',currentLang==='en'?'No fresh candidate meets the safety filters. WAIT.':'هیچ فرصت تازه‌ای با شرایط اعتبارسنجی موجود نیست. WAIT.','warn'));
+  for(const x of futuresSignals.slice(0,5)){
+   const card=node('div','', 'card');card.style.cssText='margin:10px 0;padding:12px';
+   const entry=Number(x.entry),sl=Number(x.sl),stopPct=100*Math.abs(entry-sl)/entry;
+   const leverage=Math.min(3,Math.max(1,Math.floor(4/Math.max(stopPct,0.01))));
+   const title=node('strong',x.symbol+' · '+x.side+' · '+(x._confidence===null?'—':x._confidence+'/100')+' · '+leverage+'× MAX (paper)');
+   const details=node('div','Entry '+num(entry)+' | SL '+num(sl)+' | TP1 '+num(x.tp1)+' | TP2 '+(x.tp2===null?'—':num(x.tp2))+' | R:R '+x._rr.toFixed(2)+' | '+fmt(x.updated_at));
+   const caution=node('small',currentLang==='en'?'Research candidate, not a verified forecast; leverage is a cap, not a recommendation.':'نامزد پژوهشی، نه پیش‌بینی تأییدشده؛ اهرم سقف آزمایشی است نه توصیه.');
+   const a=document.createElement('a');a.href='https://www.tradingview.com/chart/?symbol='+encodeURIComponent('BINANCE:'+String(x.symbol).replace(/USDT$/,'')+'USDT');a.target='_blank';a.rel='noopener noreferrer';a.textContent='TradingView';a.style.cssText='display:inline-block;margin:8px;color:#8dd8ff';
+   card.append(title,details,caution,a);panel.append(card);
+  }
   const sel=$('fSymbol');sel.replaceChildren(...futuresSignals.map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));
   sel.onchange=()=>{const x=futuresSignals.find(x=>x.symbol===sel.value);if(!x)return;
    $('fSide').value=x.side;$('fEntry').value=x.entry;$('fSl').value=x.sl;$('fTp1').value=x.tp1;$('fTp2').value=x.tp2??'';};
