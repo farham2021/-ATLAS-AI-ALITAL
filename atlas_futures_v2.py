@@ -142,11 +142,12 @@ def main():
   except ValueError:continue
  # Do not overwrite SENT/CLOSED statuses on re-runs: only insert if absent.
  for s in setups:
-  api("atlas_futures_setups_v2","on_conflict=id",data=[s],method="POST") if os.getenv("ATLAS_V2_ALLOW_STATUS_UPSERT")=="1" else insert_new(s)
+  insert_new(s)
  active=api("atlas_futures_setups_v2","select=*&status=in.(NEW,SENT,OPEN)&limit=500")
  terminal={x["signal_id"] for x in api("atlas_futures_outcomes_v2","select=signal_id&status=in.(LOSS,WIN_TP2,TP1_EXIT,EXPIRED)&limit=1000")}
  audited=0
  for s in active:
+  if s["id"] in terminal:continue
   item=by_symbol.get(s["symbol"])
   if not item:continue
   outcome=audit_one(s,item[2],now_ms)
