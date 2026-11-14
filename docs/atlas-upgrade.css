@@ -11,3 +11,16 @@
 #atlas-ui-status{position:fixed;left:14px;bottom:14px;z-index:1001;background:var(--atlas-panel);border:1px solid var(--atlas-border);border-radius:22px;padding:8px 12px;color:#f8fafc;font-size:12px;cursor:pointer}
 #atlas-ui-status .atlas-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;margin-inline-end:7px}
 @media(max-width:600px){#atlas-live-ticker{padding:7px 9px;font-size:12px}#atlas-ui-groups{overflow-x:auto;flex-wrap:nowrap}#atlas-ui-groups button{white-space:nowrap}}
+
+/* Compact mobile navigation and safe-area-aware service indicator */
+#atlas-primary-nav,#nav{overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;scrollbar-width:thin}
+#atlas-primary-nav button,#nav button{flex-shrink:0}
+#atlas-ui-status{bottom:calc(14px + env(safe-area-inset-bottom,0px));max-width:min(78vw,310px);display:inline-flex;align-items:center;gap:5px;box-shadow:0 5px 20px rgba(0,0,0,.4)}
+#atlas-ui-status .atlas-dot{flex-shrink:0;margin-inline-end:3px}
+@media(max-width:480px){
+ #atlas-primary-nav,#nav{gap:6px;padding-block:6px}
+ #atlas-primary-nav button,#nav button{font-size:12px;padding:7px 10px}
+ main{padding-inline:10px;padding-bottom:calc(96px + env(safe-area-inset-bottom,0px))}
+ .card{padding:12px;margin-bottom:10px}
+ #atlas-ui-status{left:10px;bottom:calc(10px + env(safe-area-inset-bottom,0px));font-size:11px;padding:7px 10px}
+}
