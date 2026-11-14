@@ -24,6 +24,19 @@ function indicators(rows){
 async function load(symbol,tf){
  if(!allowed.has(symbol)||!['4h','1d'].includes(tf))throw Error('نماد یا بازه نامعتبر');
  const pair=symbol+'USDT', now=Date.now(),ms=tf==='4h'?14400000:86400000;
+ const ids={BTC:'bitcoin',ETH:'ethereum',SOL:'solana',SUI:'sui',BNB:'binancecoin',XRP:'ripple',LINK:'chainlink',TON:'the-open-network',ADA:'cardano',DOGE:'dogecoin',AVAX:'avalanche-2',TRX:'tron'};
+ // CoinGecko is first. Public OHLC free-tier: 30 days at 4H (insufficient EMA200);
+ // 365 days at 4-day resolution (not daily). Reject unsuitable granularity.
+ try{
+  const days=tf==='4h'?30:365, url='https://api.coingecko.com/api/v3/coins/'+ids[symbol]+'/ohlc?vs_currency=usd&days='+days;
+  const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),9000);let response;
+  try{response=await fetch(url,{signal:ctrl.signal,cache:'no-store'})}finally{clearTimeout(timer)}
+  if(response.ok){const raw=await response.json();if(Array.isArray(raw)){
+   const series=raw.map(r=>({time:+r[0]-ms,high:+r[2],low:+r[3],close:+r[4]})).filter(r=>r.time+ms<=now).sort((a,b)=>a.time-b.time);
+   const spacing=series.length>1?series[1].time-series[0].time:0;
+   if(series.length>=250&&spacing===ms)return {data:indicators(series),source:'CoinGecko OHLC',asof:new Date(series.at(-1).time+ms).toISOString(),count:series.length};
+  }}
+ }catch(_){/* unsupported or throttled public history: continue to exchanges */ }
  const sources=[
   {name:'OKX',url:'https://www.okx.com/api/v5/market/history-candles?instId='+pair.replace('USDT','-USDT')+'&bar='+(tf==='4h'?'4H':'1D')+'&limit=300',parse:d=>{if(d.code!=='0')throw Error('OKX invalid');return d.data.filter(r=>r[8]==='1').map(r=>({time:+r[0],high:+r[2],low:+r[3],close:+r[4]}))}},
   {name:'Bybit',url:'https://api.bybit.com/v5/market/kline?category=spot&symbol='+pair+'&interval='+(tf==='4h'?'240':'D')+'&limit=350',parse:d=>{if(d.retCode!==0)throw Error('Bybit invalid');return d.result.list.map(r=>({time:+r[0],high:+r[2],low:+r[3],close:+r[4]}))}},
