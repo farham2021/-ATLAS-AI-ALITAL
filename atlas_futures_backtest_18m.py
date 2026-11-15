@@ -101,7 +101,7 @@ def source_data(symbol,start_ms,end_ms):
 
 def contiguous(bars):
  return all(bars[i][0]-bars[i-1][0]==MS for i in range(1,len(bars)))
-def simulate(symbol,bars,rates,split_ms,end_ms,provider="BYBIT_LINEAR"):
+def simulate(symbol,bars,rates,split_ms,end_ms,provider="BYBIT_LINEAR",funding_mode="empirical"):
  trades=[];i=220
  while i<len(bars)-1:
   window=bars[max(0,i-250):i+1]
@@ -118,7 +118,7 @@ def simulate(symbol,bars,rates,split_ms,end_ms,provider="BYBIT_LINEAR"):
   opened=datetime.datetime.fromtimestamp(signal_at/1000,UTC)
   closed=datetime.datetime.fromisoformat(outcome["exit_at"])
   direction=1 if setup["side"]=="LONG" else -1
-  signed_funding=sum(direction*r for t,r in rates if signal_at<t<=int(closed.timestamp()*1000))
+  signed_funding=sum(direction*r for t,r in rates if signal_at<t<=int(closed.timestamp()*1000)) if funding_mode=="empirical" else direction*0.0001*math.floor((closed-opened).total_seconds()/28800)
   duration=(closed-opened).total_seconds()
   # Use exact signed funding cash flow as a proportion of entry notional;
   # dynamic stop/market slippage is a stress assumption, not measured fills.
@@ -128,7 +128,7 @@ def simulate(symbol,bars,rates,split_ms,end_ms,provider="BYBIT_LINEAR"):
   result=evaluate_trade_net_r(setup["side"],setup["entry"],setup["sl"],outcome["exit_price"],opened,closed,outcome["status"]=="WIN_TP2",costs)
   funding_r=signed_funding/(abs(setup["entry"]-setup["sl"])/setup["entry"])
   net=result["net_r"]-funding_r
-  trades.append({"symbol":symbol,"signal_at":setup["signal_at"],"exit_at":outcome["exit_at"],"side":setup["side"],"status":outcome["status"],"gross_r":result["gross_r"],"net_r":round(net,6),"funding_r":round(funding_r,6),"slippage_rate":slip})
+  trades.append({"symbol":symbol,"signal_at":setup["signal_at"],"exit_at":outcome["exit_at"],"side":setup["side"],"status":outcome["status"],"gross_r":result["gross_r"],"net_r":round(net,6),"funding_r":round(funding_r,6),"slippage_rate":slip,"funding_mode":funding_mode})
   i+=max(1,len([b for b in future if b[0]+MS<=int(closed.timestamp()*1000)]))
  return trades
 def metrics(trades):
@@ -164,7 +164,7 @@ def main():
  # Start/end must be 4H aligned for exact candle coverage.
  start=datetime.datetime.fromtimestamp((int(start.timestamp()*1000)//MS)*MS/1000,UTC)
  split=end-datetime.timedelta(days=183)
- summary={"start":start.isoformat(),"end":end.isoformat(),"oos_start":split.isoformat(),"symbols":{},"assumptions":"Bybit linear perpetual, taker fees scenario, ATR-based stress slippage, actual signed funding events, conservative OHLC stops; no real fills"}
+ summary={"start":start.isoformat(),"end":end.isoformat(),"oos_start":split.isoformat(),"symbols":{},"assumptions":"OKX/Bybit perpetual, scenario taker fees and ATR slippage; empirical signed funding only when complete, otherwise explicitly scenario 0.01%/8h. Scenario is NOT acceptance evidence; no real fills"}
  all_trades=[]
  for symbol in a.symbols.split(","):
   symbol=symbol.strip().upper()
@@ -174,13 +174,16 @@ def main():
    coverage={"provider":provider,"candles":len(bars),"expected":expected,"funding_events":len(rates),"first":datetime.datetime.fromtimestamp(bars[0][0]/1000,UTC).isoformat() if bars else None,"last":datetime.datetime.fromtimestamp(bars[-1][0]/1000,UTC).isoformat() if bars else None,"gaps":sum(bars[i][0]-bars[i-1][0]!=MS for i in range(1,len(bars)))}
    coverage["missing_candles"]=expected-len(bars)
    coverage["funding_max_gap_hours"]=round(max((rates[i][0]-rates[i-1][0])/3600000 for i in range(1,len(rates))),2) if len(rates)>1 else None
-   if len(bars)!=expected or coverage["gaps"] or not rates or rates[0][0]>int(start.timestamp()*1000)+86400000 or rates[-1][0]<int(end.timestamp()*1000)-86400000 or (coverage["funding_max_gap_hours"] is not None and coverage["funding_max_gap_hours"]>24):
+   if len(bars)!=expected or coverage["gaps"] or bars[0][0]!=int(start.timestamp()*1000) or bars[-1][0]!=int(end.timestamp()*1000)-MS:
     summary["symbols"][symbol]={"coverage":coverage,"verdict":"DATA_INCOMPLETE"};continue
-   trades=simulate(symbol,bars,rates,int(start.timestamp()*1000),int(end.timestamp()*1000),provider)
+   funding_complete=bool(rates) and rates[0][0]<=int(start.timestamp()*1000)+86400000 and rates[-1][0]>=int(end.timestamp()*1000)-86400000 and coverage["funding_max_gap_hours"] is not None and coverage["funding_max_gap_hours"]<=24
+   mode="empirical" if funding_complete else "scenario_0.01pct_per_8h"
+   coverage["funding_complete"]=funding_complete
+   trades=simulate(symbol,bars,rates,int(start.timestamp()*1000),int(end.timestamp()*1000),provider,"empirical" if funding_complete else "scenario")
    windows=walk_forward(trades,start,end)
    oos=[t for t in trades if any(datetime.datetime.fromisoformat(w["test_start"])<=datetime.datetime.fromisoformat(t["signal_at"])<datetime.datetime.fromisoformat(w["test_end"]) for w in windows)]
    all_trades.extend(oos)
-   summary["symbols"][symbol]={"coverage":coverage,"windows":windows,"metrics":metrics(oos)}
+   summary["symbols"][symbol]={"coverage":coverage,"funding_mode":mode,"windows":windows,"metrics":metrics(oos),"verdict":"EMPIRICAL_RESEARCH" if funding_complete else "SCENARIO_ONLY_NOT_ACCEPTED"}
   except Exception as exc:
    summary["symbols"][symbol]={"verdict":"FETCH_FAILED","error":str(exc)[:250]}
  summary["aggregate_oos"]=metrics(all_trades)
@@ -188,7 +191,8 @@ def main():
  summary["aggregate_oos"]["short_trades"]=sum(t["side"]=="SHORT" for t in all_trades)
  summary["aggregate_oos"]["minimum_sample_met"]=len(all_trades)>=50
  summary["all_symbols_covered"]=all("metrics" in x for x in summary["symbols"].values()) and len(summary["symbols"])>0
- summary["verdict"]="RESEARCH_COMPLETE" if summary["all_symbols_covered"] else "INCOMPLETE"
+ summary["all_funding_empirical"]=summary["all_symbols_covered"] and all(x["coverage"]["funding_complete"] for x in summary["symbols"].values())
+ summary["verdict"]="EMPIRICAL_RESEARCH_COMPLETE" if summary["all_funding_empirical"] else "SCENARIO_ONLY_NOT_ACCEPTED" if summary["all_symbols_covered"] else "INCOMPLETE"
  (out/"summary.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False))
  (out/"trades.json").write_text(json.dumps(all_trades,indent=2))
  print(json.dumps(summary,ensure_ascii=False))
