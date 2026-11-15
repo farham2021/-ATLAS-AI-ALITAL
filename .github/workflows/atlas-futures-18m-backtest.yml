@@ -1,0 +1,36 @@
+name: ATLAS Futures 18M Research Backtest
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated linear perpetual symbols"
+        required: true
+        default: "BTC,ETH,SOL"
+      months:
+        description: "Historical months (12-24)"
+        required: true
+        default: "18"
+permissions:
+  contents: read
+jobs:
+  historical-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate cost model
+        run: python -m unittest -v test_atlas_futures_costs.py test_atlas_futures_v2_diagnostics.py
+      - name: Download historical perpetual candles and funding; evaluate OOS
+        env:
+          SYMBOLS: ${{ inputs.symbols }}
+          MONTHS: ${{ inputs.months }}
+        run: python atlas_futures_backtest_18m.py --symbols "$SYMBOLS" --months "$MONTHS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atlas-futures-18m-research
+          path: atlas_backtest_results/
+          if-no-files-found: warn
