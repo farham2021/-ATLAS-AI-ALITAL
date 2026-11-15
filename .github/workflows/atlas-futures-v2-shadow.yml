@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Validate canonical diagnostics
-        run: python -m unittest -v test_atlas_futures_v2_diagnostics.py
+        run: python -m unittest -v test_atlas_futures_v2_diagnostics.py test_atlas_futures_costs.py
       - name: Compute canonical 4H setups and audit closed candles
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
