@@ -1,7 +1,7 @@
 """Historical 4H perpetual research: paginated Bybit candles, signed funding, OOS evaluation.
 No live orders, Telegram, or production-table writes. Fail closed on missing data.
 """
-import argparse,datetime,json,math,time,urllib.parse,urllib.request
+import argparse,datetime,json,math,time,urllib.parse,urllib.request,calendar,sys
 from pathlib import Path
 from atlas_futures_v2 import MS,candles,indicators,make_setup,audit_one
 from atlas_futures_costs import ExecutionCostModel,evaluate_trade_net_r
@@ -91,6 +91,8 @@ def main():
  end=end-datetime.timedelta(hours=end.hour%4)
  # Calendar-month approximation for reproducible fixed-day windows.
  start=end-datetime.timedelta(days=round(a.months*365.25/12))
+ # Start/end must be 4H aligned for exact candle coverage.
+ start=datetime.datetime.fromtimestamp((int(start.timestamp()*1000)//MS)*MS/1000,UTC)
  split=end-datetime.timedelta(days=183)
  summary={"start":start.isoformat(),"end":end.isoformat(),"oos_start":split.isoformat(),"symbols":{},"assumptions":"Bybit linear perpetual, taker fees scenario, ATR-based stress slippage, actual signed funding events, conservative OHLC stops; no real fills"}
  all_trades=[]
@@ -101,7 +103,9 @@ def main():
    rates=funding(symbol,int(start.timestamp()*1000),int(end.timestamp()*1000))
    expected=math.ceil((end-start).total_seconds()/(MS/1000))
    coverage={"candles":len(bars),"expected":expected,"funding_events":len(rates),"first":datetime.datetime.fromtimestamp(bars[0][0]/1000,UTC).isoformat() if bars else None,"last":datetime.datetime.fromtimestamp(bars[-1][0]/1000,UTC).isoformat() if bars else None,"gaps":sum(bars[i][0]-bars[i-1][0]!=MS for i in range(1,len(bars)))}
-   if len(bars)<expected-2 or coverage["gaps"] or not rates or rates[0][0]>int(start.timestamp()*1000)+86400000 or rates[-1][0]<int(end.timestamp()*1000)-86400000:
+   coverage["missing_candles"]=expected-len(bars)
+   coverage["funding_max_gap_hours"]=round(max((rates[i][0]-rates[i-1][0])/3600000 for i in range(1,len(rates))),2) if len(rates)>1 else None
+   if len(bars)!=expected or coverage["gaps"] or not rates or rates[0][0]>int(start.timestamp()*1000)+86400000 or rates[-1][0]<int(end.timestamp()*1000)-86400000 or (coverage["funding_max_gap_hours"] is not None and coverage["funding_max_gap_hours"]>24):
     summary["symbols"][symbol]={"coverage":coverage,"verdict":"DATA_INCOMPLETE"};continue
    trades=simulate(symbol,bars,rates,int(split.timestamp()*1000),int(end.timestamp()*1000))
    all_trades.extend(trades)
@@ -109,7 +113,10 @@ def main():
   except Exception as exc:
    summary["symbols"][symbol]={"verdict":"FETCH_FAILED","error":str(exc)[:250]}
  summary["aggregate_oos"]=metrics(all_trades)
+ summary["all_symbols_covered"]=all("metrics" in x for x in summary["symbols"].values()) and len(summary["symbols"])>0
+ summary["verdict"]="RESEARCH_COMPLETE" if summary["all_symbols_covered"] else "INCOMPLETE"
  (out/"summary.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False))
  (out/"trades.json").write_text(json.dumps(all_trades,indent=2))
  print(json.dumps(summary,ensure_ascii=False))
+ if not summary["all_symbols_covered"]:sys.exit(2)
 if __name__=="__main__":main()
