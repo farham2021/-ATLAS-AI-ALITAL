@@ -3,6 +3,7 @@ Supabase is the authoritative store. No live orders. No Telegram until calibrate
 """
 import os,json,urllib.request,urllib.parse,datetime,hashlib,math
 from statistics import mean,pstdev
+from atlas_futures_costs import evaluate_trade_net_r
 UTC=datetime.timezone.utc
 MS=14400000
 MODEL="v2-wilder-atr"
@@ -76,7 +77,14 @@ def audit_one(s,bars,now_ms):
  if state=="OPEN" and len(after)>=42:
   exit_price=after[41][4];state="EXPIRED";exit_at=after[41][0]+MS
  realized=(d*(exit_price-entry)/risk) if exit_price is not None else None
- return dict(signal_id=s["id"],symbol=s["symbol"],side=s["side"],status=state,last_checked_at=datetime.datetime.now(UTC).isoformat(),exit_at=datetime.datetime.fromtimestamp(exit_at/1000,UTC).isoformat() if exit_at else None,exit_price=exit_price,realized_r=realized,details={"tp1_touched":touched,"candles_seen":len(after),"fee_funding_slippage_not_included":True})
+ result=dict(signal_id=s["id"],symbol=s["symbol"],side=s["side"],status=state,last_checked_at=datetime.datetime.now(UTC).isoformat(),exit_at=datetime.datetime.fromtimestamp(exit_at/1000,UTC).isoformat() if exit_at else None,exit_price=exit_price,realized_r=realized,details={"tp1_touched":touched,"candles_seen":len(after),"costs_are_scenario_not_actual_fills":True})
+ if exit_price is not None:
+  opened=datetime.datetime.fromisoformat(s["signal_at"].replace("Z","+00:00"))
+  closed=datetime.datetime.fromtimestamp(exit_at/1000,UTC)
+  cost=evaluate_trade_net_r(s["side"],entry,sl,exit_price,opened,closed,is_limit_tp=(state=="WIN_TP2"))
+  result.update({k:cost[k] for k in ("gross_r","cost_r","net_r")})
+  result["details"].update({k:cost[k] for k in ("funding_intervals","total_cost_pct","cost_model")})
+ return result
 def upsert_outcome(outcome):
  url=BASE+"/rest/v1/atlas_futures_outcomes_v2?on_conflict=signal_id"
  headers={"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=minimal"}
