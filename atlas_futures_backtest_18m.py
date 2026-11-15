@@ -43,16 +43,71 @@ def funding(symbol,start_ms,end_ms):
   cursor=oldest-1
   time.sleep(.12)
  return sorted(result.items())
+
+def okx_get(path,params):
+ url="https://www.okx.com"+path+"?"+urllib.parse.urlencode(params)
+ req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 ATLAS-Research"})
+ for retry in range(4):
+  try:
+   with urllib.request.urlopen(req,timeout=30) as response:obj=json.load(response)
+   if obj.get("code")!="0":raise RuntimeError(str(obj.get("msg")))
+   return obj["data"]
+  except (OSError,ValueError,RuntimeError):
+   if retry==3:raise
+   time.sleep(2**retry)
+
+def okx_history(symbol,start_ms,end_ms):
+ # OKX history-candles uses 'after' for older timestamps.
+ result={};cursor=end_ms
+ while cursor>=start_ms:
+  rows=okx_get("/api/v5/market/history-candles",{"instId":symbol+"-USDT-SWAP","bar":"4H","after":cursor,"limit":100})
+  if not rows:break
+  for row in rows:
+   t=int(row[0])
+   if start_ms<=t<end_ms and row[8]=="1":
+    # OKX swap volume field 5 is contracts; use quote currency volume (field 7).
+    result[t]=[t,*row[1:5],row[7]]
+  oldest=min(int(x[0]) for x in rows)
+  if oldest>=cursor:raise RuntimeError("OKX candles pagination stalled")
+  cursor=oldest-1
+  time.sleep(.13)
+ return candles(list(result.values()),end_ms)
+
+def okx_funding(symbol,start_ms,end_ms):
+ # Funding history is public but exchange may cap lookback; fail closed if so.
+ result={};cursor=end_ms
+ while cursor>=start_ms:
+  rows=okx_get("/api/v5/public/funding-rate-history",{"instId":symbol+"-USDT-SWAP","after":cursor,"limit":100})
+  if not rows:break
+  for row in rows:
+   t=int(row["fundingTime"])
+   if start_ms<=t<end_ms:result[t]=float(row.get("realizedRate") or row["fundingRate"])
+  oldest=min(int(x["fundingTime"]) for x in rows)
+  if oldest>=cursor:raise RuntimeError("OKX funding pagination stalled")
+  cursor=oldest-1
+  time.sleep(.13)
+ return sorted(result.items())
+
+def source_data(symbol,start_ms,end_ms):
+ errors=[]
+ for provider,history_fn,funding_fn in (("BYBIT_LINEAR",history,funding),("OKX_SWAP",okx_history,okx_funding)):
+  try:
+   bars=history_fn(symbol,start_ms,end_ms)
+   rates=funding_fn(symbol,start_ms,end_ms)
+   return provider,bars,rates
+  except Exception as exc:errors.append(provider+": "+str(exc))
+ raise RuntimeError("; ".join(errors))
+
 def contiguous(bars):
  return all(bars[i][0]-bars[i-1][0]==MS for i in range(1,len(bars)))
-def simulate(symbol,bars,rates,split_ms,end_ms):
+def simulate(symbol,bars,rates,split_ms,end_ms,provider="BYBIT_LINEAR"):
  trades=[];i=220
  while i<len(bars)-1:
   window=bars[max(0,i-250):i+1]
   if len(window)<220 or not contiguous(window):i+=1;continue
   signal_at=bars[i][0]+MS
   if signal_at<split_ms:i+=1;continue
-  setup=make_setup(symbol,"BYBIT_LINEAR",window,signal_at)
+  setup=make_setup(symbol,provider,window,signal_at)
   if not setup:i+=1;continue
   # Never use future bars to create the signal; future bars only settle its outcome.
   future=bars[i+1:min(len(bars),i+43)]
@@ -99,15 +154,14 @@ def main():
  for symbol in a.symbols.split(","):
   symbol=symbol.strip().upper()
   try:
-   bars=history(symbol,int(start.timestamp()*1000),int(end.timestamp()*1000))
-   rates=funding(symbol,int(start.timestamp()*1000),int(end.timestamp()*1000))
+   provider,bars,rates=source_data(symbol,int(start.timestamp()*1000),int(end.timestamp()*1000))
    expected=math.ceil((end-start).total_seconds()/(MS/1000))
-   coverage={"candles":len(bars),"expected":expected,"funding_events":len(rates),"first":datetime.datetime.fromtimestamp(bars[0][0]/1000,UTC).isoformat() if bars else None,"last":datetime.datetime.fromtimestamp(bars[-1][0]/1000,UTC).isoformat() if bars else None,"gaps":sum(bars[i][0]-bars[i-1][0]!=MS for i in range(1,len(bars)))}
+   coverage={"provider":provider,"candles":len(bars),"expected":expected,"funding_events":len(rates),"first":datetime.datetime.fromtimestamp(bars[0][0]/1000,UTC).isoformat() if bars else None,"last":datetime.datetime.fromtimestamp(bars[-1][0]/1000,UTC).isoformat() if bars else None,"gaps":sum(bars[i][0]-bars[i-1][0]!=MS for i in range(1,len(bars)))}
    coverage["missing_candles"]=expected-len(bars)
    coverage["funding_max_gap_hours"]=round(max((rates[i][0]-rates[i-1][0])/3600000 for i in range(1,len(rates))),2) if len(rates)>1 else None
    if len(bars)!=expected or coverage["gaps"] or not rates or rates[0][0]>int(start.timestamp()*1000)+86400000 or rates[-1][0]<int(end.timestamp()*1000)-86400000 or (coverage["funding_max_gap_hours"] is not None and coverage["funding_max_gap_hours"]>24):
     summary["symbols"][symbol]={"coverage":coverage,"verdict":"DATA_INCOMPLETE"};continue
-   trades=simulate(symbol,bars,rates,int(split.timestamp()*1000),int(end.timestamp()*1000))
+   trades=simulate(symbol,bars,rates,int(split.timestamp()*1000),int(end.timestamp()*1000),provider)
    all_trades.extend(trades)
    summary["symbols"][symbol]={"coverage":coverage,"metrics":metrics(trades)}
   except Exception as exc:
