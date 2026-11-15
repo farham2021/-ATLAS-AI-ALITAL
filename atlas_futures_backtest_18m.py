@@ -90,10 +90,11 @@ def okx_funding(symbol,start_ms,end_ms):
 
 def source_data(symbol,start_ms,end_ms):
  errors=[]
- for provider,history_fn,funding_fn in (("BYBIT_LINEAR",history,funding),("OKX_SWAP",okx_history,okx_funding)):
+ for provider,history_fn,funding_fn in (("OKX_SWAP",okx_history,okx_funding),("BYBIT_LINEAR",history,funding)):
   try:
    bars=history_fn(symbol,start_ms,end_ms)
    rates=funding_fn(symbol,start_ms,end_ms)
+   if not bars or not rates:raise ValueError("No historical candles or funding")
    return provider,bars,rates
   except Exception as exc:errors.append(provider+": "+str(exc))
  raise RuntimeError("; ".join(errors))
@@ -138,6 +139,20 @@ def metrics(trades):
  for x in r:
   equity+=x;peak=max(peak,equity);drawdown=max(drawdown,peak-equity)
  return {"trades":len(r),"win_rate":round(wins/len(r),4),"mean_net_r":round(sum(r)/len(r),5),"profit_factor":round(gp/gl,4) if gl else None,"max_drawdown_r":round(drawdown,4),"verdict":"RESEARCH_ONLY"}
+def walk_forward(trades,start,end):
+ """Three non-overlapping 4-month calibration / 2-month OOS windows.
+ No parameter optimization occurs: canonical strategy remains frozen.
+ """
+ windows=[]
+ for k in range(3):
+  train_start=start+datetime.timedelta(days=round(k*4*365.25/12))
+  train_end=train_start+datetime.timedelta(days=round(4*365.25/12))
+  test_end=train_end+datetime.timedelta(days=round(2*365.25/12))
+  if test_end>end:break
+  subset=[t for t in trades if train_end<=datetime.datetime.fromisoformat(t["signal_at"])<test_end]
+  windows.append({"index":k+1,"train_start":train_start.isoformat(),"train_end":train_end.isoformat(),"test_start":train_end.isoformat(),"test_end":test_end.isoformat(),"metrics":metrics(subset)})
+ return windows
+
 def main():
  p=argparse.ArgumentParser();p.add_argument("--symbols",default="BTC,ETH,SOL");p.add_argument("--months",type=int,default=18);p.add_argument("--out",default="atlas_backtest_results");a=p.parse_args()
  if a.months<12 or a.months>24:raise ValueError("months must be 12..24")
@@ -161,12 +176,17 @@ def main():
    coverage["funding_max_gap_hours"]=round(max((rates[i][0]-rates[i-1][0])/3600000 for i in range(1,len(rates))),2) if len(rates)>1 else None
    if len(bars)!=expected or coverage["gaps"] or not rates or rates[0][0]>int(start.timestamp()*1000)+86400000 or rates[-1][0]<int(end.timestamp()*1000)-86400000 or (coverage["funding_max_gap_hours"] is not None and coverage["funding_max_gap_hours"]>24):
     summary["symbols"][symbol]={"coverage":coverage,"verdict":"DATA_INCOMPLETE"};continue
-   trades=simulate(symbol,bars,rates,int(split.timestamp()*1000),int(end.timestamp()*1000),provider)
-   all_trades.extend(trades)
-   summary["symbols"][symbol]={"coverage":coverage,"metrics":metrics(trades)}
+   trades=simulate(symbol,bars,rates,int(start.timestamp()*1000),int(end.timestamp()*1000),provider)
+   windows=walk_forward(trades,start,end)
+   oos=[t for t in trades if any(datetime.datetime.fromisoformat(w["test_start"])<=datetime.datetime.fromisoformat(t["signal_at"])<datetime.datetime.fromisoformat(w["test_end"]) for w in windows)]
+   all_trades.extend(oos)
+   summary["symbols"][symbol]={"coverage":coverage,"windows":windows,"metrics":metrics(oos)}
   except Exception as exc:
    summary["symbols"][symbol]={"verdict":"FETCH_FAILED","error":str(exc)[:250]}
  summary["aggregate_oos"]=metrics(all_trades)
+ summary["aggregate_oos"]["long_trades"]=sum(t["side"]=="LONG" for t in all_trades)
+ summary["aggregate_oos"]["short_trades"]=sum(t["side"]=="SHORT" for t in all_trades)
+ summary["aggregate_oos"]["minimum_sample_met"]=len(all_trades)>=50
  summary["all_symbols_covered"]=all("metrics" in x for x in summary["symbols"].values()) and len(summary["symbols"])>0
  summary["verdict"]="RESEARCH_COMPLETE" if summary["all_symbols_covered"] else "INCOMPLETE"
  (out/"summary.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False))
