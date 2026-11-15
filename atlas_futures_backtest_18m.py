@@ -145,7 +145,7 @@ def walk_forward(trades,start,end):
  """
  windows=[]
  for k in range(3):
-  train_start=start+datetime.timedelta(days=round(k*4*365.25/12))
+  train_start=start+datetime.timedelta(days=round(k*6*365.25/12))
   train_end=train_start+datetime.timedelta(days=round(4*365.25/12))
   test_end=train_end+datetime.timedelta(days=round(2*365.25/12))
   if test_end>end:break
