@@ -139,15 +139,20 @@ def metrics(trades):
  for x in r:
   equity+=x;peak=max(peak,equity);drawdown=max(drawdown,peak-equity)
  return {"trades":len(r),"win_rate":round(wins/len(r),4),"mean_net_r":round(sum(r)/len(r),5),"profit_factor":round(gp/gl,4) if gl else None,"max_drawdown_r":round(drawdown,4),"verdict":"RESEARCH_ONLY"}
+def add_months(dt, months):
+ y=dt.year+(dt.month-1+months)//12
+ m=(dt.month-1+months)%12+1
+ return dt.replace(year=y,month=m,day=min(dt.day,calendar.monthrange(y,m)[1]))
+
 def walk_forward(trades,start,end):
  """Three non-overlapping 4-month calibration / 2-month OOS windows.
  No parameter optimization occurs: canonical strategy remains frozen.
  """
  windows=[]
  for k in range(3):
-  train_start=start+datetime.timedelta(days=round(k*6*365.25/12))
-  train_end=train_start+datetime.timedelta(days=round(4*365.25/12))
-  test_end=train_end+datetime.timedelta(days=round(2*365.25/12))
+  train_start=add_months(start,k*6)
+  train_end=add_months(start,k*6+4)
+  test_end=add_months(start,k*6+6)
   if test_end>end:break
   subset=[t for t in trades if train_end<=datetime.datetime.fromisoformat(t["signal_at"])<test_end]
   windows.append({"index":k+1,"train_start":train_start.isoformat(),"train_end":train_end.isoformat(),"test_start":train_end.isoformat(),"test_end":test_end.isoformat(),"metrics":metrics(subset)})
@@ -159,8 +164,8 @@ def main():
  out=Path(a.out);out.mkdir(parents=True,exist_ok=True)
  end=datetime.datetime.now(UTC).replace(minute=0,second=0,microsecond=0)
  end=end-datetime.timedelta(hours=end.hour%4)
- # Calendar-month approximation for reproducible fixed-day windows.
- start=end-datetime.timedelta(days=round(a.months*365.25/12))
+ # Exact calendar months, anchored to the aligned end timestamp.
+ start=add_months(end,-a.months)
  # Start/end must be 4H aligned for exact candle coverage.
  start=datetime.datetime.fromtimestamp((int(start.timestamp()*1000)//MS)*MS/1000,UTC)
  split=end-datetime.timedelta(days=183)
@@ -181,6 +186,7 @@ def main():
    coverage["funding_complete"]=funding_complete
    trades=simulate(symbol,bars,rates,int(start.timestamp()*1000),int(end.timestamp()*1000),provider,"empirical" if funding_complete else "scenario")
    windows=walk_forward(trades,start,end)
+   if a.months==18 and len(windows)!=3:raise RuntimeError("Expected exactly three full 4m/2m OOS windows")
    oos=[t for t in trades if any(datetime.datetime.fromisoformat(w["test_start"])<=datetime.datetime.fromisoformat(t["signal_at"])<datetime.datetime.fromisoformat(w["test_end"]) for w in windows)]
    all_trades.extend(oos)
    summary["symbols"][symbol]={"coverage":coverage,"funding_mode":mode,"windows":windows,"metrics":metrics(oos),"verdict":"EMPIRICAL_RESEARCH" if funding_complete else "SCENARIO_ONLY_NOT_ACCEPTED"}
@@ -192,7 +198,7 @@ def main():
  summary["aggregate_oos"]["minimum_sample_met"]=len(all_trades)>=50
  summary["all_symbols_covered"]=all("metrics" in x for x in summary["symbols"].values()) and len(summary["symbols"])>0
  summary["all_funding_empirical"]=summary["all_symbols_covered"] and all(x["coverage"]["funding_complete"] for x in summary["symbols"].values())
- summary["verdict"]="EMPIRICAL_RESEARCH_COMPLETE" if summary["all_funding_empirical"] else "SCENARIO_ONLY_NOT_ACCEPTED" if summary["all_symbols_covered"] else "INCOMPLETE"
+ summary["verdict"]="EMPIRICAL_RESEARCH_COMPLETE" if summary["all_funding_empirical"] and summary["aggregate_oos"]["minimum_sample_met"] else "INSUFFICIENT_SAMPLE" if summary["all_funding_empirical"] else "SCENARIO_ONLY_NOT_ACCEPTED" if summary["all_symbols_covered"] else "INCOMPLETE"
  (out/"summary.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False))
  (out/"trades.json").write_text(json.dumps(all_trades,indent=2))
  print(json.dumps(summary,ensure_ascii=False))
