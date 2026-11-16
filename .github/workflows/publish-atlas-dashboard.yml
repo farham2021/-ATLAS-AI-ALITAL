@@ -1,0 +1,36 @@
+name: Publish ATLAS Dashboard to GitHub Pages
+on:
+  push:
+    branches: [main]
+    paths:
+      - atlas-dashboard.html
+      - .github/workflows/publish-atlas-dashboard.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: atlas-pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare static site
+        run: |
+          mkdir -p _site
+          cp atlas-dashboard.html _site/index.html
+          cp atlas-dashboard.html _site/atlas-dashboard.html
+          printf '%s\n' '<!doctype html><title>ATLAS</title><a href="./atlas-dashboard.html">ATLAS Dashboard</a>' > _site/404.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
