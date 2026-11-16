@@ -1,5 +1,11 @@
 name: ATLAS Futures 18M Research Backtest
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'atlas_futures_backtest_18m.py'
+      - 'test_atlas_futures_backtest_18m.py'
+      - '.github/workflows/atlas-futures-18m-backtest.yml'
   schedule:
     - cron: '15 3 * * 1'
   workflow_dispatch:
@@ -24,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Validate cost model
-        run: python -m unittest -v test_atlas_futures_costs.py test_atlas_futures_v2_diagnostics.py
+        run: python -m unittest -v test_atlas_futures_costs.py test_atlas_futures_v2_diagnostics.py test_atlas_futures_backtest_18m.py
       - name: Download historical perpetual candles and funding; evaluate OOS
         env:
           SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
