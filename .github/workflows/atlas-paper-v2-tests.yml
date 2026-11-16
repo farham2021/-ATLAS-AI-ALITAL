@@ -1,0 +1,20 @@
+name: ATLAS Paper V2 Tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'atlas_paper_execution_v2.py'
+      - 'test_atlas_paper_execution_v2.py'
+      - '.github/workflows/atlas-paper-v2-tests.yml'
+  workflow_dispatch:
+jobs:
+  paper-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest -v test_atlas_paper_execution_v2.py
