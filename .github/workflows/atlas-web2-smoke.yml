@@ -1,0 +1,64 @@
+name: ATLAS Web2 E2E Smoke
+on:
+  push:
+    paths:
+      - atlas-dashboard.html
+      - .github/workflows/atlas-web2-smoke.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate inline JavaScript syntax and required UI
+        run: |
+          python - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import subprocess
+          class P(HTMLParser):
+              def __init__(self): super().__init__();self.in_script=False;self.scripts=[];self.ids=set()
+              def handle_starttag(self,t,a):
+                  d=dict(a)
+                  if 'id' in d:self.ids.add(d['id'])
+                  if t=='script' and 'src' not in d:self.in_script=True;self.scripts.append('')
+              def handle_endtag(self,t):
+                  if t=='script':self.in_script=False
+              def handle_data(self,d):
+                  if self.in_script:self.scripts[-1]+=d
+          p=P();p.feed(Path('atlas-dashboard.html').read_text())
+          required=['market-heatmap','risk','size-result','chart-container','account-email','account-login','journal']
+          assert set(required)<=p.ids,sorted(set(required)-p.ids)
+          for i,script in enumerate(p.scripts):
+              Path('/tmp/atlas-'+str(i)+'.js').write_text(script)
+              subprocess.run(['node','--check','/tmp/atlas-'+str(i)+'.js'],check=True)
+          print('UI and JS syntax passed')
+          PY
+      - name: Public API, unauthorized auth, and quant smoke
+        run: |
+          python - <<'PY'
+          import urllib.request,urllib.error,json
+          base='https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web'
+          def fetch(path,expected=200,headers=None):
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(base+path,headers=headers or {}),timeout=25) as r:
+                      status=r.status;body=json.load(r)
+              except urllib.error.HTTPError as e:
+                  status=e.code;body=json.loads(e.read())
+              assert status==expected,(path,status,body)
+              return body
+          account=fetch('/api/account',401)
+          assert account.get('error')=='authentication_required',account
+          symbols=fetch('/api/quant-symbols')
+          assert isinstance(symbols.get('symbols'),list)
+          for tf in ['1h','4h','24h','7d']:
+              heat=fetch('/api/market-heatmap?timeframe='+tf)
+              assert isinstance(heat.get('items'),list),(tf,heat)
+          print('Public API and denied unauthenticated account access passed')
+          PY
