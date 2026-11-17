@@ -47,6 +47,33 @@ def binance(sym,tf):
     d=get("https://api.binance.com/api/v3/klines?"+urllib.parse.urlencode({"symbol":sym+"USDT","interval":tf,"limit":350}))
     if not isinstance(d,list):raise ValueError("invalid response")
     return [[x[0],x[1],x[2],x[3],x[4],x[5]] for x in d]
+def coinbase(sym,tf):
+    # Coinbase Exchange public candles: 1h bars aggregated into aligned 4h,
+    # or native daily bars. Multiple requests required for 250 4h bars.
+    gran=3600 if tf=="4h" else 86400
+    end=int(time.time()//gran*gran)
+    pages=5 if tf=="4h" else 2
+    out=[]
+    for i in range(pages):
+        hi=end-i*290*gran
+        lo=hi-290*gran
+        url="https://api.exchange.coinbase.com/products/"+urllib.parse.quote(sym+"-USD")+"/candles?"+urllib.parse.urlencode({"granularity":gran,"start":datetime.datetime.fromtimestamp(lo,datetime.timezone.utc).isoformat(),"end":datetime.datetime.fromtimestamp(hi,datetime.timezone.utc).isoformat()})
+        data=get(url,{"User-Agent":"ATLAS-Research/1.0","Accept":"application/json"})
+        if not isinstance(data,list):raise ValueError("Coinbase response not candles")
+        out.extend([[int(x[0])*1000,x[3],x[2],x[1],x[4],x[5]] for x in data])
+        time.sleep(.08)
+    if tf=="1d":return out
+    buckets={}
+    for x in out:
+        t=x[0]//1000
+        bucket=t//14400*14400
+        buckets.setdefault(bucket,[]).append(x)
+    result=[]
+    for bucket,bars in sorted(buckets.items()):
+        bars=sorted({x[0]:x for x in bars}.values(),key=lambda x:x[0])
+        if len(bars)!=4 or [x[0] for x in bars]!=[(bucket+j*3600)*1000 for j in range(4)]:continue
+        result.append([bucket*1000,bars[0][1],max(x[2] for x in bars),min(x[3] for x in bars),bars[-1][4],sum(x[5] for x in bars)])
+    return result
 def existing(sym,tf):
     q=urllib.parse.urlencode({"select":"rows_json,updated_at,provider","symbol":"eq."+sym,"timeframe":"eq."+tf,"limit":"1"})
     rows=rest("atlas_ohlcv_closed_cache?"+q)
@@ -70,7 +97,7 @@ def main():
                     if time.time()-stamp<max(seconds*2,18000):counts["skipped"]+=1;continue
             except Exception:pass
             selected=None
-            for provider,fn in (("KRAKEN",kraken),("BINANCE_FALLBACK",binance)):
+            for provider,fn in (("KRAKEN",kraken),("COINBASE_FALLBACK",coinbase),("BINANCE_FALLBACK",binance)):
                 try:
                     candles=valid(fn(sym,tf),seconds)
                     if len(candles)<250:raise ValueError("only "+str(len(candles))+" contiguous closed candles")
