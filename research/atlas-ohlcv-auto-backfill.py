@@ -52,9 +52,13 @@ def existing(sym,tf):
     rows=rest("atlas_ohlcv_closed_cache?"+q)
     return rows[0] if rows else None
 def main():
-    catalog=rest("atlas_ohlcv_closed_cache?select=symbol&timeframe=eq.4h&limit=1000")
-    symbols=list(dict.fromkeys(str(x["symbol"]).upper() for x in catalog if str(x.get("symbol","")).isalnum()))
-    symbols=symbols[:LIMIT]
+    catalog=rest("atlas_ohlcv_closed_cache?select=symbol,timeframe,limit_n&timeframe=in.(4h,1d)&limit=1000")
+    by_symbol={}
+    for row in catalog:
+        sym=str(row.get("symbol","")).upper()
+        if not sym.isascii() or not sym.isalnum() or not 2<=len(sym)<=12:continue
+        by_symbol.setdefault(sym,{})[row["timeframe"]]=int(row.get("limit_n") or 0)
+    symbols=sorted(by_symbol,key=lambda x:(min(by_symbol[x].get("4h",0),by_symbol[x].get("1d",0))>=250,min(by_symbol[x].get("4h",0),by_symbol[x].get("1d",0)),x))[:LIMIT]
     if not symbols:raise RuntimeError("No existing universe; refuse empty ingestion")
     counts={"written":0,"skipped":0,"failed":0};failures=[]
     for sym in symbols:
@@ -72,10 +76,19 @@ def main():
                     if len(candles)<250:raise ValueError("only "+str(len(candles))+" contiguous closed candles")
                     last_age=time.time()-((candles[-1][0]/1000)+seconds)
                     if last_age>max(seconds*2,18000):raise ValueError("stale last candle")
+                    if old:
+                        try:
+                            prior=valid(json.loads(old["rows_json"]),seconds)
+                            if len(prior)>=250 and prior[-1][0]>=candles[-1][0] and len(prior)>=len(candles):
+                                counts["skipped"]+=1
+                                selected=("SKIP",prior)
+                                break
+                        except (ValueError,TypeError,KeyError):pass
                     selected=(provider,candles);break
                 except Exception as e:failures.append(sym+"/"+tf+"/"+provider+":"+str(e)[:90])
             if not selected:counts["failed"]+=1;continue
             provider,candles=selected
+            if provider=="SKIP":continue
             save({"symbol":sym,"timeframe":tf,"provider":provider,"limit_n":len(candles),"last_closed_ts":candles[-1][0]+seconds*1000,"rows_json":json.dumps(candles,separators=(",",":")),"updated_at":datetime.datetime.now(datetime.timezone.utc).isoformat()})
             counts["written"]+=1
             time.sleep(.15)
