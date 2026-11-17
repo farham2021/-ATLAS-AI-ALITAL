@@ -1,0 +1,27 @@
+name: ATLAS Closed OHLCV Auto Backfill
+on:
+  schedule:
+    - cron: '11 */4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: atlas-closed-ohlcv-auto-backfill
+  cancel-in-progress: false
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate syntax
+        run: python -m py_compile research/atlas-ohlcv-auto-backfill.py
+      - name: Update closed 4H and 1D cache (research only)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ATLAS_CANDLE_SYMBOL_LIMIT: '100'
+        run: python research/atlas-ohlcv-auto-backfill.py
