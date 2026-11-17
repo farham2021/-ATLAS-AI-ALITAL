@@ -46,7 +46,7 @@ el('account-logout').onclick=()=>{accountToken=null;el('account-password').value
 // Web3 restores all market sections without altering existing Quant Risk, heatmap, journal or auth.
 function web3Text(v){return v===null||v===undefined?'ناموجود':typeof v==='object'?JSON.stringify(v,null,2):String(v)}
 async function web3Load(path,target){const out=el(target);out.textContent='در حال دریافت...';try{const d=await api(path);out.textContent=web3Text(d).slice(0,9000)}catch(e){out.textContent='داده قابل دریافت نیست: '+String(e.message||e)}}
-el('iran-reload').onclick=()=>web3Load('/api/overview','iran-output');
+el('iran-reload').onclick=async()=>{const out=el('iran-output');out.textContent='در حال دریافت...';try{const d=await api('/api/overview');const iran=Array.isArray(d.iran)?d.iran:[],fx=Array.isArray(d.metals)?d.metals.filter(x=>/USD|USDT|IRR|TOMAN/i.test(x.symbol||'')):[];out.textContent='بورس تهران: '+iran.length+' نماد\n'+(iran.length?iran.slice(0,35).map(x=>x.symbol+' | '+(x.price??'ناموجود')+' | '+(x.captured_at||'زمان نامشخص')).join('\n'):'داده بورس موجود نیست')+'\n\nارز و تتر:\n'+(fx.length?fx.map(x=>x.symbol+' | '+(x.price??'ناموجود')).join('\n'):'داده معتبر موجود نیست')+'\n\nصندوق‌ها: دسته‌بندی مستقلی در API فعلی وجود ندارد؛ پوشش صندوق‌ها هنوز نیازمند تکمیل است.'}catch(e){out.textContent='داده بازار ایران در دسترس نیست: '+String(e.message||e)}};
 el('metal-reload').onclick=()=>web3Load('/api/metals-analysis?symbol='+encodeURIComponent(el('metal-symbol').value),'metal-output');
 el('us-reload').onclick=()=>web3Load('/api/us-markets','us-output');
 el('reports-reload').onclick=()=>web3Load('/api/reports?cycle='+encodeURIComponent(el('report-cycle').value),'reports-output');
