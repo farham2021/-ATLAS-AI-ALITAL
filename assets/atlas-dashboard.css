@@ -35,3 +35,16 @@ main .card button:not(:disabled):active{transform:translateY(1px)}
 @media(prefers-reduced-motion:reduce){
  main .card button{transition:none!important}
 }
+
+/* Additive command search; no atlas-main-menu or atlas-sub-menu selectors modified. */
+.atlas-command-trigger{display:block;margin:8px 0 3px auto;background:#123b56;border:1px solid #3c9db6;color:#e5faff;border-radius:11px;padding:8px 14px;font-size:13px}
+#atlas-command-dialog{position:fixed;inset:12vh 12px auto;max-width:580px;width:calc(100% - 24px);max-height:76vh;overflow:auto;border:1px solid #3d6c8d;border-radius:18px;padding:0;background:#0d1b32;color:#f1f7ff;box-shadow:0 25px 80px #0009}
+#atlas-command-dialog::backdrop{background:#030914b8;backdrop-filter:blur(4px)}
+.atlas-command-shell{padding:18px;display:grid;gap:12px}
+.atlas-command-shell label{display:block;font-size:16px;font-weight:700}
+#atlas-command-input{max-width:none;width:100%;font-size:16px;box-sizing:border-box}
+#atlas-command-results{display:grid;gap:6px}
+.atlas-command-result{width:100%;text-align:right;background:#172b48;border:1px solid #345576;color:#eaf6ff;border-radius:10px;padding:11px}
+.atlas-command-result:hover,.atlas-command-result:focus-visible{background:#245579;outline:2px solid #43d2e6}
+.atlas-command-hint{font-size:12px;color:#a9bed8;margin:0}
+@media(max-width:600px){#atlas-command-dialog{inset:8vh 10px auto;width:calc(100% - 20px)}}
