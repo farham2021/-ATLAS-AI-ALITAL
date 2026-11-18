@@ -13,7 +13,7 @@ Key properties:
 - BrsApi is the primary Iran market provider using documented AllSymbols, Nav, Commodity and Gold_Currency endpoints.
 - Provider failures are isolated; existing good Supabase data is never overwritten by fake data.
 """
-import json, os, time, urllib.error, urllib.parse, urllib.request
+import json, os, time, urllib.error, urllib.parse, urllib.request, unicodedata
 from datetime import datetime, timezone
 
 SB=os.getenv("SUPABASE_URL","").rstrip("/")
@@ -148,46 +148,40 @@ def _brs_usdt_record(rows):
 def _brs_norm_text(x):
     return " ".join(str(x.get(k) or "") for k in ("symbol","name_en","name","description")).lower()
 
+def _fx_text(v):
+    return unicodedata.normalize("NFKC",str(v or "")).lower().replace("ي","ی").replace("ك","ک").replace("\\u200c"," ").strip()
+
 def _brs_toman_to_irr(price, unit):
-    """Canonical ATLAS FX unit is IRR. Convert explicit toman quotes only."""
+    """Fail closed: canonical FX is IRR, never infer units from magnitude."""
     p=num(price)
-    if p is None:return None
-    u=str(unit or "").lower()
-    if "تومان" in u or "toman" in u:
-        return p*10.0
-    return p
+    if p is None or p<=0:return None
+    u=_fx_text(unit)
+    if u in ("ریال","irr","rial","rials"):return p
+    if u in ("تومان","irt","toman","tomans"):return p*10
+    return None
 
 def _brs_pick_iran_usd(currency_rows):
-    """Pick the Iranian FREE-MARKET USD quote from BrsApi currency rows.
-
-    Strictly prefer آزاد/free cash-market rows and heavily penalize official,
-    exchange-centre, remittance and NIMA/SANA variants.  This prevents a valid
-    but wrong USD market from silently becoming the portfolio valuation rate.
-    """
-    scored=[]
+    """Only explicit free-market USD; reject official/remittance/crypto variants."""
+    matches=[]
+    banned=("نیما","مبادله","حواله","سنا","دولتی","رسمی","بانکی",
+            "توافقی","nima","sana","official","bank","remittance",
+            "exchange center","usdt","tether","crypto")
     for x in currency_rows or []:
-        if not isinstance(x,dict): continue
-        blob=_brs_norm_text(x)
-        symbol=str(x.get("symbol") or "").strip().lower()
-        name_en=str(x.get("name_en") or "").strip().lower()
-        name=str(x.get("name") or "").strip()
-        p=num(x.get("price"))
-        if not p or p<=0: continue
-        score=0
-        # Identity evidence.
-        if symbol in ("usd","usd_irr","usd-irr"): score+=120
-        if name_en in ("usd","us dollar","united states dollar","dollar"): score+=90
-        if "دلار" in name or "dollar" in blob: score+=70
-        # Free-market evidence is decisive.
-        if "آزاد" in name or "بازار آزاد" in name or "free market" in blob or "free" in blob: score+=300
-        if any(t in blob for t in ("cash","نقدی")): score+=30
-        # Explicitly reject/penalize non-free Iranian USD variants.
-        if any(t in blob for t in ("مرکز مبادله","مبادله ای","مبادله‌ای","حواله","نیما","nima","سنا","sana","دولتی","official","بانکی","bank","توافقی")): score-=500
-        if any(t in blob for t in ("usdt","tether","crypto","bitcoin","eurusd","gbpusd")): score-=800
-        if score>0: scored.append((score,x))
-    if not scored: return None
-    scored.sort(key=lambda z:(z[0], num(z[1].get("price")) or 0), reverse=True)
-    return scored[0][1]
+        if not isinstance(x,dict):continue
+        blob=_fx_text(" ".join(str(x.get(k) or "") for k in
+                           ("symbol","name","name_en","description","market_type")))
+        symbol=_fx_text(x.get("symbol"))
+        if any(t in blob for t in banned):continue
+        identity=(symbol in ("usd_free","usd_irr_free","usd") or
+                  "دلار آزاد" in blob or "دلار آمریکا" in blob or
+                  "free market usd" in blob)
+        free_market=("آزاد" in blob or "free" in blob or
+                     _fx_text(x.get("market_type")) in ("free","free_market"))
+        if not (identity and free_market):continue
+        if _brs_toman_to_irr(x.get("price"),x.get("unit")) is None:continue
+        matches.append(x)
+    # Ambiguous quotes must not silently select an arbitrary row.
+    return matches[0] if len(matches)==1 else None
 
 def _brs_pick_currency(records, code, fa_tokens=(), en_tokens=()):
     """Pick a fiat quote from BrsApi currency section only; never infer from crypto/cross rows."""
@@ -486,74 +480,21 @@ def brs_fund_rows(tse_rows, status=None):
             }
         })
 
-    max_nav=int(os.getenv("ATLAS_BRSAPI_NAV_MAX_SYMBOLS","20"))
+    # Paid BrsApi NAV endpoint intentionally disabled (HTTP 402).
     nav_requests=0; nav_errors=0; nav_402=False; nav_error_sample=None
     nav_rows=0
-
-    # Optional NAV enrichment. Stop immediately on plan-level HTTP 402.
-    for idx,r in enumerate(out[:max_nav]):
-        sym=r["symbol"]
-        try:
-            d=brs_get("/Tsetmc/Nav.php",{"l18":sym},retries=1)
-            nav_requests+=1
-        except urllib.error.HTTPError as e:
-            nav_errors+=1
-            if e.code==402:
-                nav_402=True
-                nav_error_sample={"symbol":sym,"http_status":402,
-                                  "reason":"PAYMENT_REQUIRED"}
-                break
-            if nav_error_sample is None:
-                nav_error_sample={"symbol":sym,"http_status":e.code,
-                                  "reason":"HTTP_ERROR"}
-            continue
-        except Exception as e:
-            nav_errors+=1
-            if nav_error_sample is None:
-                nav_error_sample={"symbol":sym,"reason":str(e)[:200]}
-            continue
-
-        recs=list(walk_records(d))
-        selected=None; nav=issue=generic=None
-        for rec in recs:
-            nav=num(first(
-                rec,"nav","NAV","navRedemption","redemptionNav",
-                "nav_redemption","redemption_nav","cancelNav","cancel_nav",
-                "ابطال","nav_ebtal"
-            ))
-            issue=num(first(
-                rec,"navIssuance","issuanceNav","nav_issuance",
-                "issuance_nav","issueNav","issue_nav","صدور","nav_sodoor"
-            ))
-            generic=num(first(rec,"navValue","nav_value"))
-            if any(v is not None and v>0 for v in (nav,issue,generic)):
-                selected=rec
-                break
-        if not selected:
-            continue
-
-        chosen=next((v for v in (nav,issue,generic)
-                     if v is not None and v>0),None)
-        if not chosen:
-            continue
-        price=num(r.get("price"))
-        prem=(price/chosen-1)*100 if price else None
-        r["nav"]=chosen
-        r["payload"].update({
-            "provider":"brsapi_nav",
-            "nav":chosen,
-            "nav_status":"AVAILABLE",
-            "nav_redemption":nav,
-            "nav_issuance":issue,
-            "premium_pct":prem
-        })
-        nav_rows+=1
 
     # Free public TSETMC ETF redemption NAV fallback; never confuse issuance NAV
     # with redemption NAV or a price quote. Missing / malformed codes are skipped.
     tsetmc_requests=0; tsetmc_rows=0; tsetmc_errors=0
-    tsetmc_max=max(0,min(100,int(os.getenv("ATLAS_TSETMC_NAV_MAX_SYMBOLS","30"))))
-    for r in out:
+    tsetmc_max=max(0,min(60,int(os.getenv("ATLAS_TSETMC_NAV_MAX_SYMBOLS","50"))))
+    # Rotate by UTC date; prioritize liquid ETFs before rotating remaining symbols.
+    ordered=sorted(out,key=lambda x: num((x.get("payload") or {}).get("trade_value")) or 0,reverse=True)
+    priority=ordered[:min(20,len(ordered))]
+    rotating=ordered[len(priority):]
+    offset=(datetime.now(timezone.utc).date().toordinal()*max(1,tsetmc_max-len(priority)))%len(rotating) if rotating else 0
+    selected=priority+(rotating[offset:]+rotating[:offset])[:max(0,tsetmc_max-len(priority))]
+    for r in selected:
         if tsetmc_requests>=tsetmc_max:break
         if r.get("nav") is not None:continue
         code=str((r.get("payload") or {}).get("ins_code") or "").strip()
@@ -603,7 +544,7 @@ def brs_fund_rows(tse_rows, status=None):
         status["fund_provider"]="brsapi_allsymbols"
         status["brsapi_nav_requests"]=nav_requests
         status["brsapi_nav_errors"]=nav_errors
-        status["brsapi_nav_circuit_breaker"]="PAYMENT_REQUIRED" if nav_402 else "CLOSED"
+        status["brsapi_nav_circuit_breaker"]="DISABLED_TSETMC_PRIMARY"
         status["brsapi_nav_rows_mapped"]=nav_rows
         if nav_error_sample:
             status["brsapi_nav_error_sample"]=nav_error_sample
