@@ -40,6 +40,22 @@ jobs:
               subprocess.run(['node','--check','/tmp/atlas-'+str(i)+'.js'],check=True)
           print('UI and JS syntax passed')
           PY
+      - name: Verify external UI modules and navigation invariants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          html=Path('atlas-dashboard.html').read_text()
+          modules=['assets/atlas-command-search.js','assets/atlas-research-tools.js']
+          for path in modules:
+              assert Path(path).is_file(),f'missing {path}'
+              assert path in html,f'not linked: {path}'
+              subprocess.run(['node','--check',path],check=True)
+          assert html.count('id="atlas-main-menu"')==1
+          assert html.count('id="atlas-sub-menu"')==1
+          assert 'assets/atlas-dashboard.css' in html
+          print('External JS and existing navigation structure passed')
+          PY
       - name: Public API, unauthorized auth, and quant smoke
         run: |
           python - <<'PY'
