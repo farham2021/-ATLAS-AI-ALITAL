@@ -56,3 +56,6 @@ main .card button:not(:disabled):active{transform:translateY(1px)}
 #crypto-top50-panel .atlas-coin-card summary>*{unicode-bidi:isolate;white-space:nowrap}
 #funds-results .web3-line{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 #funds-results .web3-line strong{unicode-bidi:isolate;overflow-wrap:anywhere}
+
+#opportunity-lab .atlas-opportunity-select{align-self:flex-start;min-height:42px;padding:8px 12px;margin-top:4px}
+#opportunity-lab .web3-record{display:flex;flex-direction:column;align-items:stretch;gap:7px}

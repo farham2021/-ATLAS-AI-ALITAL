@@ -4,15 +4,18 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'assets/**'
+      - 'atlas-dashboard.html'
       - '.github/workflows/atlas-web-pages.yml'
+      - '.github/workflows/publish-atlas-dashboard.yml'
   workflow_dispatch:
 permissions:
   contents: read
   pages: write
   id-token: write
 concurrency:
-  group: atlas-web-pages
-  cancel-in-progress: true
+  group: atlas-pages
+  cancel-in-progress: false
 jobs:
   deploy:
     environment:
@@ -21,9 +24,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare combined static site
+        run: |
+          rm -rf _site
+          mkdir -p _site/assets _site/desk
+          cp atlas-dashboard.html _site/index.html
+          cp atlas-dashboard.html _site/atlas-dashboard.html
+          cp -a assets/. _site/assets/
+          cp -a docs/. _site/desk/
+          printf '%s\n' '<!doctype html><title>ATLAS</title><a href="./">ATLAS Dashboard</a>' > _site/404.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

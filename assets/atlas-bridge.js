@@ -1,4 +1,4 @@
-/* ATLAS asset bridge v1 — UI only, no orders or invented trade levels. */
+/* ATLAS asset bridge v2 — UI only, no orders or invented trade levels. */
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const finite=x=>x!==null&&x!==undefined&&x!==''&&Number.isFinite(Number(x))&&Number(x)>0;
