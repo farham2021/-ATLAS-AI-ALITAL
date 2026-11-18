@@ -382,7 +382,7 @@ def brs_tse_rows(status=None):
                 "provider":"brsapi_allsymbols","name":name,"price":p,
                 "close":num(first(x,"pc")),"yesterday":y,"pct":pct,
                 "trades":trades,"volume":volume,"trade_value":value,
-                "isin":first(x,"isin"),"industry_code":first(x,"cs"),
+                "isin":first(x,"isin"),"ins_code":first(x,"id","insCode","ins_code"),"industry_code":first(x,"cs"),
                 "market_value":num(first(x,"mv")),
                 "buy_i_volume":buy_i_vol,"sell_i_volume":sell_i_vol,
                 "buy_n_volume":buy_n_vol,"sell_n_volume":sell_n_vol,
@@ -482,7 +482,7 @@ def brs_fund_rows(tse_rows, status=None):
                 "pct":p.get("pct"),
                 "volume":p.get("volume"),
                 "trade_value":p.get("trade_value"),
-                "isin":p.get("isin")
+                "isin":p.get("isin"),"ins_code":p.get("ins_code")
             }
         })
 
@@ -549,6 +549,51 @@ def brs_fund_rows(tse_rows, status=None):
         })
         nav_rows+=1
 
+    # Free public TSETMC ETF redemption NAV fallback; never confuse issuance NAV
+    # with redemption NAV or a price quote. Missing / malformed codes are skipped.
+    tsetmc_requests=0; tsetmc_rows=0; tsetmc_errors=0
+    tsetmc_max=max(0,min(100,int(os.getenv("ATLAS_TSETMC_NAV_MAX_SYMBOLS","30"))))
+    for r in out:
+        if tsetmc_requests>=tsetmc_max:break
+        if r.get("nav") is not None:continue
+        code=str((r.get("payload") or {}).get("ins_code") or "").strip()
+        if not (code.isascii() and code.isdecimal() and 8<=len(code)<=20):
+            continue
+        tsetmc_requests+=1
+        try:
+            response=http_json(
+                "https://cdn.tsetmc.com/api/Fund/GetETFByInsCode/"+code,
+                timeout=min(TIMEOUT,12),retries=1
+            )
+            etf=response.get("etf") if isinstance(response,dict) else None
+            if isinstance(etf,list):
+                etf=etf[0] if len(etf)==1 else None
+            if not isinstance(etf,dict):continue
+            returned_code=str(etf.get("insCode") or "").strip()
+            if returned_code and returned_code!=code:continue
+            redemption=num(etf.get("pRedTran"))
+            if redemption is None or not (0<redemption<1e15):continue
+            date_raw=str(etf.get("deven") or "").strip()
+            if not (len(date_raw)==8 and date_raw.isdecimal() and
+                    20200101<=int(date_raw)<=21001231):continue
+            # Do not silently accept stale NAV as a live market premium.
+            nav_date=datetime.strptime(date_raw,"%Y%m%d").date()
+            if abs((datetime.now(timezone.utc).date()-nav_date).days)>7:continue
+            r["nav"]=redemption
+            r["payload"].update({
+                "nav":redemption,"nav_status":"AVAILABLE",
+                "nav_type":"REDEMPTION","nav_redemption":redemption,
+                "nav_source":"tsetmc_etf","nav_date":date_raw,
+                "nav_ins_code":code,
+                "premium_pct":(num(r.get("price"))/redemption-1)*100
+                    if num(r.get("price")) and num(r.get("price"))>0 else None
+            })
+            tsetmc_rows+=1
+        except Exception:
+            tsetmc_errors+=1
+        # Be gentle to the public endpoint during scheduled collection.
+        time.sleep(.35)
+
     if nav_402:
         for r in out:
             if r.get("nav") is None:
@@ -563,6 +608,9 @@ def brs_fund_rows(tse_rows, status=None):
         if nav_error_sample:
             status["brsapi_nav_error_sample"]=nav_error_sample
         status["fund_market_rows"]=len(out)
+        status["tsetmc_nav_requests"]=tsetmc_requests
+        status["tsetmc_nav_rows_mapped"]=tsetmc_rows
+        status["tsetmc_nav_errors"]=tsetmc_errors
 
     return out
 
