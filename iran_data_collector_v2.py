@@ -488,17 +488,21 @@ def brs_fund_rows(tse_rows, status=None):
     # with redemption NAV or a price quote. Missing / malformed codes are skipped.
     tsetmc_requests=0; tsetmc_rows=0; tsetmc_errors=0
     tsetmc_max=max(0,min(60,int(os.getenv("ATLAS_TSETMC_NAV_MAX_SYMBOLS","50"))))
-    # Rotate by UTC date; prioritize liquid ETFs before rotating remaining symbols.
+    # Rotate hourly; prioritize liquid ETFs before rotating remaining symbols.
     ordered=sorted(out,key=lambda x: num((x.get("payload") or {}).get("trade_value")) or 0,reverse=True)
     priority=ordered[:min(20,len(ordered))]
     rotating=ordered[len(priority):]
     offset=(int(datetime.now(timezone.utc).timestamp()//3600)*max(1,tsetmc_max-len(priority)))%len(rotating) if rotating else 0
     selected=priority+(rotating[offset:]+rotating[:offset])[:max(0,tsetmc_max-len(priority))]
+    selected_codes={id(r) for r in selected}
+    for r in out:
+        r["payload"]["nav_status"]="PENDING_ROTATION" if id(r) not in selected_codes else "PENDING_FETCH"
     for r in selected:
         if tsetmc_requests>=tsetmc_max:break
         if r.get("nav") is not None:continue
         code=str((r.get("payload") or {}).get("ins_code") or "").strip()
         if not (code.isascii() and code.isdecimal() and 8<=len(code)<=20):
+            r["payload"]["nav_status"]="UNAVAILABLE_INVALID_INSCODE"
             continue
         tsetmc_requests+=1
         try:
@@ -509,17 +513,27 @@ def brs_fund_rows(tse_rows, status=None):
             etf=response.get("etf") if isinstance(response,dict) else None
             if isinstance(etf,list):
                 etf=etf[0] if len(etf)==1 else None
-            if not isinstance(etf,dict):continue
+            if not isinstance(etf,dict):
+                r["payload"]["nav_status"]="UNAVAILABLE_NO_ETF_RECORD"
+                continue
             returned_code=str(etf.get("insCode") or "").strip()
-            if returned_code and returned_code!=code:continue
+            if returned_code and returned_code!=code:
+                r["payload"]["nav_status"]="REJECTED_INSCODE_MISMATCH"
+                continue
             redemption=num(etf.get("pRedTran"))
-            if redemption is None or not (0<redemption<1e15):continue
+            if redemption is None or not (0<redemption<1e15):
+                r["payload"]["nav_status"]="UNAVAILABLE_NO_REDEMPTION_NAV"
+                continue
             date_raw=str(etf.get("deven") or "").strip()
             if not (len(date_raw)==8 and date_raw.isdecimal() and
-                    20200101<=int(date_raw)<=21001231):continue
+                    20200101<=int(date_raw)<=21001231):
+                r["payload"]["nav_status"]="REJECTED_INVALID_NAV_DATE"
+                continue
             # Do not silently accept stale NAV as a live market premium.
             nav_date=datetime.strptime(date_raw,"%Y%m%d").date()
-            if abs((datetime.now(timezone.utc).date()-nav_date).days)>7:continue
+            if abs((datetime.now(timezone.utc).date()-nav_date).days)>7:
+                r["payload"]["nav_status"]="REJECTED_STALE_NAV"
+                continue
             r["nav"]=redemption
             r["payload"].update({
                 "nav":redemption,"nav_status":"AVAILABLE",
@@ -532,13 +546,10 @@ def brs_fund_rows(tse_rows, status=None):
             tsetmc_rows+=1
         except Exception:
             tsetmc_errors+=1
+            r["payload"]["nav_status"]="FETCH_ERROR"
         # Be gentle to the public endpoint during scheduled collection.
         time.sleep(.35)
 
-    if nav_402:
-        for r in out:
-            if r.get("nav") is None:
-                r["payload"]["nav_status"]="UNAVAILABLE_PLAN_REQUIRED"
 
     if status is not None:
         status["fund_provider"]="brsapi_allsymbols"
@@ -824,7 +835,10 @@ def main():
                     st["usdt_provider_symbol"]=raw_usdt.get("symbol") or "USDT"
                 else:
                     st["brsapi_usdt_written"]=0
-                    st["usdt_provider"]="REJECTED_INVALID_CROSS"
+                    cached_usdt=next((r for r in fx if r.get("symbol")=="USDT_IRR" and num(r.get("price")) and num(r.get("price"))>0),None)
+                    st["usdt_provider"]="NAVASAN_CACHE" if cached_usdt else "REJECTED_INVALID_CROSS"
+                    st["usdt_cache_age_h"]=round(age_hours(cached_usdt.get("captured_at")),2) if cached_usdt else None
+                    st["usdt_cache_usable"]=bool(cached_usdt and age_hours(cached_usdt.get("captured_at"))<=NAV_MIN_AGE_H)
                     st["usdt_usd"]=usdt_usd
                     st["usd_brs_symbol"]=raw_usd.get("symbol") if raw_usd else None
                     st["usd_brs_name"]=raw_usd.get("name") if raw_usd else None
@@ -886,7 +900,7 @@ def main():
     if _up in ("brsapi","brsapi_cross") and _uw:
         print(f"🟢 USDT CHECK | provider=BRSAPI | provider_symbol={_us} | price={_ux} | written={_uw}")
     else:
-        print(f"🔴 USDT CHECK | provider={_up} | BRSAPI record not mapped | written={_uw}")
+        print(f"🟡 USDT CHECK | provider={_up} | BRSAPI cross unavailable | cache_usable={st.get('usdt_cache_usable',False)} | written={_uw}")
 
 
 if __name__=="__main__":main()
