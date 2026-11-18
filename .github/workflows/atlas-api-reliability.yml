@@ -23,7 +23,7 @@ jobs:
           python - <<'PY'
           import json,os,time,urllib.request,urllib.error
           base=os.environ['ATLAS_BASE']
-          paths=['/api/status','/api/overview','/api/live-terminal','/api/opportunity-lab','/api/crypto-top50-levels','/api/quant-symbols','/api/market-heatmap?timeframe=4h','/api/iran-relative-value','/api/iran-funds','/api/metals-analysis','/api/us-markets','/api/reports']
+          paths=['/api/status','/api/overview','/api/live-terminal','/api/opportunity-lab','/api/crypto-top50-levels','/api/quant-symbols','/api/market-heatmap?timeframe=4h','/api/iran-relative-value','/api/iran-funds','/api/metals-analysis','/api/us-markets','/api/reports?cycle=HOURLY']
           failures=[]
           for path in paths:
               start=time.monotonic()
