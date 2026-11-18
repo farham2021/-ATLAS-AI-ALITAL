@@ -1,0 +1,53 @@
+name: ATLAS Public API Reliability Gate
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */2 * * *'
+  push:
+    paths:
+      - .github/workflows/atlas-api-reliability.yml
+permissions:
+  contents: read
+concurrency:
+  group: atlas-public-api-reliability
+  cancel-in-progress: false
+jobs:
+  api-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Validate public endpoints, payloads and latency
+        env:
+          ATLAS_BASE: https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web
+        run: |
+          python - <<'PY'
+          import json,os,time,urllib.request,urllib.error
+          base=os.environ['ATLAS_BASE']
+          paths=['/api/status','/api/overview','/api/live-terminal','/api/opportunity-lab','/api/crypto-top50-levels','/api/quant-symbols','/api/market-heatmap?timeframe=4h','/api/iran-relative-value','/api/iran-funds','/api/metals-analysis','/api/us-markets','/api/reports']
+          failures=[]
+          for path in paths:
+              start=time.monotonic()
+              try:
+                  req=urllib.request.Request(base+path,headers={'Accept':'application/json','User-Agent':'ATLAS-API-Reliability/1.0'})
+                  with urllib.request.urlopen(req,timeout=22) as resp:
+                      status=resp.status
+                      body=json.loads(resp.read(3_000_000))
+                  elapsed=round(time.monotonic()-start,2)
+                  if status!=200 or not isinstance(body,dict) or body.get('error'):
+                      raise ValueError(f'HTTP {status} or invalid/error payload: {str(body)[:180]}')
+                  if path.startswith('/api/crypto-top50-levels') and (len(body.get('items',[]))!=50 or not body.get('ranking_source')):
+                      raise ValueError('Top50 incomplete or missing ranking source')
+                  if path.startswith('/api/quant-symbols') and not isinstance(body.get('symbols'),list):
+                      raise ValueError('Quant symbol catalog invalid')
+                  if path.startswith('/api/market-heatmap') and not isinstance(body.get('items'),list):
+                      raise ValueError('Heatmap invalid')
+                  print(f'PASS {path} {elapsed}s')
+              except Exception as exc:
+                  elapsed=round(time.monotonic()-start,2)
+                  failures.append(f'{path}: {type(exc).__name__}: {exc} ({elapsed}s)')
+                  print('FAIL',failures[-1])
+          if failures:
+              print('\\nFAILURES: '+str(len(failures))+'/'+str(len(paths)))
+              raise SystemExit(1)
+          print('ALL PUBLIC API CHECKS PASSED')
+          PY
