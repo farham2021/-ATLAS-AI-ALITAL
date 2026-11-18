@@ -492,7 +492,7 @@ def brs_fund_rows(tse_rows, status=None):
     ordered=sorted(out,key=lambda x: num((x.get("payload") or {}).get("trade_value")) or 0,reverse=True)
     priority=ordered[:min(20,len(ordered))]
     rotating=ordered[len(priority):]
-    offset=(datetime.now(timezone.utc).date().toordinal()*max(1,tsetmc_max-len(priority)))%len(rotating) if rotating else 0
+    offset=(int(datetime.now(timezone.utc).timestamp()//3600)*max(1,tsetmc_max-len(priority)))%len(rotating) if rotating else 0
     selected=priority+(rotating[offset:]+rotating[:offset])[:max(0,tsetmc_max-len(priority))]
     for r in selected:
         if tsetmc_requests>=tsetmc_max:break
