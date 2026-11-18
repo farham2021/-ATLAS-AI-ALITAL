@@ -1,0 +1,29 @@
+name: ATLAS NAV Fallback Check
+on:
+  push:
+    paths:
+      - "iran_data_collector_v2.py"
+      - ".github/workflows/atlas-nav-fallback-check.yml"
+  workflow_dispatch:
+jobs:
+  nav-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Compile collector
+        run: python -m py_compile iran_data_collector_v2.py
+      - name: Verify public NAV fallback mapping and safeguards
+        run: |
+          python - <<'PY'
+          import iran_data_collector_v2 as c
+          assert c.num('100,000') == 100000
+          assert callable(c.brs_fund_rows)
+          import inspect
+          src=inspect.getsource(c.brs_fund_rows)
+          for token in ('GetETFByInsCode','pRedTran','nav_type','REDEMPTION','nav_date','ins_code'):
+              assert token in src, token
+          print('NAV fallback structure verified')
+          PY
