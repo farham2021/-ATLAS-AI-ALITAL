@@ -50,3 +50,9 @@ main .card button:not(:disabled):active{transform:translateY(1px)}
 @media(max-width:600px){#atlas-command-dialog{inset:8vh 10px auto;width:calc(100% - 20px)}}
 
 .atlas-research-tool{margin-top:18px;padding:16px;border:1px solid rgba(89,181,214,.3);border-radius:14px;background:rgba(8,20,43,.7)}.atlas-research-tool h3{margin:0 0 8px;color:#83e6f2}.atlas-research-tool p{line-height:1.7;overflow-wrap:anywhere}.atlas-tool-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:12px 0}.atlas-tool-grid label{display:flex;flex-direction:column;align-items:stretch;gap:5px;margin:0}.atlas-tool-grid input{max-width:none;width:100%;box-sizing:border-box}.atlas-tool-grid output{font-variant-numeric:tabular-nums}
+
+/* Explicit directional islands for iOS Safari mixed RTL/LTR coin summaries */
+#crypto-top50-panel .atlas-coin-card summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;direction:ltr;unicode-bidi:isolate;text-align:left}
+#crypto-top50-panel .atlas-coin-card summary>*{unicode-bidi:isolate;white-space:nowrap}
+#funds-results .web3-line{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+#funds-results .web3-line strong{unicode-bidi:isolate;overflow-wrap:anywhere}
