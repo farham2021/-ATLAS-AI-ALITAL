@@ -10,14 +10,13 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
-PARIS = ZoneInfo("Europe/Paris")
 TABLE = (os.environ.get("ATLAS_SCHEDULER_TABLE") or "atlas_scheduler_runs").strip()
-# Scheduled delivery is deliberately limited to three Europe/Paris windows.
-# GitHub Actions only wakes the guard around these windows; the guard is the authority.
+# Tehran-local reporting slots are the source of truth. GitHub cron only wakes
+# this guard; its timestamps and idempotency keys are all Asia/Tehran.
 REPORT_SLOTS = (
-    ("DEEP4H", 10, 5, "europe_session_after_4h_close"),
-    ("DAILY16", 14, 50, "post_us_macro_15m_close"),
-    ("NIGHTLY23", 18, 5, "london_newyork_overlap_4h_close"),
+    ("DEEP4H", 12, 5, "tehran_midday_deep4h"),
+    ("DAILY16", 16, 5, "tehran_daily16"),
+    ("NIGHTLY23", 23, 5, "tehran_nightly23"),
 )
 REPORT_RECOVERY_MIN = int(os.environ.get("ATLAS_REPORT_RECOVERY_MIN", "180") or 180)
 DEFAULT_LEASE_MIN = int(os.environ.get("ATLAS_SCHEDULER_LEASE_MIN", "65") or 65)
@@ -90,10 +89,9 @@ def _parse_ts(value):
 
 
 def _key_date(run_key: str) -> str:
-    """Extract the date segment from run_key for the legacy tehran_date column.
+    """Extract the Tehran-local date segment for the legacy tehran_date column.
 
-    run_key format: MODE:YYYY-MM-DD:HHMMPARIS  (Paris-local slot date).
-    The DB column is still named tehran_date for backward compatibility.
+    run_key format: MODE:YYYY-MM-DD:HHMMTEHRAN.
     """
     parts = run_key.split(":")
     if len(parts) < 2 or not parts[1]:
@@ -214,37 +212,34 @@ def _plan(mode: str, run_key: str, reason: str, scheduled: bool = True, **diag):
     return out
 
 
-def _slot_key(mode: str, paris_slot: datetime) -> str:
-    # Keep run keys stable and human-readable; the DB column name remains
-    # tehran_date for backward compatibility, but these slots are Paris-local.
-    return f"{mode}:{paris_slot.date().isoformat()}:{paris_slot.strftime('%H%M')}PARIS"
+def _slot_key(mode: str, tehran_slot: datetime) -> str:
+    # Keep run keys stable and human-readable, and aligned with tehran_date.
+    return f"{mode}:{tehran_slot.date().isoformat()}:{tehran_slot.strftime('%H%M')}TEHRAN"
 
 
 def choose_plan(dt: datetime, state_getter=remote_done, hourly_wake: bool = False):
-    """Choose at most one of three scheduled report windows.
+    """Choose at most one scheduled report window using Asia/Tehran local time.
 
     Hourly wakes run storage-only outside report windows. Manual workflow_dispatch
     can request HOURLY/DEEP4H/DAILY16/NIGHTLY23 for diagnostics.
-    Europe/Paris is used so CET/CEST DST is handled by zoneinfo rather than by
-    hard-coded UTC offsets.
     """
-    paris = dt.astimezone(PARIS)
+    tehran = dt.astimezone(TEHRAN)
     candidates = []
     for mode, hour, minute, reason in REPORT_SLOTS:
-        slot = paris.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if slot <= paris < slot + timedelta(minutes=max(10, REPORT_RECOVERY_MIN)):
+        slot = tehran.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if slot <= tehran < slot + timedelta(minutes=max(10, REPORT_RECOVERY_MIN)):
             candidates.append((slot, mode, reason))
     if not candidates and hourly_wake:
-        key = hour_key("HOURLY", dt.astimezone(TEHRAN))
+        key = hour_key("HOURLY", tehran)
         state = state_getter(key)
         if state is not True:
             return _plan("HOURLY", key, "hourly_storage_only",
-                         tehran_now=dt.astimezone(TEHRAN).isoformat(timespec="seconds"))
+                         tehran_now=tehran.isoformat(timespec="seconds"))
         return _plan("NONE", "", "hourly_already_done")
     if not candidates:
         return _plan(
-            "NONE", "", "outside_three_report_windows",
-            paris_now=paris.isoformat(timespec="seconds"),
+            "NONE", "", "outside_three_tehran_report_windows",
+            tehran_now=tehran.isoformat(timespec="seconds"),
             recovery_min=REPORT_RECOVERY_MIN,
         )
 
@@ -254,35 +249,32 @@ def choose_plan(dt: datetime, state_getter=remote_done, hourly_wake: bool = Fals
     if state is False:
         return _plan(
             mode, run_key, reason,
-            paris_now=paris.isoformat(timespec="seconds"),
-            paris_slot=slot.isoformat(timespec="minutes"),
+            tehran_now=tehran.isoformat(timespec="seconds"),
+            tehran_slot=slot.isoformat(timespec="minutes"),
             recovery_min=REPORT_RECOVERY_MIN,
         )
     if state is True and hourly_wake:
         # A completed report slot must not suppress the storage-only hourly cycle.
-        hourly_key = hour_key("HOURLY", dt.astimezone(TEHRAN))
+        hourly_key = hour_key("HOURLY", tehran)
         hourly_state = state_getter(hourly_key)
         if hourly_state is not True:
             return _plan("HOURLY", hourly_key, "hourly_after_report_completed",
-                         tehran_now=dt.astimezone(TEHRAN).isoformat(timespec="seconds"))
+                         tehran_now=tehran.isoformat(timespec="seconds"))
     if state is None:
-        # The claim step remains the duplicate-prevention authority. If Supabase
-        # state lookup is temporarily unavailable, keep the slot eligible so the
-        # workflow can reach claim; claim failure is already handled fail-open by
-        # atlas.yml. This favors delivery continuity during transient REST outages.
+        # Supabase claim remains the duplicate-prevention authority if this read
+        # is unavailable; only a successful lease claim may run a scheduled slot.
         return _plan(
             mode, run_key, f"{reason}_state_unavailable_fail_open",
-            paris_now=paris.isoformat(timespec="seconds"),
-            paris_slot=slot.isoformat(timespec="minutes"),
+            tehran_now=tehran.isoformat(timespec="seconds"),
+            tehran_slot=slot.isoformat(timespec="minutes"),
             recovery_min=REPORT_RECOVERY_MIN,
         )
     return _plan(
         "NONE", "", f"{mode.lower()}_slot_already_done",
-        paris_now=paris.isoformat(timespec="seconds"),
-        paris_slot=slot.isoformat(timespec="minutes"),
+        tehran_now=tehran.isoformat(timespec="seconds"),
+        tehran_slot=slot.isoformat(timespec="minutes"),
         recovery_min=REPORT_RECOVERY_MIN,
     )
-
 
 def write_github_output(values, path):
     with open(path, "a", encoding="utf-8") as f:
@@ -323,7 +315,7 @@ def cmd_force_done(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="ATLAS self-healing three-window Paris scheduler with RPC lease and fail-open")
+    p = argparse.ArgumentParser(description="ATLAS self-healing three-window Tehran scheduler with RPC lease")
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("plan")
     a.add_argument("--manual", choices=["HOURLY", "DEEP4H", "DAILY16", "NIGHTLY23"])

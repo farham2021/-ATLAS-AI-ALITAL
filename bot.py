@@ -125,6 +125,13 @@ import xml.etree.ElementTree as ET
 import traceback
 import hashlib
 
+try:
+    from atlas_telegram_receipts import build_telegram_receipt as _build_telegram_receipt
+    from atlas_telegram_receipts import persist_telegram_receipt as _persist_telegram_receipt
+except Exception:
+    _build_telegram_receipt = None
+    _persist_telegram_receipt = None
+
 # ATLAS Signal Opportunity Engine V2 (advisory; execution remains canonical)
 try:
     from analysis import enrich_result as _atlas_opportunity_enrich, ENGINE_VERSION as _ATLAS_OPPORTUNITY_ENGINE_VERSION
@@ -667,6 +674,7 @@ def send_audio_report(audio_file, caption=None):
             with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 if result.get('ok', False):
+                    _record_telegram_receipt(chat_id, result, "sendAudio")
                     print("✅")
                     success_count += 1
                 else:
@@ -5912,6 +5920,27 @@ def evaluate_open_outcomes():
 # TELEGRAM — WITH RATE LIMIT HANDLING
 # ============================================================
 
+def _record_telegram_receipt(chat_id, response, method):
+    """Persist redacted metadata only; do not retry a successful Telegram send."""
+    if not os.environ.get("GITHUB_RUN_ID") or not os.environ.get("SUPABASE_SERVICE_ROLE_KEY"):
+        return
+    if not callable(_build_telegram_receipt) or not callable(_persist_telegram_receipt):
+        return
+    cycle = os.environ.get("SELECTED_MODE") or os.environ.get("ATLAS_RUN_MODE") or "UNKNOWN"
+    try:
+        receipt = _build_telegram_receipt(
+            chat_id=chat_id, response=response, method=method,
+            workflow_run_id=os.environ.get("GITHUB_RUN_ID"), cycle=cycle,
+            run_key=os.environ.get("ATLAS_SCHEDULER_RUN_KEY", ""),
+            private_chat_id=TELEGRAM_CHAT_ID, group_chat_id=TELEGRAM_GROUP_CHAT_ID,
+        )
+        if receipt:
+            _persist_telegram_receipt(receipt)
+            print(f"[telegram-receipt] method={method} cycle={cycle} message_id={receipt['message_id']} persisted=true")
+    except Exception as exc:
+        print(f"::warning::Telegram receipt persistence failed; method={method} cycle={cycle} error={type(exc).__name__}")
+
+
 def _telegram_send_chunk(chat_id, text):
     data = urllib.parse.urlencode({
         "chat_id": str(chat_id),
@@ -5929,6 +5958,7 @@ def _telegram_send_chunk(chat_id, text):
         if not data.get("ok"):
             error_desc = data.get("description", "Unknown error")
             raise RuntimeError(f"Telegram sendMessage failed: {error_desc}")
+        _record_telegram_receipt(chat_id, data, "sendMessage")
         return data
 
 def send_with_retry(chat_id, text, max_retries=None, base_delay=None):
@@ -6352,6 +6382,7 @@ def _telegram_send_document(chat_id, content, filename, caption=None):
         data=json.loads(resp.read().decode("utf-8", errors="replace"))
     if not data.get("ok"):
         raise RuntimeError(f"Telegram sendDocument failed: {data}")
+    _record_telegram_receipt(chat_id, data, "sendDocument")
     return data
 
 def send_csv_report(results, top10, dynamic30):
@@ -9152,6 +9183,7 @@ def send_image_table(results, top10_symbols=None, dynamic30_symbols=None):
             with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode())
                 if result.get('ok', False):
+                    _record_telegram_receipt(chat_id, result, "sendPhoto")
                     print("✅")
                     success_count += 1
                 else:
@@ -9447,6 +9479,7 @@ def _telegram_send_photo_file(chat_id, filename, caption=None):
         data=json.loads(resp.read().decode("utf-8",errors="replace"))
     if not data.get("ok"):
         raise RuntimeError(f"Telegram sendPhoto failed: {data}")
+    _record_telegram_receipt(chat_id, data, "sendPhoto")
     return True
 
 

@@ -4,18 +4,11 @@ on:
   schedule:
     # Hourly storage-only wake; report slots take priority when due.
     - cron: "17,47 * * * *"
-    # Explicit primary + recovery wake-ups for the three Europe/Paris report slots.
-    # We intentionally avoid a high-frequency */10 watchdog: GitHub scheduled runs
-    # are best-effort and may be delayed/dropped under load. These sparse UTC wakes
-    # cover BOTH CEST (UTC+2) and CET (UTC+1); atlas_schedule_guard.py is authoritative.
-    # Paris targets: 10:05, 14:50, 18:05 local. Minutes are offset by +2/+32 to
-    # reduce top-of-hour contention while staying inside the recovery window.
-    # DEEP4H + NIGHTLY23: primary/recovery for both DST offsets.
-    - cron: "7,37 8,9,16,17 * * *"
-    # DAILY16: primary for both DST offsets.
-    - cron: "52 12,13 * * *"
-    # DAILY16: recovery for both DST offsets.
-    - cron: "22 13,14 * * *"
+    # Tehran report targets: DEEP4H 12:05, DAILY16 16:05, NIGHTLY23 23:05.
+    # GitHub cron is UTC; Tehran is currently UTC+03:30. Primary/recovery wakes
+    # run at +2/+32 minutes so delayed scheduled starts remain inside the guard window.
+    # The guard is authoritative for mode selection, Tehran-local keys and dedupe.
+    - cron: "7,37 8,9,12,13,19,20 * * *"
   workflow_dispatch:
     inputs:
       cycle_mode:
@@ -107,8 +100,8 @@ jobs:
       - name: Verify release
         if: steps.gate.outputs.should_run == '1'
         run: |
-          python -m unittest -v test_atlas_futures_png.py test_atlas_scheduler_safety.py
-          python -m py_compile atlas_futures_png.py bot.py analysis.py atlas_professional_monitor.py atlas_self_learning.py atlas_schedule_guard.py iran_data_collector_v2.py iran_data_health.py
+          python -m unittest -v test_atlas_futures_png.py test_atlas_scheduler_safety.py test_atlas_telegram_receipts.py
+          python -m py_compile atlas_futures_png.py bot.py analysis.py atlas_professional_monitor.py atlas_self_learning.py atlas_schedule_guard.py atlas_telegram_receipts.py iran_data_collector_v2.py iran_data_health.py
           python -c "import analysis; assert analysis._professional_analyze is not None, 'professional monitor import failed'"
           test -f atlas_schedule_guard.py
 
@@ -121,6 +114,7 @@ jobs:
           ATLAS_SCHEDULED_CADENCE: workflow
           ATLAS_RUN_MODE: ANALYSIS
           SELECTED_MODE: ${{ steps.plan.outputs.mode }}
+          ATLAS_SCHEDULER_RUN_KEY: ${{ steps.plan.outputs.run_key }}
 
           ATLAS_PNG_ONLY: "1"
           ATLAS_FUTURES_CAPITAL_USD: "2000"
@@ -205,8 +199,8 @@ jobs:
               export ATLAS_EXECUTION_ENABLED=0
               export ATLAS_REPORT_WINDOW=0 ;;
             DEEP4H)
-              # Scheduled DEEP4H is the first approved report window.
-              # Manual DEEP4H is diagnostic/storage-only so tests never spam Telegram.
+              # DEEP4H remains storage-only until its report delivery is explicitly validated.
+              # Manual DEEP4H is diagnostic/storage-only so tests never send Telegram.
               if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
                 export ATLAS_DELIVERY_MODE=STORAGE_ONLY
                 export ATLAS_REPORT_WINDOW=0
@@ -230,6 +224,7 @@ jobs:
               export ATLAS_EXECUTION_ENABLED=1
               export ATLAS_REPORT_WINDOW=1 ;;
             NIGHTLY23)
+              # NIGHTLY23 remains storage-only until its report delivery is explicitly validated.
               export ATLAS_DELIVERY_MODE=STORAGE_ONLY
               export ATLAS_PHASE37_CYCLE=NIGHTLY23
               export ATLAS_PHASE37_DEEP_4H=0
