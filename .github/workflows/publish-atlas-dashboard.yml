@@ -7,6 +7,8 @@ on:
     paths:
       - atlas-dashboard.html
       - atlas_macro_events.py
+      - atlas_coinglass_snapshot.py
+      - assets/atlas-coinglass-widget.js
       - assets/**
       - docs/**
       - .github/workflows/publish-atlas-dashboard.yml
