@@ -25,7 +25,7 @@ function init(){
  document.body.prepend(ticker);
  const status=document.createElement('button');status.type='button';status.id='atlas-ui-status';status.innerHTML='<span class="atlas-dot"></span><span data-atlas-status-label>سامانه: در حال بررسی</span>';status.title='وضعیت API، چرخه‌ها و جریان قیمت پشتیبان';status.setAttribute('aria-label','وضعیت سامانه؛ نمایش جزئیات');status.classList.add('notranslate');status.setAttribute('translate','no');status.onclick=()=>{const op=document.querySelector('#nav button[data-tab="operations"]');if(op)op.click();document.getElementById('opsRefresh')?.click();};document.body.append(status);
  const nav=document.querySelector('nav[aria-label="بخش‌های برنامه"]');if(nav){if(nav.querySelector('button'))initNavigation();else{const observer=new MutationObserver(()=>{if(nav.querySelector('button')){observer.disconnect();initNavigation()}});observer.observe(nav,{childList:true})}}
- connect();checkHealth();setInterval(checkHealth,60000);setInterval(renderStatus,5000);new MutationObserver(renderStatus).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+ connect();checkHealth();refreshTickerFallback();setInterval(refreshTickerFallback,60000);setInterval(checkHealth,60000);setInterval(renderStatus,5000);new MutationObserver(renderStatus).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
 }
 function renderStatus(){const el=document.getElementById('atlas-ui-status');if(!el)return;const level=state.api==='bad'?'bad':state.api==='unknown'?'unknown':state.cycles==='warn'||state.feed!=='ok'?'warn':'ok';const palette={ok:'#10b981',warn:'#f59e0b',bad:'#ef4444',unknown:'#94a3b8'};el.dataset.level=level;el.querySelector('.atlas-dot').style.background=palette[level];const label=el.querySelector('[data-atlas-status-label]');if(label)label.textContent=labels[language()][level];el.title=(language()==='en'?'API: ':'API: ')+state.api+' | cycles: '+state.cycles+' | WebSocket: '+state.feed+' | '+(state.checkedAt?new Date(state.checkedAt).toLocaleString():'not checked');}
 function evaluateCycles(cycles){
@@ -46,6 +46,55 @@ async function checkHealth(){
   const data=await response.json();state.api='ok';state.cycles=evaluateCycles(data.cycles);
  }catch(_){state.api='bad';state.cycles='unknown'}
  finally{clearTimeout(timer);state.healthPending=false;state.checkedAt=Date.now();renderStatus()}
+}
+const COINGECKO_IDS={BTC:'bitcoin',ETH:'ethereum',SOL:'solana',TON:'the-open-network',SUI:'sui',LINK:'chainlink',XRP:'ripple',ADA:'cardano'};
+let fallbackPending=false,lastFallbackAt=0;
+async function refreshTickerFallback(){
+ const now=Date.now();
+ if(fallbackPending||document.hidden||now-lastFallbackAt<55000||(state.lastSeen&&now-state.lastSeen<15000))return;
+ fallbackPending=true;lastFallbackAt=now;
+ try{
+  const ids=Object.values(COINGECKO_IDS).join(',');
+  const response=await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+encodeURIComponent(ids)+'&vs_currencies=usd&include_last_updated_at=true',{cache:'no-store',signal:AbortSignal.timeout(8000)});
+  if(!response.ok)throw Error('CoinGecko HTTP '+response.status);
+  const data=await response.json();let updated=0;
+  for(const [symbol,id] of Object.entries(COINGECKO_IDS)){
+   const quote=data?.[id],price=Number(quote?.usd),stamp=Number(quote?.last_updated_at);
+   if(!Number.isFinite(price)||price<=0||!Number.isFinite(stamp)||now-stamp*1000>300000||stamp*1000>now+60000)continue;
+   const el=document.getElementById('atlas-quote-'+symbol),prev=state.quotes.get(symbol);
+   state.quotes.set(symbol,price);updated++;
+   if(el){el.textContent='
+function markFeedStale(){state.feed='warn';renderStatus();for(const el of document.querySelectorAll('#atlas-live-ticker [id^=atlas-quote-]'))el.classList.add('atlas-stale')}
+function reconnect(){clearReconnect();if(state.stopped||document.hidden)return;state.reconnectTimer=setTimeout(()=>{state.reconnectTimer=null;connect()},Math.min(30000,1000*2**Math.min(++state.retry,5)))}
+function connect(){
+ if(state.stopped||document.hidden||state.ws&&(state.ws.readyState===0||state.ws.readyState===1))return;
+ clearReconnect();
+ try{
+  const ws=new WebSocket(EXCHANGE);state.ws=ws;
+  ws.onopen=()=>{if(state.ws!==ws)return;state.retry=0;state.lastSeen=0;markFeedStale()};
+  ws.onmessage=e=>{if(state.ws!==ws)return;try{
+   const data=JSON.parse(e.data).data;if(!data?.s||!data?.c)return;
+   const symbol=data.s.toUpperCase().replace(/USDT$/,'');if(!SYMBOLS.includes(symbol))return;
+   const price=Number(data.c);if(!Number.isFinite(price)||price<=0)return;
+   const node=document.getElementById('atlas-quote-'+symbol),prev=state.quotes.get(symbol);
+   state.quotes.set(symbol,price);state.lastSeen=Date.now();state.feed='ok';renderStatus();
+   if(node){node.textContent='$'+price.toLocaleString('en-US',{maximumFractionDigits:price<1?6:price<10?4:2});node.className=prev==null?'':price>prev?'atlas-up':price<prev?'atlas-down':''}
+  }catch(_){}};
+  ws.onerror=()=>{if(state.ws===ws)markFeedStale()};
+  ws.onclose=()=>{if(state.ws!==ws)return;state.ws=null;markFeedStale();reconnect()};
+ }catch(_){state.ws=null;markFeedStale();reconnect()}
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden){clearReconnect();if(state.ws){const ws=state.ws;state.ws=null;ws.close()}markFeedStale()}else{connect();checkHealth()}});
+window.addEventListener('beforeunload',()=>{state.stopped=true;clearReconnect();if(state.ws)state.ws.close()});
+setInterval(()=>{if(state.lastSeen&&Date.now()-state.lastSeen>60000)markFeedStale()},15000);
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+})();
++price.toLocaleString('en-US',{maximumFractionDigits:price<1?6:price<10?4:2});el.className=prev==null?'atlas-stale':price>prev?'atlas-up':price<prev?'atlas-down':'atlas-stale';el.title='CoinGecko reference · '+new Date(stamp*1000).toISOString()}
+  }
+  if(updated){state.feed='fallback';state.checkedAt=now;renderStatus()}
+  else markFeedStale();
+ }catch(_){markFeedStale()}
+ finally{fallbackPending=false}
 }
 function clearReconnect(){if(state.reconnectTimer!==null){clearTimeout(state.reconnectTimer);state.reconnectTimer=null}}
 function markFeedStale(){state.feed='warn';renderStatus();for(const el of document.querySelectorAll('#atlas-live-ticker [id^=atlas-quote-]'))el.classList.add('atlas-stale')}
