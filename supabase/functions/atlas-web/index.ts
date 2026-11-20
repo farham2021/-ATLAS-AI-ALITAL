@@ -189,12 +189,13 @@ Deno.serve(async(req:Request)=>{
    const goldRow=latest(fxRows,"GOLD18"),goldMarket=normalizeTomanMarket(goldRow);
    const globalReady=globalFresh.ok&&xauUsd!==null&&usdIrr!==null;
    const goldFair=globalReady?fairValueToman({weightG:1,purity:.75,xauUsd,usdIrr}):null;
+   const goldFresh=Boolean(globalReady&&goldRow&&goldMarket!==null&&quoteFreshness([xau,usd,goldRow]).ok);
    comparisons.push({
     symbol:"GOLD18",name_fa:"طلای ۱۸ عیار",weight_g:1,purity:.75,
     spot_usd_oz:xauUsd,fair_toman_per_gram:goldFair===null?null:Math.round(goldFair),
     market_toman_per_gram:goldMarket===null?null:Math.round(goldMarket),
-    ...(goldFair!==null&&goldMarket!==null?bubbleToman(goldMarket,goldFair):{bubble_toman:null,bubble_pct:null}),
-    status:!globalReady?"unavailable_inputs":!goldRow?"market_unavailable":goldMarket===null?"market_unit_unverified":!quoteFreshness([xau,usd,goldRow]).ok?"stale_or_time_skew":"observed",
+    ...(goldFresh?bubbleToman(goldMarket,Number(goldFair)):{bubble_toman:null,bubble_pct:null}),
+    status:!globalReady?"unavailable_inputs":!goldRow?"market_unavailable":goldMarket===null?"market_unit_unverified":!goldFresh?"stale_or_time_skew":"observed",
     formula:"(XAU_USD_per_troy_oz × 0.75 × USD_IRR_per_USD / 31.1034768) / 10",
     captured_at:goldRow?.captured_at||null,market_unit:"TOMAN_PER_GRAM"
    });
@@ -206,7 +207,7 @@ Deno.serve(async(req:Request)=>{
      symbol:spec.symbol,name_fa:spec.name_fa,weight_g:spec.weight_g,purity:spec.purity,
      spot_usd_oz:xauUsd,fair_toman:fair===null?null:Math.round(fair),
      market_toman:market===null?null:Math.round(market),
-     ...(fair!==null&&market!==null?bubbleToman(market,fair):{bubble_toman:null,bubble_pct:null}),
+     ...(ready?bubbleToman(market,Number(fair)):{bubble_toman:null,bubble_pct:null}),
      status:!globalReady?"unavailable_inputs":!row?"market_unavailable":market===null?"market_unit_unverified":!ready?"stale_or_time_skew":"observed",
      formula:"(weight_g × purity × XAU_USD_per_troy_oz × USD_IRR_per_USD / 31.1034768) / 10",
      captured_at:row?.captured_at||null,market_unit:"TOMAN_PER_COIN"
