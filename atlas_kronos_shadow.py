@@ -69,6 +69,23 @@ def _validate_candle(open_: float, high: float, low: float, close: float, volume
         raise ValueError("INVALID_OHLC_GEOMETRY")
 
 
+def _project_forecast_candle(
+    open_: float, high: float, low: float, close: float, volume: float
+) -> tuple[tuple[float, float, float, float, float], bool]:
+    """Project generated wick bounds to a valid OHLC envelope; preserve O/C and count repairs."""
+    values = (open_, high, low, close, volume)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("NONFINITE_KRONOS_FORECAST")
+    if min(open_, high, low, close) <= 0 or volume < 0:
+        raise ValueError("INVALID_KRONOS_FORECAST_VALUE")
+    projected_high = max(high, open_, close)
+    projected_low = min(low, open_, close)
+    repaired = projected_high != high or projected_low != low
+    projected = (open_, projected_high, projected_low, close, volume)
+    _validate_candle(*projected)
+    return projected, repaired
+
+
 def _first_touch(path: list[tuple[float, float, float, float, float]],
                  side: str, sl: float, tp1: float) -> str:
     for open_, high, low, close, volume in path:
@@ -130,6 +147,8 @@ class KronosPathForecaster:
         self.seed = int(seed)
         self.predictor = None
         self.load_latency_ms: float | None = None
+        self.forecast_candles_total = 0
+        self.geometry_repairs_total = 0
 
     def load(self) -> None:
         if self.predictor is not None:
@@ -204,12 +223,13 @@ class KronosPathForecaster:
                 columns = ("open", "high", "low", "close", "volume")
                 if any(name not in forecast.columns for name in columns):
                     raise ValueError("MISSING_KRONOS_OHLCV_COLUMN")
-                path = [
-                    tuple(float(forecast.iloc[i][name]) for name in columns)
-                    for i in range(HORIZON)
-                ]
-                for candle in path:
-                    _validate_candle(*candle)
+                path = []
+                for i in range(HORIZON):
+                    raw_candle = tuple(float(forecast.iloc[i][name]) for name in columns)
+                    candle, repaired = _project_forecast_candle(*raw_candle)
+                    self.forecast_candles_total += 1
+                    self.geometry_repairs_total += int(repaired)
+                    path.append(candle)
                 outputs.append(path)
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         if len(outputs) != self.paths:
@@ -507,6 +527,16 @@ def evaluate(
         round(kronos.inference_latency_total / len(all_records), 2) if all_records else None
     )
     output["model_load_latency_ms"] = kronos.load_latency_ms
+    output["forecast_candles_total"] = kronos.forecast_candles_total
+    output["forecast_candle_geometry_repairs"] = kronos.geometry_repairs_total
+    output["forecast_candle_geometry_repair_rate"] = (
+        round(kronos.geometry_repairs_total / kronos.forecast_candles_total, 6)
+        if kronos.forecast_candles_total else None
+    )
+    output["geometry_policy"] = (
+        "Generated High/Low are expanded only as needed to enclose unchanged Open/Close; "
+        "all repairs are counted. Nonfinite, nonpositive, or negative-volume forecasts fail closed."
+    )
     output["promotion"] = (
         "NOT_AUTOMATIC; require sufficient sample size, calibrated path risk, "
         "and preregistered OOS improvement in Net R and drawdown over both comparators."
