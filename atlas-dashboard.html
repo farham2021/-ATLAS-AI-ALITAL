@@ -96,25 +96,26 @@ async function loadFxParity(){
   const d=await api('/api/iran-relative-value');
   q.replaceChildren();
   for(const x of d.quotes||[]){
-   q.append(web3Line(x.symbol+' · '+x.status,x.toman==null?'—':num(x.toman)+' تومان · '+date(x.at)));
+   const price=x.price==null?'داده کافی نیست':num(x.price);
+   const label=x.symbol==='USD_FREE'?'دلار آزاد':x.symbol==='XAUUSD'?'اونس طلا':x.symbol==='XAGUSD'?'اونس نقره':x.symbol==='COPPER'?'مس':x.symbol;
+   const unit=x.unit==='IRR_PER_USD'?'ریال / دلار':x.unit==='USD_PER_TROY_OZ'?'دلار / اونس تروا':x.unit==='USD_PER_LB'?'دلار / پوند':x.unit;
+   q.append(web3Line(label,price+' '+unit+' · '+(x.status||'unavailable')+' · '+date(x.captured_at)));
   }
   for(const x of d.comparisons||[]){
-   const box=web3Node('article');
-   box.className='web3-record';
-   const ounce=x.spot_usd_oz==null?'—':'USD '+num(x.spot_usd_oz);
-   const fair=x.fair_toman_per_gram==null?'—':num(x.fair_toman_per_gram)+' تومان';
-   const market=x.market_toman_per_gram==null?'—':num(x.market_toman_per_gram)+' تومان';
-   const premium=x.premium_pct==null?'غیرقابل محاسبه / Unavailable':num(x.premium_pct)+'%';
-   box.append(web3Node('h3',x.symbol));
-   box.append(web3Line('Global USD / oz',ounce));
-   box.append(web3Line('Parity / gram',fair));
-   box.append(web3Line('Iran / gram',market));
-   box.append(web3Line('Premium',premium));
-   box.append(web3Node('small',x.status+' · '+x.formula));
+   const box=web3Node('article');box.className='web3-record';
+   box.append(web3Node('h3',x.name_fa||x.symbol));
+   const isGold=x.symbol==='GOLD18';
+   box.append(web3Line(isGold?'بازار (تومان / گرم)':'بازار (تومان / سکه',x.market_toman==null&&x.market_toman_per_gram==null?'ناموجود':num(x.market_toman??x.market_toman_per_gram)));
+   box.append(web3Line(isGold?'ارزش ذاتی (تومان / گرم)':'ارزش ذاتی (تومان / سکه',x.fair_toman==null&&x.fair_toman_per_gram==null?'غیرقابل محاسبه':num(x.fair_toman??x.fair_toman_per_gram)));
+   box.append(web3Line('حباب (تومان)',x.bubble_toman==null?'غیرقابل محاسبه':num(x.bubble_toman)));
+   box.append(web3Line('حباب (%)',x.bubble_pct==null?'غیرقابل محاسبه':num(x.bubble_pct)+'%'));
+   box.append(web3Node('small','وضعیت: '+String(x.status||'unavailable')+' · واحد بازار: '+String(x.market_unit||'نامشخص')+' · ثبت: '+date(x.captured_at)));
    c.append(box);
   }
-  c.append(web3Node('p',d.note,'muted'));
- }catch(e){q.textContent='Data unavailable: '+String(e.message||e)}
+  const status=d.status==='live'?'زنده':d.status==='delayed'?'با تأخیر':'داده ناکافی یا ناموجود';
+  c.prepend(web3Node('p','وضعیت منابع: '+status+' · آخرین دریافت: '+date(d.updated_at),'muted'));
+  c.append(web3Node('p',d.note||'حباب فقط از ورودی‌های معتبر و هم‌واحد محاسبه می‌شود.','muted'));
+ }catch(e){q.textContent='Data unavailable: '+String(e.message||e);c.textContent='ارزش ذاتی و حباب بدون داده معتبر محاسبه نمی‌شوند.'}
 }
 el('fx-parity-refresh').onclick=loadFxParity;
 
