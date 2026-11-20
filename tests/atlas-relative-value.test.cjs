@@ -1,35 +1,35 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {fairValueToman,bubbleToman,normalizeUsdIrr,normalizeTomanMarket,normalizeUsdMetal,quoteFreshness,COIN_SPECS}=await import('../assets/atlas-relative-value.mjs');
+const helpers=import('../assets/atlas-relative-value.mjs');
 
-test('USD/IRR is converted exactly once into toman fair value',()=>{
+test('USD/IRR is converted exactly once into toman fair value',async()=>{ const {fairValueToman}=await helpers;
  const usdIrr=1124500; // 112,450 toman per USD
  const xauUsd=2651.30;
  const fair=fairValueToman({weightG:1,purity:.75,xauUsd,usdIrr});
  assert.equal(fair,(xauUsd*(usdIrr/10)*.75)/31.1034768);
 });
-test('coin intrinsic value uses weight, fineness, ounce and explicit IRR conversion',()=>{
+test('coin intrinsic value uses weight, fineness, ounce and explicit IRR conversion',async()=>{ const {fairValueToman,bubbleToman}=await helpers;
  const fair=fairValueToman({weightG:8.133,purity:.9,xauUsd:2651.3,usdIrr:1124500});
  assert.ok(fair>0);
  assert.equal(bubbleToman(fair*1.1,fair).bubble_pct,10);
 });
-test('invalid units fail closed',()=>{
+test('invalid units fail closed',async()=>{ const {normalizeUsdIrr,normalizeTomanMarket,normalizeUsdMetal}=await helpers;
  assert.equal(normalizeUsdIrr({symbol:'USD_IRR',price:1124500,payload:{unit_canonical:'TOMAN'}}),null);
  assert.equal(normalizeTomanMarket({price:23000000,payload:{unit_raw:null}}),null);
  assert.equal(normalizeUsdMetal({price:2651,payload:{unit:'TOMAN'}},'USD_PER_TROY_OZ'),null);
 });
-test('only declared canonical units are accepted',()=>{
+test('only declared canonical units are accepted',async()=>{ const {normalizeUsdIrr,normalizeTomanMarket,normalizeUsdMetal}=await helpers;
  assert.equal(normalizeUsdIrr({symbol:'USD_IRR',price:1124500,payload:{unit_canonical:'IRR'}}),1124500);
  assert.equal(normalizeTomanMarket({price:23000000,payload:{unit_canonical:'TOMAN'}}),23000000);
  assert.equal(normalizeUsdMetal({price:2651,payload:{unit:'USD_PER_TROY_OZ'}},'USD_PER_TROY_OZ'),2651);
 });
-test('quote timestamps fail closed on stale or mismatched sources',()=>{
+test('quote timestamps fail closed on stale or mismatched sources',async()=>{ const {quoteFreshness}=await helpers;
  const now=Date.parse('2026-11-20T12:00:00Z');
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:50:00Z'},{captured_at:'2026-11-20T11:55:00Z'}],now).ok,true);
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T10:00:00Z'},{captured_at:'2026-11-20T10:55:00Z'}],now).reason,'stale_or_future');
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:00:00Z'},{captured_at:'2026-11-20T11:40:00Z'}],now).reason,'source_time_skew');
 });
-test('all requested coin specs have documented mass and 90 percent fineness',()=>{
+test('all requested coin specs have documented mass and 90 percent fineness',async()=>{ const {COIN_SPECS}=await helpers;
  assert.deepEqual(COIN_SPECS.map(x=>x.weight_g),[8.133,8.133,4.0665,2.03325,1.01]);
  assert.ok(COIN_SPECS.every(x=>x.purity===.9));
 });
