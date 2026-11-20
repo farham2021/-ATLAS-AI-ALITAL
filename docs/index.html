@@ -84,7 +84,15 @@ const metalSelect=$('metalSymbol');const previousMetal=metalSelect.value;metalSe
 renderRows('deepreports',(d.deep||[]).slice(0,25),x=>[x.symbol+' · '+(x.asset_group||'')+' · '+(x.direction||'—')+' · '+(x.decision_state||'—'),'اطمینان '+num(x.confidence)+' | قیمت '+num(x.price)+' | '+fmt(x.captured_at)]);
 const deskConfirmedStates=new Set(['CONFIRMED','VALIDATED','EXECUTABLE','READY']);const safeOpportunities=(d.opportunities||[]).filter(x=>{const state=String(x.state||x.lifecycle_state||x.status||'').toUpperCase(),side=String(x.direction||'').toUpperCase(),entry=Number(x.entry),sl=Number(x.sl),tp=Number(x.tp1),confidence=Number(x.confidence),age=Date.now()-Date.parse(x.updated_at||x.timestamp||x.created_at||'');return deskConfirmedStates.has(state)&&Number.isFinite(age)&&age>=-300000&&age<=6*3600000&&[entry,sl,tp,confidence].every(Number.isFinite)&&entry>0&&sl>0&&tp>0&&confidence>=55&&(side==='LONG'?sl<entry&&entry<tp:side==='SHORT'?tp<entry&&entry<sl:false)});renderRows('signals',safeOpportunities,x=>[x.symbol+' · '+x.direction+' · '+(x.state||x.lifecycle_state||x.status),'ورود '+num(x.entry)+' | حدضرر '+num(x.sl)+' | هدف '+num(x.tp1)+' | اطمینان '+num(x.confidence)]);
 const sel=$('iranSymbol'),old=sel.value;sel.replaceChildren(...d.iran.filter(x=>x.symbol&&x.price!==null).map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));if(d.iran.some(x=>x.symbol===old))sel.value=old;analysis();iranAnalysis();await privateLoad();translateUI();
-}catch(e){$('notice').textContent='خطا در دریافت داده: '+String(e.message||e)}}load();
+}catch(e){
+ const en=currentLang==='en',detail=String(e.message||e);
+ const message=en?'Dashboard data unavailable ('+detail+'). No live values are being shown. Retry after the data service recovers.':'داده‌های داشبورد در دسترس نیست ('+detail+'). فعلاً هیچ عددی به‌عنوان زنده نمایش داده نمی‌شود؛ پس از بازیابی سرویس دوباره بروزرسانی کنید.';
+ $('notice').textContent=message;
+ $('metrics').replaceChildren(...(en?['Engine status','Recent alerts','Crypto assets','Iran market assets']:['وضعیت موتور','هشدارهای اخیر','دارایی‌های کریپتو','دارایی‌های بازار ایران']).map(label=>{const x=node('article','','card');x.append(node('small',label),node('div',en?'Unavailable':'ناموجود','metric'));return x}));
+ for(const id of ['cycles','allcycles','latest','allalerts','cryptolist','iranlist','metallist','deepreports','signals','opportunities']){
+  const el=$(id);if(el)el.replaceChildren(node('div',message,'warn'));
+ }
+} }load();
 
 const initData=window.Telegram?.WebApp?.initData||"";let privateState=null;
 async function privateRequest(body){
@@ -468,4 +476,4 @@ $('labLoad').onclick=labLoad;$('labPaper').disabled=true;$('labPaper').onclick=(
 // Initial catalog is visible even before API access; live CoinGecko refresh is optional.
 labLoadCoinCatalog();
 const unifiedPreviousSwitchTab=switchTab;switchTab=function(id){unifiedPreviousSwitchTab(id);if(id==='operations')loadOperations();if(id==='laboratory'){if(!labCoinCatalogLoaded)labLoadCoinCatalog();if(!labCandles.length)labLoad()}};
-</script><script src="./atlas-upgrade.js?v=cdeaaa8" defer></script><script src="./atlas-coinglass-widget.js?v=2" defer></script><script src="./atlas-quant.js?v=cdeaaa8" defer></script><script src="./atlas-setups.js?v=ebbf4e03" defer></script></body></html>
+</script><script src="./atlas-upgrade.js?v=350964f" defer></script><script src="./atlas-coinglass-widget.js?v=3" defer></script><script src="./atlas-quant.js?v=cdeaaa8" defer></script><script src="./atlas-setups.js?v=ebbf4e03" defer></script></body></html>
