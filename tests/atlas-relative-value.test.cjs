@@ -27,7 +27,7 @@ test('quote timestamps fail closed on stale or mismatched sources',async()=>{ co
  const now=Date.parse('2026-11-20T12:00:00Z');
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:50:00Z'},{captured_at:'2026-11-20T11:55:00Z'}],now).ok,true);
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T10:00:00Z'},{captured_at:'2026-11-20T10:55:00Z'}],now).reason,'stale_or_future');
- assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:00:00Z'},{captured_at:'2026-11-20T11:40:00Z'}],now).reason,'source_time_skew');
+ assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:20:00Z'},{captured_at:'2026-11-20T11:40:00Z'}],now).reason,'source_time_skew');
 });
 test('all requested coin specs have documented mass and 90 percent fineness',async()=>{ const {COIN_SPECS}=await helpers;
  assert.deepEqual(COIN_SPECS.map(x=>x.weight_g),[8.133,8.133,4.0665,2.03325,1.01]);
