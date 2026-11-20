@@ -71,19 +71,20 @@ def _validate_candle(open_: float, high: float, low: float, close: float, volume
 
 def _project_forecast_candle(
     open_: float, high: float, low: float, close: float, volume: float
-) -> tuple[tuple[float, float, float, float, float], bool]:
-    """Project generated wick bounds to a valid OHLC envelope; preserve O/C and count repairs."""
+) -> tuple[tuple[float, float, float, float, float], bool, bool]:
+    """Repair only OHLC wick geometry and negative volume; preserve predicted O/C."""
     values = (open_, high, low, close, volume)
     if not all(math.isfinite(value) for value in values):
         raise ValueError("NONFINITE_KRONOS_FORECAST")
-    if min(open_, high, low, close) <= 0 or volume < 0:
-        raise ValueError("INVALID_KRONOS_FORECAST_VALUE")
+    if min(open_, high, low, close) <= 0:
+        raise ValueError(f"NONPOSITIVE_KRONOS_FORECAST_PRICE_{values}")
     projected_high = max(high, open_, close)
     projected_low = min(low, open_, close)
-    repaired = projected_high != high or projected_low != low
-    projected = (open_, projected_high, projected_low, close, volume)
+    geometry_repaired = projected_high != high or projected_low != low
+    volume_repaired = volume < 0
+    projected = (open_, projected_high, projected_low, close, max(volume, 0.0))
     _validate_candle(*projected)
-    return projected, repaired
+    return projected, geometry_repaired, volume_repaired
 
 
 def _first_touch(path: list[tuple[float, float, float, float, float]],
@@ -149,6 +150,7 @@ class KronosPathForecaster:
         self.load_latency_ms: float | None = None
         self.forecast_candles_total = 0
         self.geometry_repairs_total = 0
+        self.negative_volume_repairs_total = 0
 
     def load(self) -> None:
         if self.predictor is not None:
@@ -226,9 +228,10 @@ class KronosPathForecaster:
                 path = []
                 for i in range(HORIZON):
                     raw_candle = tuple(float(forecast.iloc[i][name]) for name in columns)
-                    candle, repaired = _project_forecast_candle(*raw_candle)
+                    candle, geometry_repaired, volume_repaired = _project_forecast_candle(*raw_candle)
                     self.forecast_candles_total += 1
-                    self.geometry_repairs_total += int(repaired)
+                    self.geometry_repairs_total += int(geometry_repaired)
+                    self.negative_volume_repairs_total += int(volume_repaired)
                     path.append(candle)
                 outputs.append(path)
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -529,13 +532,18 @@ def evaluate(
     output["model_load_latency_ms"] = kronos.load_latency_ms
     output["forecast_candles_total"] = kronos.forecast_candles_total
     output["forecast_candle_geometry_repairs"] = kronos.geometry_repairs_total
+    output["forecast_negative_volume_repairs"] = kronos.negative_volume_repairs_total
     output["forecast_candle_geometry_repair_rate"] = (
         round(kronos.geometry_repairs_total / kronos.forecast_candles_total, 6)
         if kronos.forecast_candles_total else None
     )
+    output["forecast_negative_volume_repair_rate"] = (
+        round(kronos.negative_volume_repairs_total / kronos.forecast_candles_total, 6)
+        if kronos.forecast_candles_total else None
+    )
     output["geometry_policy"] = (
-        "Generated High/Low are expanded only as needed to enclose unchanged Open/Close; "
-        "all repairs are counted. Nonfinite, nonpositive, or negative-volume forecasts fail closed."
+        "High/Low are expanded only to enclose unchanged Open/Close; negative forecast volume is floored at zero. "
+        "Both repairs are counted. Nonfinite or nonpositive OHLC prices fail closed."
     )
     output["promotion"] = (
         "NOT_AUTOMATIC; require sufficient sample size, calibrated path risk, "
