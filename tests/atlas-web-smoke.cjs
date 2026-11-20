@@ -7,7 +7,7 @@ const { chromium, devices } = require('playwright');
   const page=await context.newPage();const errors=[];
   page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('metals'))errors.push('console '+msg.text())});
   page.on('response',res=>{if(res.url().includes('/api/metals-analysis'))console.log(device+' METALS HTTP '+res.status()+' '+res.url())});
-  page.on('pageerror',e=>errors.push(e.message));
+  page.on('pageerror',e=>errors.push(e.stack||e.message));
   page.on('requestfailed',req=>{if(req.url().includes('/api/metals-analysis'))errors.push('METALS REQUEST '+req.failure()?.errorText+' '+req.url())});
   const url=process.env.ATLAS_TEST_URL||'https://farham2021.github.io/-ATLAS-AI-ALITAL/';
   const response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:45000});
