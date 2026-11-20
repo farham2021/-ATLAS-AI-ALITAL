@@ -27,7 +27,7 @@ function init(){
  const nav=document.querySelector('nav[aria-label="بخش‌های برنامه"]');if(nav){if(nav.querySelector('button'))initNavigation();else{const observer=new MutationObserver(()=>{if(nav.querySelector('button')){observer.disconnect();initNavigation()}});observer.observe(nav,{childList:true})}}
  connect();checkHealth();refreshTickerFallback();setInterval(refreshTickerFallback,60000);setInterval(checkHealth,60000);setInterval(renderStatus,5000);new MutationObserver(renderStatus).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
 }
-function renderStatus(){const el=document.getElementById('atlas-ui-status');if(!el)return;const level=state.api==='bad'?'bad':state.api==='unknown'?'unknown':state.cycles==='warn'||state.feed!=='ok'?'warn':'ok';const palette={ok:'#10b981',warn:'#f59e0b',bad:'#ef4444',unknown:'#94a3b8'};el.dataset.level=level;el.querySelector('.atlas-dot').style.background=palette[level];const label=el.querySelector('[data-atlas-status-label]');if(label)label.textContent=labels[language()][level];el.title=(language()==='en'?'API: ':'API: ')+state.api+' | cycles: '+state.cycles+' | WebSocket: '+state.feed+' | '+(state.checkedAt?new Date(state.checkedAt).toLocaleString():'not checked');}
+function renderStatus(){const el=document.getElementById('atlas-ui-status');if(!el)return;const level=state.api==='bad'?'bad':state.api==='unknown'?'unknown':state.api==='degraded'||state.cycles==='warn'||state.feed!=='ok'?'warn':'ok';const palette={ok:'#10b981',warn:'#f59e0b',bad:'#ef4444',unknown:'#94a3b8'};el.dataset.level=level;el.querySelector('.atlas-dot').style.background=palette[level];const label=el.querySelector('[data-atlas-status-label]');if(label)label.textContent=labels[language()][level];el.title=(language()==='en'?'API: ':'API: ')+state.api+' | cycles: '+state.cycles+' | WebSocket: '+state.feed+' | '+(state.checkedAt?new Date(state.checkedAt).toLocaleString():'not checked');}
 function evaluateCycles(cycles){
  if(!Array.isArray(cycles))return 'unknown';
  const latest=new Map();
@@ -43,7 +43,7 @@ async function checkHealth(){
  try{
   const response=await fetch(BASE+'/api/status',{cache:'no-store',signal:ctl.signal});
   if(!response.ok)throw Error('status HTTP '+response.status);
-  const data=await response.json();state.api='ok';state.cycles=evaluateCycles(data.cycles);
+  const data=await response.json();state.api=data.status==='DEGRADED'?'degraded':'ok';state.cycles=data.status==='DEGRADED'?'warn':evaluateCycles(data.cycles);
  }catch(_){state.api='bad';state.cycles='unknown'}
  finally{clearTimeout(timer);state.healthPending=false;state.checkedAt=Date.now();renderStatus()}
 }
