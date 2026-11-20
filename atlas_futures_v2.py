@@ -189,7 +189,7 @@ def main():
    # The legacy cache has no market-type field; accept only explicit,
    # verified linear/swap provider labels and reject ambiguous or spot labels.
    provider_name=str(rec["provider"]).upper()
-   rank={"BYBIT_LINEAR":0,"OKX_SWAP":1}.get(provider_name)
+   rank={"BYBIT_LINEAR":0,"OKX_SWAP":1,"BINANCE_USDM_PERP":2}.get(provider_name)
    if rank is None:
     rejected_cache.setdefault(symbol,{"symbol":symbol,"provider":rec["provider"],"bars":len(bars),"status":"UNVERIFIED_PERPETUAL_SOURCE"})
     continue
@@ -207,7 +207,7 @@ def main():
   fresh=fresh_exchange_bars(symbol,now_ms)
   if fresh:
    provider,bars=fresh
-   by_symbol[symbol]=({"BYBIT_LINEAR":0,"OKX_SWAP":1}[provider],provider,bars)
+   by_symbol[symbol]=({"BYBIT_LINEAR":0,"OKX_SWAP":1,"BINANCE_USDM_PERP":2}[provider],provider,bars)
    refresh_stats["fresh"]+=1
   else:refresh_stats["failed"]+=1
  print("ATLAS_V2_REFRESH="+json.dumps(refresh_stats,sort_keys=True))
