@@ -7,6 +7,8 @@ on:
     paths:
       - atlas-dashboard.html
       - atlas_macro_events.py
+      - atlas_coinglass_snapshot.py
+      - assets/atlas-coinglass-widget.js
       - assets/**
       - docs/**
       - .github/workflows/publish-atlas-dashboard.yml
@@ -38,6 +40,10 @@ jobs:
           printf '%s\n' '<!doctype html><title>ATLAS</title><a href="./">ATLAS Dashboard</a>' > _site/404.html
       - name: Generate fail-closed Kalshi event snapshot
         run: python atlas_macro_events.py --output _site/macro_events.json
+      - name: Generate fail-closed CoinGlass derivatives snapshot
+        env:
+          COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
+        run: python atlas_coinglass_snapshot.py _site/coinglass_snapshot.json
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
