@@ -6,6 +6,7 @@ on:
       - 'docs/**'
       - 'assets/**'
       - 'atlas-dashboard.html'
+      - 'atlas_macro_events.py'
       - '.github/workflows/atlas-web-pages.yml'
       - '.github/workflows/publish-atlas-dashboard.yml'
   workflow_dispatch:
@@ -33,6 +34,9 @@ jobs:
           cp -a assets/. _site/assets/
           cp -a docs/. _site/desk/
           printf '%s\n' '<!doctype html><title>ATLAS</title><a href="./">ATLAS Dashboard</a>' > _site/404.html
+      - name: Generate fail-closed Kalshi event snapshot
+        run: python atlas_macro_events.py --output _site/macro_events.json
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
