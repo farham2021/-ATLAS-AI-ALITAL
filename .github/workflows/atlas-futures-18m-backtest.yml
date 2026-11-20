@@ -2,14 +2,7 @@ name: ATLAS Futures 18M Research Backtest
 on:
   push:
     branches: [main, codex/atlas-perp-timesfm-shadow]
-    paths:
-      - 'atlas_futures_v2.py'
-      - 'atlas_futures_backtest_18m.py'
-      - 'atlas_perp_data_and_oos.py'
-      - 'atlas_timesfm_shadow.py'
-      - 'ATLAS_ARCHITECTURE_AND_RULES.md'
-      - 'test_atlas_futures_backtest_18m.py'
-      - '.github/workflows/atlas-futures-18m-backtest.yml'
+    paths: ['atlas_futures_backtest_18m.py']
   schedule:
     - cron: '15 3 * * 1'
   workflow_dispatch:
