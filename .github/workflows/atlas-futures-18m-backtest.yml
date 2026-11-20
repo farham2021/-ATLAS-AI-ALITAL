@@ -3,7 +3,23 @@ on:
   push:
     branches: [main]
     paths:
+      - 'atlas_futures_v2.py'
       - 'atlas_futures_backtest_18m.py'
+      - 'atlas_perp_data_and_oos.py'
+      - 'atlas_timesfm_shadow.py'
+      - 'atlas_kronos_shadow.py'
+      - 'ATLAS_ARCHITECTURE_AND_RULES.md'
+      - 'test_atlas_futures_backtest_18m.py'
+      - '.github/workflows/atlas-futures-18m-backtest.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'atlas_futures_v2.py'
+      - 'atlas_futures_backtest_18m.py'
+      - 'atlas_perp_data_and_oos.py'
+      - 'atlas_timesfm_shadow.py'
+      - 'atlas_kronos_shadow.py'
+      - 'ATLAS_ARCHITECTURE_AND_RULES.md'
       - 'test_atlas_futures_backtest_18m.py'
       - '.github/workflows/atlas-futures-18m-backtest.yml'
   schedule:
@@ -21,7 +37,77 @@ on:
 permissions:
   contents: read
 jobs:
-  historical-research:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      accepted: ${{ steps.acceptance.outputs.accepted }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate research modules
+        run: python -m unittest -v test_atlas_futures_costs.py test_atlas_futures_v2_diagnostics.py test_atlas_futures_backtest_18m.py
+      - name: Download perpetual history and evaluate fixed OOS windows
+        env:
+          SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
+          MONTHS: ${{ inputs.months || '18' }}
+        run: python atlas_futures_backtest_18m.py --symbols "$SYMBOLS" --months "$MONTHS"
+      - id: acceptance
+        if: always()
+        run: |
+          if [ -f atlas_backtest_results/summary.json ]; then
+            python -c "import json; print('accepted=' + str(json.load(open('atlas_backtest_results/summary.json')).get('verdict') == 'EMPIRICAL_RESEARCH_COMPLETE').lower())" >> "$GITHUB_OUTPUT"
+          else
+            echo "accepted=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atlas-futures-18m-research
+          path: atlas_backtest_results/
+          if-no-files-found: warn
+
+
+  kronos-shadow:
+    needs: baseline
+    if: needs.baseline.result == 'success' && needs.baseline.outputs.accepted == 'true' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: shiyu-coder/Kronos
+          ref: 67b630e67f6a18c9e9be918d9b4337c960db1e9a
+          path: third_party/Kronos
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: atlas-futures-18m-research
+          path: atlas_backtest_results/
+      - name: Install pinned Kronos CPU dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.0.0"
+          python -m pip install "numpy==1.26.4" "pandas==2.2.2" "einops==0.8.1" "huggingface_hub==0.33.1" "tqdm==4.67.1" "safetensors==0.6.2"
+      - name: Compare Kronos and Random Walk in shadow mode
+        env:
+          PYTHONPATH: third_party/Kronos
+        run: python atlas_kronos_shadow.py --baseline atlas_backtest_results/summary.json --data-dir atlas_backtest_results/data --out atlas_kronos_shadow_results --paths 128 --batch-size 16
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atlas-kronos-shadow
+          path: atlas_kronos_shadow_results/
+          if-no-files-found: warn
+
+  timesfm-shadow:
+    needs: baseline
+    if: needs.baseline.result == 'success' && needs.baseline.outputs.accepted == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -29,16 +115,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Validate cost model
-        run: python -m unittest -v test_atlas_futures_costs.py test_atlas_futures_v2_diagnostics.py test_atlas_futures_backtest_18m.py
-      - name: Download historical perpetual candles and funding; evaluate OOS
-        env:
-          SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
-          MONTHS: ${{ inputs.months || '18' }}
-        run: python atlas_futures_backtest_18m.py --symbols "$SYMBOLS" --months "$MONTHS"
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/download-artifact@v4
         with:
           name: atlas-futures-18m-research
           path: atlas_backtest_results/
+      - name: Install optional TimesFM 2.5 CPU dependencies
+        run: python -m pip install --upgrade "timesfm[torch]"
+      - name: Compare TimesFM and Random Walk in shadow mode
+        run: python atlas_timesfm_shadow.py --baseline atlas_backtest_results/summary.json --data-dir atlas_backtest_results/data --out atlas_timesfm_shadow_results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atlas-timesfm-shadow
+          path: atlas_timesfm_shadow_results/
           if-no-files-found: warn

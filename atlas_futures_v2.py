@@ -143,22 +143,14 @@ def request_telegram(token,payload):
 WATCHLIST=("BTC","ETH","SOL","BNB","XRP","ADA","DOGE","TRX","LINK","SUI","AVAX","LTC","DOT","BCH","NEAR","ATOM","TON","HBAR","XLM","TAO","ZEC")
 MAX_REFRESH=int(os.getenv("ATLAS_V2_MAX_REFRESH","100"))
 def fresh_exchange_bars(symbol,now_ms):
- """Use closed spot candles as research proxy; derivatives basis may differ."""
- pair=symbol+"USDT"
- sources=[
-  ("OKX","https://www.okx.com/api/v5/market/history-candles?"+urllib.parse.urlencode({"instId":symbol+"-USDT","bar":"4H","limit":300}),lambda x:x["data"] if x.get("code")=="0" else []),
-  ("BYBIT","https://api.bybit.com/v5/market/kline?"+urllib.parse.urlencode({"category":"spot","symbol":pair,"interval":"240","limit":300}),lambda x:x["result"]["list"] if x.get("retCode")==0 else []),
-  ("BINANCE","https://api.binance.com/api/v3/klines?"+urllib.parse.urlencode({"symbol":pair,"interval":"4h","limit":300}),lambda x:x)
- ]
- for name,url,parse in sources:
-  try:
-   req=urllib.request.Request(url,headers={"User-Agent":"ATLAS-Research/2.0"})
-   with urllib.request.urlopen(req,timeout=12) as response:rows=parse(json.load(response))
-   bars=candles(rows,now_ms)
-   if len(bars)>=220 and now_ms-(bars[-1][0]+MS)<=MS+300000:return (name,bars)
-  except (OSError,ValueError,KeyError,TypeError):continue
- return None
-
+ """Fetch closed 4H USDT perpetual candles only; reject spot fallback."""
+ from atlas_perp_data_and_oos import fetch_latest_perp_4h
+ try:
+  return fetch_latest_perp_4h(symbol,now_ms=now_ms,limit=300,min_bars=220)
+ except Exception as exc:
+  print("ATLAS_V2_PERP_FEED_REJECTED="+json.dumps(
+   {"symbol":symbol,"error":str(exc)[:200]},sort_keys=True))
+  return None
 def diagnose(symbol,provider,bars,now_ms):
  """One mutually exclusive reason per asset; do not relax strategy thresholds."""
  info={"symbol":symbol,"provider":provider,"bars":len(bars),"status":None}
@@ -194,10 +186,15 @@ def main():
    if len(bars)<220:
     rejected_cache.setdefault(symbol,{"symbol":symbol,"provider":rec["provider"],"bars":len(bars),"status":"INSUFFICIENT_CANDLES"})
     continue
-   # Respect provider order; cached LBANK remains eligible as untrusted research fallback only.
-   rank={"OKX":0,"BYBIT":1,"BINANCE":2}.get(str(rec["provider"]).upper(),3)
+   # The legacy cache has no market-type field; accept only explicit,
+   # verified linear/swap provider labels and reject ambiguous or spot labels.
+   provider_name=str(rec["provider"]).upper()
+   rank={"BYBIT_LINEAR":0,"OKX_SWAP":1,"BINANCE_USDM_PERP":2}.get(provider_name)
+   if rank is None:
+    rejected_cache.setdefault(symbol,{"symbol":symbol,"provider":rec["provider"],"bars":len(bars),"status":"UNVERIFIED_PERPETUAL_SOURCE"})
+    continue
    old=by_symbol.get(symbol)
-   if old is None or (bars[-1][0],-rank)>(old[2][-1][0],-old[0]):by_symbol[symbol]=(rank,rec["provider"],bars)
+   if old is None or (bars[-1][0],-rank)>(old[2][-1][0],-old[0]):by_symbol[symbol]=(rank,provider_name,bars)
   except (ValueError,KeyError,TypeError):continue
  # Refresh from primary public providers before relying on the legacy cache.
  # Fail closed on stale data: never emit a signal from an outdated snapshot.
@@ -210,7 +207,7 @@ def main():
   fresh=fresh_exchange_bars(symbol,now_ms)
   if fresh:
    provider,bars=fresh
-   by_symbol[symbol]=({"OKX":0,"BYBIT":1,"BINANCE":2}[provider],provider,bars)
+   by_symbol[symbol]=({"BYBIT_LINEAR":0,"OKX_SWAP":1,"BINANCE_USDM_PERP":2}[provider],provider,bars)
    refresh_stats["fresh"]+=1
   else:refresh_stats["failed"]+=1
  print("ATLAS_V2_REFRESH="+json.dumps(refresh_stats,sort_keys=True))
