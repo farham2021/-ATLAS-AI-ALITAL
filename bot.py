@@ -1316,29 +1316,63 @@ def coingecko_quote(symbol):
     except Exception:
         return {"status":"UNAVAILABLE","reason":"CoinGecko response unavailable"}
 
+_COINGLASS_FUNDING_CACHE={"loaded_at":0.0,"by_symbol":{}}
+_COINGLASS_FUNDING_LOCK=threading.RLock()
+_COINGLASS_CACHE_TTL=max(20.0,float(os.environ.get("ATLAS_COINGLASS_CACHE_TTL","60")))
+
+def _coinglass_funding_index(headers):
+    now=time.time()
+    with _COINGLASS_FUNDING_LOCK:
+        cached=_COINGLASS_FUNDING_CACHE["by_symbol"]
+        if cached and now-_COINGLASS_FUNDING_CACHE["loaded_at"]<_COINGLASS_CACHE_TTL:
+            return cached
+        data=_http_json("https://open-api-v4.coinglass.com/api/futures/funding-rate/exchange-list",headers)
+        if not isinstance(data,dict) or str(data.get("code"))!="0" or not isinstance(data.get("data"),list):
+            return cached or None
+        indexed={str(x.get("symbol","")).upper():x for x in data["data"] if isinstance(x,dict) and x.get("symbol")}
+        _COINGLASS_FUNDING_CACHE.update({"loaded_at":now,"by_symbol":indexed})
+        return indexed
+
 def coinglass_context(symbol):
+    """Market-wide OI and exchange-specific current funding; not historical trade costs."""
     if not COINGLASS_API_KEY:
-        return {"status":"UNAVAILABLE","reason":"COINGLASS_API_KEY not configured"}
+        return {"status":"UNAVAILABLE","reason":"COINGLASS_API_KEY not configured",
+                "open_interest":None,"funding_rate":None,"funding_by_exchange":{},"liquidations":None}
     headers={"CG-API-KEY":COINGLASS_API_KEY,"Accept":"application/json"}
-    out={"status":"UNAVAILABLE","open_interest":None,"funding_rate":None,"liquidations":None}
-    urls=[
-        ("open_interest","https://open-api-v4.coinglass.com/api/futures/open-interest/exchange-list"),
-        ("funding_rate","https://open-api-v4.coinglass.com/api/futures/funding-rate/exchange-list"),
-    ]
-    for key,url in urls:
-        d=_http_json(url+"?"+urllib.parse.urlencode({"symbol":symbol.upper()}),headers)
-        if isinstance(d,dict):
-            rows=d.get("data") or []
-            if isinstance(rows,dict): rows=[rows]
-            row=next((x for x in rows if isinstance(x,dict) and str(x.get("exchange","")).lower()=="all"), None)
-            row=row or (rows[0] if rows and isinstance(rows[0],dict) else None)
-            if row:
-                val=row.get(key)
-                if val is None:
-                    for k in ("open_interest_usd","funding_rate","avg_funding_rate"):
-                        if k in row: val=row[k]; break
-                out[key]=f(val)
-                out["status"]="OK"
+    symbol=str(symbol or "").upper()
+    out={"status":"UNAVAILABLE","open_interest":None,"open_interest_change_1h_pct":None,
+         "open_interest_change_24h_pct":None,"funding_rate":None,"funding_source_exchange":None,
+         "funding_by_exchange":{},"funding_scope":"CURRENT_MARKET_CONTEXT_ONLY","liquidations":None}
+    oi=_http_json("https://open-api-v4.coinglass.com/api/futures/open-interest/exchange-list?"+
+                  urllib.parse.urlencode({"symbol":symbol}),headers)
+    if isinstance(oi,dict) and str(oi.get("code"))=="0":
+        rows=oi.get("data") or []
+        if isinstance(rows,dict): rows=[rows]
+        total=next((x for x in rows if isinstance(x,dict) and str(x.get("exchange","")).lower()=="all"),None)
+        if total:
+            out["open_interest"]=f(total.get("open_interest_usd"))
+            out["open_interest_change_1h_pct"]=f(total.get("open_interest_change_percent_1h"))
+            out["open_interest_change_24h_pct"]=f(total.get("open_interest_change_percent_24h"))
+    index=_coinglass_funding_index(headers)
+    coin=index.get(symbol) if isinstance(index,dict) else None
+    if isinstance(coin,dict):
+        for item in coin.get("stablecoin_margin_list") or []:
+            if not isinstance(item,dict): continue
+            venue=str(item.get("exchange") or "").strip()
+            rate=f(item.get("funding_rate"))
+            if venue and rate is not None:
+                out["funding_by_exchange"][venue]={"rate_pct":rate,
+                  "settlement_interval_hours":f(item.get("funding_rate_interval")),
+                  "next_funding_time_ms":item.get("next_funding_time")}
+        # Keep the regime input anchored to ATLAS's selected research venue.
+        okx=next((v for k,v in out["funding_by_exchange"].items() if k.lower()=="okx"),None)
+        if okx:
+            out["funding_rate"]=okx["rate_pct"]
+            out["funding_source_exchange"]="OKX"
+    if out["open_interest"] is not None or out["funding_by_exchange"]:
+        out["status"]="OK"
+    else:
+        out["reason"]="No verified OI or funding fields returned"
     return out
 
 def tradingview_confirmation(symbol, timeframe=SIGNAL_TIMEFRAME):
