@@ -1,6 +1,6 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const helpers=import('../assets/atlas-relative-value.mjs');
+const helpers=import('../supabase/functions/atlas-web/relative-value.mjs');
 
 test('USD/IRR is converted exactly once into toman fair value',async()=>{ const {fairValueToman}=await helpers;
  const usdIrr=1124500; // 112,450 toman per USD
