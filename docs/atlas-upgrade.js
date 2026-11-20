@@ -73,6 +73,7 @@ async function refreshTickerFallback(){
  }catch(_){markFeedStale()}
  finally{fallbackPending=false}
 }
+function clearReconnect(){if(state.reconnectTimer!==null){clearTimeout(state.reconnectTimer);state.reconnectTimer=null}}
 function markFeedStale(){state.feed='warn';renderStatus();for(const el of document.querySelectorAll('#atlas-live-ticker [id^=atlas-quote-]'))el.classList.add('atlas-stale')}
 function reconnect(){clearReconnect();if(state.stopped||document.hidden)return;state.reconnectTimer=setTimeout(()=>{state.reconnectTimer=null;connect()},Math.min(30000,1000*2**Math.min(++state.retry,5)))}
 function connect(){
