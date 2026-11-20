@@ -12,7 +12,7 @@ export function normalizeUsdIrr(row) {
   if (!row || !finitePositive(row.price)) return null;
   const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
   const unit = String(payload.unit_canonical || "").toUpperCase();
-  if (unit !== "IRR_PER_USD") return null;
+  if (unit !== "IRR_PER_USD" && !(unit === "IRR" && row.symbol === "USD_IRR")) return null;
   return Number(row.price);
 }
 export function normalizeTomanMarket(row) {
