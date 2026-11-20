@@ -21,7 +21,7 @@ async function refresh(){
    card.append(node('div',(en?'Current funding: ':'فاندینگ فعلی: ')+(rates.length?rates.join(' · '):(en?'unavailable':'ناموجود'))));
    rows.append(card);
   }
-  if(!entries.length){rows.append(node('p',en?'No verified CoinGlass data; no values estimated.':'دادهٔ معتبر CoinGlass موجود نیست؛ عددی تخمین زده نشده است.','empty'));if(data.error)rows.append(node('small',(en?'Provider status: ':'وضعیت منبع: ')+data.error,'warn'))}
+  if(!entries.length){rows.append(node('p',en?'No verified CoinGlass data; no values estimated.':'دادهٔ معتبر CoinGlass موجود نیست؛ عددی تخمین زده نشده است.','empty'));if(data.error){const code=String(data.error);const friendly=code.includes('401')?(en?'CoinGlass rejected the request (HTTP 401). A valid API key and plan are required; no derivatives values are available.':'دسترسی CoinGlass رد شد (HTTP 401). برای دریافت دادهٔ مشتقات، کلید و سطح دسترسی معتبر لازم است؛ فعلاً عددی در دسترس نیست.'):(en?'Provider status: ':'وضعیت منبع: ')+code;rows.append(node('small',friendly,'warn'))}}
  }catch(error){text(status,(lang()==='en'?'Data unavailable: ':'داده در دسترس نیست: ')+String(error.message||error));rows.replaceChildren(node('p',lang()==='en'?'No verified CoinGlass snapshot.':'دادهٔ معتبر CoinGlass در دسترس نیست.','empty'))}
 }
 document.addEventListener('DOMContentLoaded',()=>{refresh();setInterval(()=>{if(!document.hidden)refresh()},90000)});
