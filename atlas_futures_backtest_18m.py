@@ -1,206 +1,341 @@
-"""Historical 4H perpetual research: paginated Bybit candles, signed funding, OOS evaluation.
-No live orders, Telegram, or production-table writes. Fail closed on missing data.
+"""18-month fixed-parameter OOS research for ATLAS linear perpetuals.
+
+Uses one exchange per dataset, actual settlement timestamps, conservative
+same-candle stop handling, and explicit end-exclusive OOS windows. This script
+does not write to Supabase, Telegram, or execute orders.
 """
-import argparse,datetime,json,math,time,urllib.parse,urllib.request,calendar,sys
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import math
+import sys
 from pathlib import Path
-from atlas_futures_v2 import MS,candles,indicators,make_setup,audit_one
-from atlas_futures_costs import ExecutionCostModel,evaluate_trade_net_r
-UTC=datetime.timezone.utc
-def get(path,params):
- url="https://api.bybit.com"+path+"?"+urllib.parse.urlencode(params)
- req=urllib.request.Request(url,headers={"User-Agent":"ATLAS-Research/2.0"})
- for retry in range(4):
-  try:
-   with urllib.request.urlopen(req,timeout=30) as r:obj=json.load(r)
-   if obj.get("retCode")!=0:raise RuntimeError(str(obj.get("retMsg")))
-   return obj["result"]
-  except (OSError,ValueError,RuntimeError):
-   if retry==3:raise
-   time.sleep(2**retry)
-def history(symbol,start_ms,end_ms):
- result={};cursor=end_ms
- while cursor>=start_ms:
-  rows=get("/v5/market/kline",{"category":"linear","symbol":symbol+"USDT","interval":"240","end":cursor,"limit":1000}).get("list",[])
-  if not rows:break
-  for row in rows:
-   t=int(row[0])
-   if start_ms<=t<end_ms:result[t]=row[:6]
-  oldest=min(int(x[0]) for x in rows)
-  if oldest>=cursor:raise RuntimeError("Pagination did not advance")
-  cursor=oldest-1
-  time.sleep(.12)
- return candles(list(result.values()),end_ms)
-def funding(symbol,start_ms,end_ms):
- result={};cursor=end_ms
- while cursor>=start_ms:
-  rows=get("/v5/market/funding/history",{"category":"linear","symbol":symbol+"USDT","endTime":cursor,"limit":200}).get("list",[])
-  if not rows:break
-  for row in rows:
-   t=int(row["fundingRateTimestamp"])
-   if start_ms<=t<end_ms:result[t]=float(row["fundingRate"])
-  oldest=min(int(x["fundingRateTimestamp"]) for x in rows)
-  if oldest>=cursor:raise RuntimeError("Funding pagination did not advance")
-  cursor=oldest-1
-  time.sleep(.12)
- return sorted(result.items())
+from typing import Any, Callable
 
-def okx_get(path,params):
- url="https://www.okx.com"+path+"?"+urllib.parse.urlencode(params)
- req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 ATLAS-Research"})
- for retry in range(4):
-  try:
-   with urllib.request.urlopen(req,timeout=30) as response:obj=json.load(response)
-   if obj.get("code")!="0":raise RuntimeError(str(obj.get("msg")))
-   return obj["data"]
-  except (OSError,ValueError,RuntimeError):
-   if retry==3:raise
-   time.sleep(2**retry)
+from atlas_futures_v2 import MS, audit_one, make_setup
+from atlas_futures_costs import ExecutionCostModel, evaluate_trade_net_r
+from atlas_perp_data_and_oos import (
+    FOUR_HOURS_MS,
+    PerpetualDataset,
+    add_months,
+    build_oos_schedule,
+    fetch_perpetual_dataset,
+)
 
-def okx_history(symbol,start_ms,end_ms):
- # OKX history-candles uses 'after' for older timestamps.
- result={};cursor=end_ms
- while cursor>=start_ms:
-  rows=okx_get("/api/v5/market/history-candles",{"instId":symbol+"-USDT-SWAP","bar":"4H","after":cursor,"limit":100})
-  if not rows:break
-  for row in rows:
-   t=int(row[0])
-   if start_ms<=t<end_ms and row[8]=="1":
-    # OKX swap volume field 5 is contracts; use quote currency volume (field 7).
-    result[t]=[t,*row[1:5],row[7]]
-  oldest=min(int(x[0]) for x in rows)
-  if oldest>=cursor:raise RuntimeError("OKX candles pagination stalled")
-  cursor=oldest-1
-  time.sleep(.13)
- return candles(list(result.values()),end_ms)
+UTC = datetime.timezone.utc
 
-def okx_funding(symbol,start_ms,end_ms):
- # Funding history is public but exchange may cap lookback; fail closed if so.
- result={};cursor=end_ms
- while cursor>=start_ms:
-  rows=okx_get("/api/v5/public/funding-rate-history",{"instId":symbol+"-USDT-SWAP","after":cursor,"limit":100})
-  if not rows:break
-  for row in rows:
-   t=int(row["fundingTime"])
-   if start_ms<=t<end_ms:result[t]=float(row.get("realizedRate") or row["fundingRate"])
-  oldest=min(int(x["fundingTime"]) for x in rows)
-  if oldest>=cursor:raise RuntimeError("OKX funding pagination stalled")
-  cursor=oldest-1
-  time.sleep(.13)
- return sorted(result.items())
 
-def source_data(symbol,start_ms,end_ms):
- errors=[]
- for provider,history_fn,funding_fn in (("OKX_SWAP",okx_history,okx_funding),("BYBIT_LINEAR",history,funding)):
-  try:
-   bars=history_fn(symbol,start_ms,end_ms)
-   rates=funding_fn(symbol,start_ms,end_ms)
-   if not bars or not rates:raise ValueError("No historical candles or funding")
-   return provider,bars,rates
-  except Exception as exc:errors.append(provider+": "+str(exc))
- raise RuntimeError("; ".join(errors))
+def source_data(symbol: str, start_ms: int, end_ms: int) -> PerpetualDataset:
+    """Fetch same-exchange linear USDT perpetual bars and funding."""
+    return fetch_perpetual_dataset(symbol, start_ms, end_ms)
 
-def contiguous(bars):
- return all(bars[i][0]-bars[i-1][0]==MS for i in range(1,len(bars)))
-def simulate(symbol,bars,rates,split_ms,end_ms,provider="BYBIT_LINEAR",funding_mode="empirical"):
- trades=[];i=220
- while i<len(bars)-1:
-  window=bars[max(0,i-250):i+1]
-  if len(window)<220 or not contiguous(window):i+=1;continue
-  signal_at=bars[i][0]+MS
-  if signal_at<split_ms:i+=1;continue
-  setup=make_setup(symbol,provider,window,signal_at)
-  if not setup:i+=1;continue
-  # Never use future bars to create the signal; future bars only settle its outcome.
-  future=bars[i+1:min(len(bars),i+43)]
-  if not future:break
-  outcome=audit_one(setup,window+future,end_ms)
-  if not outcome or outcome["exit_price"] is None:break
-  opened=datetime.datetime.fromtimestamp(signal_at/1000,UTC)
-  closed=datetime.datetime.fromisoformat(outcome["exit_at"])
-  direction=1 if setup["side"]=="LONG" else -1
-  signed_funding=sum(direction*r for t,r in rates if signal_at<t<=int(closed.timestamp()*1000)) if funding_mode=="empirical" else direction*0.0001*math.floor((closed-opened).total_seconds()/28800)
-  duration=(closed-opened).total_seconds()
-  # Use exact signed funding cash flow as a proportion of entry notional;
-  # dynamic stop/market slippage is a stress assumption, not measured fills.
-  atr_ratio=setup["indicators"]["atr14"]/setup["entry"]
-  slip=min(.005,max(.0002,.1*atr_ratio))
-  costs=ExecutionCostModel(entry_slippage_rate=slip,exit_slippage_rate=slip,funding_rate_8h=0)
-  result=evaluate_trade_net_r(setup["side"],setup["entry"],setup["sl"],outcome["exit_price"],opened,closed,outcome["status"]=="WIN_TP2",costs)
-  funding_r=signed_funding/(abs(setup["entry"]-setup["sl"])/setup["entry"])
-  net=result["net_r"]-funding_r
-  trades.append({"symbol":symbol,"signal_at":setup["signal_at"],"exit_at":outcome["exit_at"],"side":setup["side"],"status":outcome["status"],"gross_r":result["gross_r"],"net_r":round(net,6),"funding_r":round(funding_r,6),"slippage_rate":slip,"funding_mode":funding_mode})
-  i+=max(1,len([b for b in future if b[0]+MS<=int(closed.timestamp()*1000)]))
- return trades
-def metrics(trades):
- r=[x["net_r"] for x in sorted(trades,key=lambda x:x["exit_at"])]
- if not r:return {"trades":0,"verdict":"INSUFFICIENT"}
- wins=sum(x>0 for x in r);gp=sum(x for x in r if x>0);gl=-sum(x for x in r if x<0)
- equity=peak=drawdown=0
- for x in r:
-  equity+=x;peak=max(peak,equity);drawdown=max(drawdown,peak-equity)
- return {"trades":len(r),"win_rate":round(wins/len(r),4),"mean_net_r":round(sum(r)/len(r),5),"profit_factor":round(gp/gl,4) if gl else None,"max_drawdown_r":round(drawdown,4),"verdict":"RESEARCH_ONLY"}
-def add_months(dt, months):
- y=dt.year+(dt.month-1+months)//12
- m=(dt.month-1+months)%12+1
- return dt.replace(year=y,month=m,day=min(dt.day,calendar.monthrange(y,m)[1]))
 
-def walk_forward(trades,start,end):
- """Three non-overlapping 4-month calibration / 2-month OOS windows.
- No parameter optimization occurs: canonical strategy remains frozen.
- """
- windows=[]
- for k in range(3):
-  train_start=add_months(start,k*6)
-  train_end=add_months(start,k*6+4)
-  test_end=add_months(start,k*6+6)
-  if test_end>end:break
-  subset=[t for t in trades if train_end<=datetime.datetime.fromisoformat(t["signal_at"])<test_end]
-  windows.append({"index":k+1,"train_start":train_start.isoformat(),"train_end":train_end.isoformat(),"test_start":train_end.isoformat(),"test_end":test_end.isoformat(),"metrics":metrics(subset)})
- return windows
+def contiguous(bars: list[tuple]) -> bool:
+    return all(bars[i][0] - bars[i - 1][0] == MS for i in range(1, len(bars)))
 
-def main():
- p=argparse.ArgumentParser();p.add_argument("--symbols",default="BTC,ETH,SOL");p.add_argument("--months",type=int,default=18);p.add_argument("--out",default="atlas_backtest_results");a=p.parse_args()
- if a.months<12 or a.months>24:raise ValueError("months must be 12..24")
- out=Path(a.out);out.mkdir(parents=True,exist_ok=True)
- end=datetime.datetime.now(UTC).replace(minute=0,second=0,microsecond=0)
- end=end-datetime.timedelta(hours=end.hour%4)
- # Exact calendar months, anchored to the aligned end timestamp.
- start=add_months(end,-a.months)
- # Start/end must be 4H aligned for exact candle coverage.
- start=datetime.datetime.fromtimestamp((int(start.timestamp()*1000)//MS)*MS/1000,UTC)
- split=end-datetime.timedelta(days=183)
- summary={"start":start.isoformat(),"end":end.isoformat(),"oos_start":split.isoformat(),"symbols":{},"assumptions":"OKX/Bybit perpetual, scenario taker fees and ATR slippage; empirical signed funding only when complete, otherwise explicitly scenario 0.01%/8h. Scenario is NOT acceptance evidence; no real fills"}
- all_trades=[]
- for symbol in a.symbols.split(","):
-  symbol=symbol.strip().upper()
-  try:
-   provider,bars,rates=source_data(symbol,int(start.timestamp()*1000),int(end.timestamp()*1000))
-   expected=math.ceil((end-start).total_seconds()/(MS/1000))
-   coverage={"provider":provider,"candles":len(bars),"expected":expected,"funding_events":len(rates),"first":datetime.datetime.fromtimestamp(bars[0][0]/1000,UTC).isoformat() if bars else None,"last":datetime.datetime.fromtimestamp(bars[-1][0]/1000,UTC).isoformat() if bars else None,"gaps":sum(bars[i][0]-bars[i-1][0]!=MS for i in range(1,len(bars)))}
-   coverage["missing_candles"]=expected-len(bars)
-   coverage["funding_max_gap_hours"]=round(max((rates[i][0]-rates[i-1][0])/3600000 for i in range(1,len(rates))),2) if len(rates)>1 else None
-   if len(bars)!=expected or coverage["gaps"] or bars[0][0]!=int(start.timestamp()*1000) or bars[-1][0]!=int(end.timestamp()*1000)-MS:
-    summary["symbols"][symbol]={"coverage":coverage,"verdict":"DATA_INCOMPLETE"};continue
-   funding_complete=bool(rates) and rates[0][0]<=int(start.timestamp()*1000)+86400000 and rates[-1][0]>=int(end.timestamp()*1000)-86400000 and coverage["funding_max_gap_hours"] is not None and coverage["funding_max_gap_hours"]<=24
-   mode="empirical" if funding_complete else "scenario_0.01pct_per_8h"
-   coverage["funding_complete"]=funding_complete
-   trades=simulate(symbol,bars,rates,int(start.timestamp()*1000),int(end.timestamp()*1000),provider,"empirical" if funding_complete else "scenario")
-   windows=walk_forward(trades,start,end)
-   if a.months==18 and len(windows)!=3:raise RuntimeError("Expected exactly three full 4m/2m OOS windows")
-   oos=[t for t in trades if any(datetime.datetime.fromisoformat(w["test_start"])<=datetime.datetime.fromisoformat(t["signal_at"])<datetime.datetime.fromisoformat(w["test_end"]) for w in windows)]
-   all_trades.extend(oos)
-   summary["symbols"][symbol]={"coverage":coverage,"funding_mode":mode,"windows":windows,"metrics":metrics(oos),"verdict":"EMPIRICAL_RESEARCH" if funding_complete else "SCENARIO_ONLY_NOT_ACCEPTED"}
-  except Exception as exc:
-   summary["symbols"][symbol]={"verdict":"FETCH_FAILED","error":str(exc)[:250]}
- summary["aggregate_oos"]=metrics(all_trades)
- summary["aggregate_oos"]["long_trades"]=sum(t["side"]=="LONG" for t in all_trades)
- summary["aggregate_oos"]["short_trades"]=sum(t["side"]=="SHORT" for t in all_trades)
- summary["aggregate_oos"]["minimum_sample_met"]=len(all_trades)>=50
- summary["all_symbols_covered"]=all("metrics" in x for x in summary["symbols"].values()) and len(summary["symbols"])>0
- summary["all_funding_empirical"]=summary["all_symbols_covered"] and all(x["coverage"]["funding_complete"] for x in summary["symbols"].values())
- summary["verdict"]="EMPIRICAL_RESEARCH_COMPLETE" if summary["all_funding_empirical"] and summary["aggregate_oos"]["minimum_sample_met"] else "INSUFFICIENT_SAMPLE" if summary["all_funding_empirical"] else "SCENARIO_ONLY_NOT_ACCEPTED" if summary["all_symbols_covered"] else "INCOMPLETE"
- (out/"summary.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False))
- (out/"trades.json").write_text(json.dumps(all_trades,indent=2))
- print(json.dumps(summary,ensure_ascii=False))
- if not summary["all_symbols_covered"]:sys.exit(2)
-if __name__=="__main__":main()
+
+def _dt(value: str) -> datetime.datetime:
+    parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Timezone-aware trade timestamp required")
+    return parsed.astimezone(UTC)
+
+
+def simulate(
+    symbol: str,
+    bars: list[tuple],
+    rates: list[tuple[int, float]],
+    start_ms: int,
+    end_ms: int,
+    provider: str = "BYBIT_LINEAR",
+    funding_mode: str = "empirical",
+    setup_filter: Callable[[dict[str, Any], list[tuple]], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Simulate one OOS window; censored exits at its end are excluded.
+
+    The filter is research-only. A rejected setup still consumes its original
+    holding interval so later candidate generation matches the fixed baseline.
+    """
+    if funding_mode not in ("empirical", "scenario"):
+        raise ValueError("INVALID_FUNDING_MODE")
+    trades: list[dict[str, Any]] = []
+    i = 220
+    while i < len(bars) - 1:
+        strategy_context = bars[max(0, i - 250):i + 1]
+        if len(strategy_context) < 220 or not contiguous(strategy_context):
+            i += 1
+            continue
+        signal_ms = bars[i][0] + MS
+        if signal_ms < start_ms:
+            i += 1
+            continue
+        if signal_ms >= end_ms:
+            break
+        setup = make_setup(symbol, provider, strategy_context, signal_ms)
+        if not setup:
+            i += 1
+            continue
+
+        forecast_context = bars[max(0, i - 511):i + 1]
+        accepted = setup_filter is None or bool(setup_filter(setup, forecast_context))
+        future = bars[i + 1:min(len(bars), i + 43)]
+        if not future:
+            break
+        outcome = audit_one(setup, strategy_context + future, end_ms)
+        if not outcome or outcome["exit_price"] is None:
+            # The position was still open at the test cutoff; do not count it.
+            break
+
+        opened = _dt(setup["signal_at"])
+        closed = _dt(outcome["exit_at"])
+        direction = 1 if setup["side"] == "LONG" else -1
+        if funding_mode == "empirical":
+            signed_funding = sum(
+                direction * rate for ts, rate in rates
+                if signal_ms < ts <= int(closed.timestamp() * 1000)
+            )
+        else:
+            elapsed = (closed - opened).total_seconds()
+            signed_funding = direction * 0.0001 * math.floor(elapsed / (8 * 3600))
+
+        atr_ratio = setup["indicators"]["atr14"] / setup["entry"]
+        slip = min(0.005, max(0.0002, 0.1 * atr_ratio))
+        costs = ExecutionCostModel(
+            entry_slippage_rate=slip,
+            exit_slippage_rate=slip,
+            funding_rate_8h=0,
+        )
+        result = evaluate_trade_net_r(
+            setup["side"],
+            setup["entry"],
+            setup["sl"],
+            outcome["exit_price"],
+            opened,
+            closed,
+            outcome["status"] == "WIN_TP2",
+            costs,
+        )
+        risk_fraction = abs(setup["entry"] - setup["sl"]) / setup["entry"]
+        funding_r = signed_funding / risk_fraction
+        net_r = result["net_r"] - funding_r
+
+        if accepted:
+            trades.append({
+                "symbol": symbol,
+                "signal_id": setup["id"],
+                "signal_at": setup["signal_at"],
+                "exit_at": outcome["exit_at"],
+                "side": setup["side"],
+                "status": outcome["status"],
+                "entry": float(setup["entry"]),
+                "sl": float(setup["sl"]),
+                "tp1": float(setup["tp1"]),
+                "tp2": float(setup["tp2"]),
+                "gross_r": result["gross_r"],
+                "net_r": round(net_r, 6),
+                "funding_r": round(funding_r, 6),
+                "slippage_rate": slip,
+                "funding_mode": funding_mode,
+            })
+
+        # Advance through the same baseline holding interval even if filtered.
+        exit_ms = int(closed.timestamp() * 1000)
+        bars_consumed = sum(1 for bar in future if bar[0] + MS <= exit_ms)
+        i += max(1, bars_consumed)
+    return trades
+
+
+def metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(trades, key=lambda row: row["exit_at"])
+    returns = [float(row["net_r"]) for row in ordered]
+    if not returns:
+        return {"trades": 0, "verdict": "INSUFFICIENT"}
+    wins = sum(value > 0 for value in returns)
+    gross_profit = sum(value for value in returns if value > 0)
+    gross_loss = -sum(value for value in returns if value < 0)
+    equity = peak = drawdown = 0.0
+    for value in returns:
+        equity += value
+        peak = max(peak, equity)
+        drawdown = max(drawdown, peak - equity)
+    return {
+        "trades": len(returns),
+        "win_rate": round(wins / len(returns), 4),
+        "mean_net_r": round(sum(returns) / len(returns), 5),
+        "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else None,
+        "max_drawdown_r": round(drawdown, 4),
+        "verdict": "RESEARCH_ONLY",
+    }
+
+
+def walk_forward(
+    trades: list[dict[str, Any]],
+    start: datetime.datetime,
+    end: datetime.datetime,
+) -> list[dict[str, Any]]:
+    """Return explicit, non-overlapping 4m-context / 2m-test windows."""
+    result: list[dict[str, Any]] = []
+    for window in build_oos_schedule(start, end):
+        test_start = _dt(window["test_start"])
+        test_end = _dt(window["test_end"])
+        subset = [
+            trade for trade in trades
+            if test_start <= _dt(trade["signal_at"]) < test_end
+            and _dt(trade["exit_at"]) <= test_end
+        ]
+        result.append({
+            **window,
+            "index": window["window_id"],
+            "metrics": metrics(subset),
+        })
+    return result
+
+
+def _aligned_end(now: datetime.datetime) -> datetime.datetime:
+    value = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    return value - datetime.timedelta(hours=value.hour % 4)
+
+
+def _write_dataset(path: Path, data: PerpetualDataset, start_ms: int, end_ms: int) -> None:
+    payload = {
+        "schema_version": 1,
+        "symbol": data.symbol,
+        "provider": data.provider,
+        "instrument_id": data.instrument_id,
+        "market_type": "LINEAR_USDT_PERPETUAL",
+        "timeframe": "4h",
+        "start_ms": start_ms,
+        "end_ms_exclusive": end_ms,
+        "bars": [[int(row[0]), *[float(value) for value in row[1:]]] for row in data.bars],
+        "funding_rates": [[int(ts), float(rate)] for ts, rate in data.funding_rates],
+        "funding_complete": data.funding_complete,
+        "metadata": data.metadata,
+        "dataset_sha256": data.dataset_sha256,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbols", default="BTC,ETH,SOL")
+    parser.add_argument("--months", type=int, default=18)
+    parser.add_argument("--out", default="atlas_backtest_results")
+    args = parser.parse_args()
+    if args.months < 12 or args.months > 24:
+        raise ValueError("months must be 12..24")
+
+    out_dir = Path(args.out)
+    data_dir = out_dir / "data"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    end = _aligned_end(datetime.datetime.now(UTC))
+    start = add_months(end, -args.months)
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+    windows = build_oos_schedule(start, end)
+    if args.months == 18 and len(windows) != 3:
+        raise RuntimeError("Expected exactly three complete 4m/2m OOS windows")
+
+    summary: dict[str, Any] = {
+        "schema_version": 2,
+        "created_at": datetime.datetime.now(UTC).isoformat(),
+        "evaluation_protocol": "MULTI_WINDOW_FIXED_PARAMETER_OOS",
+        "market_type": "LINEAR_USDT_PERPETUAL",
+        "timeframe": "4h",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "oos_windows": windows,
+        "oos_windows_count": len(windows),
+        "oos_months_total": 2 * len(windows),
+        "symbols": {},
+        "dataset_sha256_by_symbol": {},
+        "assumptions": {
+            "same_candle_sl_tp": "SL_FIRST",
+            "fees": "round-trip taker fee from atlas_futures_costs.py",
+            "slippage": "ATR-based scenario assumption; not measured fills",
+            "empirical_funding": "signed settled rate events at their actual timestamps",
+            "incomplete_funding": "scenario 0.01% per 8h; excluded from empirical acceptance",
+            "exit_boundary": "trades not closed by each test_end are censored and excluded",
+            "signals": "fixed ATLAS parameters; no OOS tuning",
+        },
+    }
+
+    aggregate_oos: list[dict[str, Any]] = []
+    for raw_symbol in args.symbols.split(","):
+        symbol = raw_symbol.strip().upper()
+        if not symbol:
+            continue
+        try:
+            data = source_data(symbol, start_ms, end_ms)
+            bars, rates = data.bars, data.funding_rates
+            _write_dataset(data_dir / f"{symbol}.json", data, start_ms, end_ms)
+            funding_mode = "empirical" if data.funding_complete else "scenario"
+            per_window: list[dict[str, Any]] = []
+            symbol_oos: list[dict[str, Any]] = []
+            for window in windows:
+                test_start_ms = int(_dt(window["test_start"]).timestamp() * 1000)
+                test_end_ms = int(_dt(window["test_end"]).timestamp() * 1000)
+                trades = simulate(
+                    symbol, bars, rates, test_start_ms, test_end_ms,
+                    data.provider, funding_mode,
+                )
+                symbol_oos.extend(trades)
+                per_window.append({
+                    **window,
+                    "dataset_sha256": data.dataset_sha256,
+                    "metrics": metrics(trades),
+                })
+            aggregate_oos.extend(symbol_oos)
+            summary["dataset_sha256_by_symbol"][symbol] = data.dataset_sha256
+            summary["symbols"][symbol] = {
+                "provider": data.provider,
+                "instrument_id": data.instrument_id,
+                "coverage": data.metadata,
+                "dataset_sha256": data.dataset_sha256,
+                "funding_mode": funding_mode,
+                "windows": per_window,
+                "metrics": metrics(symbol_oos),
+                "verdict": "EMPIRICAL_RESEARCH" if data.funding_complete else "SCENARIO_ONLY_NOT_ACCEPTED",
+            }
+        except Exception as exc:
+            summary["symbols"][symbol] = {
+                "verdict": "FETCH_FAILED",
+                "error": str(exc)[:300],
+            }
+
+    summary["aggregate_oos"] = metrics(aggregate_oos)
+    summary["aggregate_oos"]["long_trades"] = sum(row["side"] == "LONG" for row in aggregate_oos)
+    summary["aggregate_oos"]["short_trades"] = sum(row["side"] == "SHORT" for row in aggregate_oos)
+    summary["aggregate_oos"]["minimum_sample_met"] = len(aggregate_oos) >= 50
+    summary["all_symbols_covered"] = bool(summary["symbols"]) and all(
+        item.get("coverage", {}).get("candle_count", 0) > 0
+        for item in summary["symbols"].values()
+    )
+    summary["all_funding_empirical"] = summary["all_symbols_covered"] and all(
+        item.get("coverage", {}).get("funding_complete") is True
+        for item in summary["symbols"].values()
+    )
+    if summary["all_funding_empirical"] and summary["aggregate_oos"]["minimum_sample_met"]:
+        summary["verdict"] = "EMPIRICAL_RESEARCH_COMPLETE"
+    elif summary["all_funding_empirical"]:
+        summary["verdict"] = "INSUFFICIENT_SAMPLE"
+    elif summary["all_symbols_covered"]:
+        summary["verdict"] = "SCENARIO_ONLY_NOT_ACCEPTED"
+    else:
+        summary["verdict"] = "INCOMPLETE"
+
+    (out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (out_dir / "trades.json").write_text(
+        json.dumps(aggregate_oos, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(json.dumps(summary, ensure_ascii=False))
+    if not summary["all_symbols_covered"]:
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
