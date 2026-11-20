@@ -15,9 +15,10 @@ research artifact. Research adapters remain separate from the live signal path.
   selected source is recorded with the data. Never relabel spot candles as
   perpetual data.
 - **Futures data parity:** the ATLAS Futures signal engine and its futures
-  backtest use 4-hour linear USDT perpetual candles. Preserve exchange,
-  instrument ID, timeframe, and funding provenance. Reject a setup when the
-  latest closed candle is stale or the required candle history has gaps.
+  backtest use 4-hour linear USDT perpetual candles (Bybit linear, OKX USDT
+  swap, or Binance USDⓈ-M perpetual). Preserve exchange, instrument ID,
+  timeframe, and funding provenance. Reject a setup when the latest closed
+  candle is stale or the required candle history has gaps.
 - **Conservative bar ordering:** when one OHLC candle touches both SL and TP,
   score the stop first. This is a worst-case bar-level assumption, not a claim
   about the actual intrabar path.
