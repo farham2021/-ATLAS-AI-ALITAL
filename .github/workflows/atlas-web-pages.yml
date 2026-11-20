@@ -6,7 +6,9 @@ on:
       - 'docs/**'
       - 'assets/**'
       - 'atlas-dashboard.html'
-      - 'atlas_macro_events.py'\n      - 'atlas_coinglass_snapshot.py'\n      - 'assets/atlas-coinglass-widget.js'
+      - 'atlas_macro_events.py'
+      - 'atlas_coinglass_snapshot.py'
+      - 'assets/atlas-coinglass-widget.js'
       - '.github/workflows/atlas-web-pages.yml'
       - '.github/workflows/publish-atlas-dashboard.yml'
   workflow_dispatch:
