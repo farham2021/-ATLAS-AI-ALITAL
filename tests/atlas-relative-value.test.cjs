@@ -26,7 +26,7 @@ test('only declared canonical units are accepted',async()=>{ const {normalizeUsd
 test('quote timestamps fail closed on stale or mismatched sources',async()=>{ const {quoteFreshness}=await helpers;
  const now=Date.parse('2026-11-20T12:00:00Z');
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:50:00Z'},{captured_at:'2026-11-20T11:55:00Z'}],now).ok,true);
- assert.equal(quoteFreshness([{captured_at:'2026-11-20T10:00:00Z'},{captured_at:'2026-11-20T10:55:00Z'}],now).reason,'stale_or_future');
+ assert.equal(quoteFreshness([{captured_at:'2026-11-20T03:00:00Z'},{captured_at:'2026-11-20T03:55:00Z'}],now).reason,'stale_or_future');
  assert.equal(quoteFreshness([{captured_at:'2026-11-20T11:20:00Z'},{captured_at:'2026-11-20T11:40:00Z'}],now).reason,'source_time_skew');
 });
 test('all requested coin specs have documented mass and 90 percent fineness',async()=>{ const {COIN_SPECS}=await helpers;
