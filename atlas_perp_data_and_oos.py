@@ -25,6 +25,7 @@ from typing import Any
 UTC = timezone.utc
 FOUR_HOURS_MS = 4 * 60 * 60 * 1000
 BYBIT_BASE = "https://api.bybit.com"
+BYBIT_ALT_BASE = "https://api.bytick.com"  # documented Bybit mainnet alias
 OKX_BASE = "https://www.okx.com"
 BINANCE_UM_BASE = "https://fapi.binance.com"
 
@@ -209,6 +210,7 @@ class PerpetualDataFetcher:
         self.timeout_sec = timeout_sec
         self.retries = retries
         self.sleep = sleep
+        self.bybit_hosts_used: set[str] = set()
 
     def _get_json(self, url: str) -> Any:
         last_error: Exception | None = None
@@ -246,11 +248,31 @@ class PerpetualDataFetcher:
     def _url(base: str, path: str, params: dict[str, Any]) -> str:
         return base + path + "?" + urllib.parse.urlencode(params)
 
+    def _bybit_json(self, url: str) -> Any:
+        """Try Bybit mainnet host, then its documented api.bytick.com alias."""
+        try:
+            payload = self._get_json(url)
+            self.bybit_hosts_used.add(BYBIT_BASE)
+            return payload
+        except PerpetualDataError as primary_error:
+            if not url.startswith(BYBIT_BASE):
+                raise
+            alternate_url = BYBIT_ALT_BASE + url[len(BYBIT_BASE):]
+            try:
+                payload = self._get_json(alternate_url)
+                self.bybit_hosts_used.add(BYBIT_ALT_BASE)
+                return payload
+            except PerpetualDataError as alternate_error:
+                raise PerpetualDataError(
+                    f"BYBIT_DOCUMENTED_HOSTS_FAILED: primary={primary_error}; "
+                    f"alternate={alternate_error}"
+                ) from alternate_error
+
     def _bybit_candles(self, symbol: str, start_ms: int, end_ms: int) -> list[tuple[int, float, float, float, float, float]]:
         result: dict[int, list[Any]] = {}
         cursor = end_ms - 1
         while cursor >= start_ms:
-            payload = self._get_json(self._url(BYBIT_BASE, "/v5/market/kline", {
+            payload = self._bybit_json(self._url(BYBIT_BASE, "/v5/market/kline", {
                 "category": "linear", "symbol": symbol + "USDT", "interval": "240",
                 "end": cursor, "limit": 1000,
             }))
@@ -320,7 +342,7 @@ class PerpetualDataFetcher:
         result: dict[int, float] = {}
         cursor = end_ms - 1
         while cursor >= start_ms:
-            payload = self._get_json(self._url(BYBIT_BASE, "/v5/market/funding/history", {
+            payload = self._bybit_json(self._url(BYBIT_BASE, "/v5/market/funding/history", {
                 "category": "linear", "symbol": symbol + "USDT", "endTime": cursor, "limit": 200,
             }))
             rows = payload.get("result", {}).get("list", [])
@@ -404,7 +426,7 @@ class PerpetualDataFetcher:
         for provider in sources:
             try:
                 if provider == "BYBIT_LINEAR":
-                    payload = self._get_json(self._url(BYBIT_BASE, "/v5/market/kline", {
+                    payload = self._bybit_json(self._url(BYBIT_BASE, "/v5/market/kline", {
                         "category": "linear", "symbol": symbol + "USDT", "interval": "240", "limit": limit,
                     }))
                     rows = payload.get("result", {}).get("list", [])
@@ -454,6 +476,7 @@ class PerpetualDataFetcher:
                 metadata = {
                     "provider": provider,
                     "instrument_id": instrument,
+                    "bybit_api_hosts": sorted(self.bybit_hosts_used) if provider == "BYBIT_LINEAR" else [],
                     "market_type": "LINEAR_USDT_PERPETUAL",
                     "timeframe": "4h",
                     "start_ms": start_ms,
@@ -506,4 +529,3 @@ def fetch_latest_perp_4h(
     min_bars: int = 220,
 ) -> tuple[str, list[tuple[int, float, float, float, float, float]]]:
     return PerpetualDataFetcher().fetch_latest_perp_4h(base_symbol, now_ms, limit, min_bars)
-
