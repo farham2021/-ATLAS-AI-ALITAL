@@ -250,12 +250,20 @@ def brs_gold_currency_rows():
         sym=None
         if ("18" in blob or "۱۸" in blob) and ("gold" in blob or "طلا" in blob):sym="GOLD18"
         elif "emami" in blob or "امامی" in blob:sym="COIN_EMAMI"
+        elif "نیم سکه" in blob or "half coin" in blob:sym="COIN_HALF"
+        elif "ربع سکه" in blob or "quarter coin" in blob:sym="COIN_QUARTER"
+        elif "سکه گرمی" in blob or "gram coin" in blob:sym="COIN_GERAMI"
+        elif "بهار آزادی" in blob or "azadi" in blob:sym="COIN_AZADI"
         if sym:
-            # Preserve the provider's existing market quote convention for non-FX assets.
-            out.append({"captured_at":ts,"symbol":sym,"price":p,
-                        "payload":{"provider":"brsapi_gold_currency",
-                                   "source_name":record_name(x),"unit_raw":x.get("unit"),
-                                   "price":p,"raw":clean_raw(x)}})
+            unit_raw=x.get("unit")
+            unit_text=_fx_text(unit_raw).upper()
+            unit_canonical=("TOMAN" if unit_text in ("تومان","تومان","IRT","TOMAN","TOMANS") else
+                            "IRR" if unit_text in ("ریال","IRR","RIAL","RIALS") else None)
+            # Preserve market prices only when the provider states their currency unit.
+            payload={"provider":"brsapi_gold_currency","source_name":record_name(x),
+                     "unit_raw":unit_raw,"unit_canonical":unit_canonical,
+                     "price":p,"raw":clean_raw(x)}
+            out.append({"captured_at":ts,"symbol":sym,"price":p,"payload":payload})
     return out
 
 def brs_commodity_rows():
