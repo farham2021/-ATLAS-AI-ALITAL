@@ -1,3 +1,4 @@
+import { COIN_SPECS, fairValueToman, bubbleToman, normalizeUsdIrr, normalizeTomanMarket, normalizeUsdMetal, quoteFreshness } from "../../../assets/atlas-relative-value.mjs";
 // ATLAS public read-only PWA. No private portfolios, credentials, or trading operations.
 const HTML = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#101b32"><meta name="description" content="ATLAS AI &#8212; &#1583;&#1575;&#1588;&#1576;&#1608;&#1585;&#1583; &#1608;&#1590;&#1593;&#1740;&#1578; &#1578;&#1581;&#1604;&#1740;&#1604; &#1608; &#1607;&#1588;&#1583;&#1575;&#1585;&#1607;&#1575;&#1740; &#1576;&#1575;&#1586;&#1575;&#1585;"><link rel="manifest" href="/functions/v1/atlas-web/manifest.webmanifest"><title>ATLAS AI | Dashboard</title><style>
 :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#e9f2ff;background:#091324;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,#1b3861 0%,#091324 50%);min-height:100vh}main{max-width:1080px;margin:auto;padding:24px 16px 70px}header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}h1{font-size:28px;margin:8px 0}h2{font-size:19px;margin:0 0 16px}.muted{color:#a5b7d1}.brand{font-weight:800;letter-spacing:2px;color:#77d3ff}.pill{border:1px solid #355271;border-radius:30px;padding:7px 12px;font-size:12px;color:#b8d3ed}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;margin:24px 0}.card{background:#13243b;border:1px solid #2b4564;border-radius:18px;padding:20px;box-shadow:0 12px 30px #0002}.value{font-size:25px;font-weight:750;margin:12px 0 4px;direction:ltr;text-align:right}.row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #2b4564;align-items:center}.row:last-child{border:0}.tag{border-radius:8px;padding:4px 8px;background:#1e3a54;color:#b9e4f8;font-size:12px}button{background:#2a86bf;color:white;border:0;border-radius:10px;padding:11px 16px;cursor:pointer;font:inherit}button:focus-visible{outline:3px solid white}a{color:#7bd8ff}footer{margin-top:24px;font-size:13px;line-height:1.8}#error{color:#ffbdad}#alerts{overflow-wrap:anywhere}@media(min-width:760px){.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}}@media(max-width:500px){h1{font-size:23px}.value{font-size:20px}}
@@ -156,6 +157,69 @@ Deno.serve(async(req:Request)=>{
     unit:symbol==="COPPER"?"USD/lb (futures proxy)":symbol==="XAUUSD"?"USD/troy oz":symbol==="XAGUSD"?"USD/troy oz":symbol==="SILVER999_FAIR"?"IRR or Toman per stored source metadata (verify source)": "source-dependent",
     disclaimer:"Insufficient time-series history is never replaced by fabricated multi-timeframe indicators."},200,origin);
   }catch(e){console.error("metal analysis unavailable",String(e));return json({error:"metals_analysis_unavailable"},503,origin)}
+ }
+ if(url.pathname.endsWith("/api/iran-relative-value")){
+  const base=Deno.env.get("SUPABASE_URL")||"",key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
+  if(!base||!key)return json({error:"service_unavailable"},503,origin);
+  try{
+   const marketSymbols=["XAUUSD","XAGUSD","COPPER"];
+   const fxSymbols=["USD_IRR","GOLD18",...COIN_SPECS.map((x:any)=>x.source_symbol)];
+   const inFilter=(symbols:string[])=>"in.("+symbols.map(x=>encodeURIComponent(x)).join(",")+")";
+   const [marketRows,fxRows]=await Promise.all([
+    readTable(base,key,"atlas_market_snapshots?select=symbol,price,captured_at,payload&symbol="+inFilter(marketSymbols)+"&order=captured_at.desc&limit=100"),
+    readTable(base,key,"atlas_iran_fx_snapshots?select=symbol,price,captured_at,payload&symbol="+inFilter(fxSymbols)+"&order=captured_at.desc&limit=100")
+   ]);
+   const latest=(rows:any[],symbol:string)=>rows.find((r:any)=>r.symbol===symbol)||null;
+   const xau=latest(marketRows,"XAUUSD"),usd=latest(fxRows,"USD_IRR");
+   const xauUsd=normalizeUsdMetal(xau,"USD_PER_TROY_OZ"),usdIrr=normalizeUsdIrr(usd);
+   const globalInputs=[xau,usd].filter(Boolean);
+   const globalFresh=globalInputs.length===2?quoteFreshness(globalInputs):{ok:false,reason:"missing_global_input"};
+   const quote=(symbol:string,row:any,unit:string,normalized:number|null)=>({
+    symbol,price:normalized,unit,source:row?.payload?.provider||null,source_unit:row?.payload?.unit_canonical||row?.payload?.unit||row?.payload?.unit_raw||null,
+    captured_at:row?.captured_at||null,status:!row?"unavailable":normalized===null?"invalid_unit":Date.now()-Date.parse(row.captured_at)>15*60*1000?"delayed":"live"
+   });
+   const usdToman=usdIrr===null?null:usdIrr/10;
+   const quotes=[
+    quote("USD_FREE",usd,"IRR_PER_USD",usdIrr),
+    quote("XAUUSD",xau,"USD_PER_TROY_OZ",xauUsd),
+    quote("XAGUSD",latest(marketRows,"XAGUSD"),"USD_PER_TROY_OZ",normalizeUsdMetal(latest(marketRows,"XAGUSD"),"USD_PER_TROY_OZ")),
+    quote("COPPER",latest(marketRows,"COPPER"),"USD_PER_LB",normalizeUsdMetal(latest(marketRows,"COPPER"),"USD_PER_LB"))
+   ];
+   const comparisons:any[]=[];
+   const goldRow=latest(fxRows,"GOLD18"),goldMarket=normalizeTomanMarket(goldRow);
+   const globalReady=globalFresh.ok&&xauUsd!==null&&usdIrr!==null;
+   const goldFair=globalReady?fairValueToman({weightG:1,purity:.75,xauUsd,usdIrr}):null;
+   comparisons.push({
+    symbol:"GOLD18",name_fa:"طلای ۱۸ عیار",weight_g:1,purity:.75,
+    spot_usd_oz:xauUsd,fair_toman_per_gram:goldFair===null?null:Math.round(goldFair),
+    market_toman_per_gram:goldMarket===null?null:Math.round(goldMarket),
+    ...(goldFair!==null&&goldMarket!==null?bubbleToman(goldMarket,goldFair):{bubble_toman:null,bubble_pct:null}),
+    status:!globalReady?"unavailable_inputs":!goldRow?"market_unavailable":goldMarket===null?"market_unit_unverified":!quoteFreshness([xau,usd,goldRow]).ok?"stale_or_time_skew":"observed",
+    formula:"(XAU_USD_per_troy_oz × 0.75 × USD_IRR_per_USD / 31.1034768) / 10",
+    captured_at:goldRow?.captured_at||null,market_unit:"TOMAN_PER_GRAM"
+   });
+   for(const spec of COIN_SPECS){
+    const row=latest(fxRows,spec.source_symbol),market=normalizeTomanMarket(row);
+    const fair=globalReady?fairValueToman({weightG:spec.weight_g,purity:spec.purity,xauUsd,usdIrr}):null;
+    const ready=globalReady&&row&&market!==null&&quoteFreshness([xau,usd,row]).ok;
+    comparisons.push({
+     symbol:spec.symbol,name_fa:spec.name_fa,weight_g:spec.weight_g,purity:spec.purity,
+     spot_usd_oz:xauUsd,fair_toman:fair===null?null:Math.round(fair),
+     market_toman:market===null?null:Math.round(market),
+     ...(fair!==null&&market!==null?bubbleToman(market,fair):{bubble_toman:null,bubble_pct:null}),
+     status:!globalReady?"unavailable_inputs":!row?"market_unavailable":market===null?"market_unit_unverified":!ready?"stale_or_time_skew":"observed",
+     formula:"(weight_g × purity × XAU_USD_per_troy_oz × USD_IRR_per_USD / 31.1034768) / 10",
+     captured_at:row?.captured_at||null,market_unit:"TOMAN_PER_COIN"
+    });
+   }
+   const newest=[...globalInputs,...fxRows].map((r:any)=>Date.parse(r?.captured_at)).filter(Number.isFinite).sort((a:number,b:number)=>b-a)[0];
+   const ageMs=newest?Date.now()-newest:Infinity;
+   return json({status:globalReady?(ageMs>15*60*1000?"delayed":"live"):"unavailable",updated_at:newest?new Date(newest).toISOString():null,
+    units:{usd_free:"IRR_PER_USD",usd_free_toman:usdToman,xau:"USD_PER_TROY_OZ",iran_market:"TOMAN",fair_value:"TOMAN"},
+    freshness:{max_age_minutes:360,max_source_skew_minutes:30,global_inputs:globalFresh},
+    sources:{usd_free:usd?.payload?.provider||null,xau:xau?.payload?.provider||null,iran_market:"atlas_iran_fx_snapshots"},
+    quotes,comparisons,note:"Computed from stored provider quotes. Missing, stale, future-dated, or unit-unknown inputs do not produce a bubble value. This is intrinsic metal parity, not a guaranteed executable market price."},200,origin);
+  }catch(e){console.error("Iran relative value unavailable",String(e));return json({error:"iran_relative_value_unavailable",status:"unavailable"},503,origin)}
  }
  if(url.pathname.endsWith("/api/us-markets")){
   const groups={indices:["TVC:SPX","NASDAQ:NDX","TVC:DJI","TVC:VIX","TVC:DXY"],mega_cap:["NASDAQ:AAPL","NASDAQ:MSFT","NASDAQ:NVDA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","NASDAQ:TSLA","NASDAQ:AVGO","NASDAQ:AMD","NYSE:BRK.B","NYSE:JPM","NYSE:V","NYSE:UNH"],etfs:["AMEX:SPY","NASDAQ:QQQ","AMEX:DIA","AMEX:IWM","AMEX:GLD","AMEX:SLV","NASDAQ:TLT","AMEX:XLF","AMEX:XLK","AMEX:XLE","AMEX:XLV"],futures:["CME_MINI:ES1!","CME_MINI:NQ1!","CBOT_MINI:YM1!"]};const symbols=Object.values(groups).flat();
