@@ -185,6 +185,29 @@ def _verify_market(
     }
 
 
+def _select_diverse_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Limit any one series from crowding the dashboard snapshot."""
+    by_series: dict[str, list[dict[str, Any]]] = {}
+    for series in TARGET_SERIES:
+        by_series[series] = sorted(
+            (event for event in events if event["series"] == series),
+            key=lambda item: (item["hours_to_close"], -item["volume_total"]),
+        )
+
+    selected: list[dict[str, Any]] = []
+    while len(selected) < MAX_EVENTS:
+        added = False
+        for series in TARGET_SERIES:
+            if by_series[series]:
+                selected.append(by_series[series].pop(0))
+                added = True
+                if len(selected) == MAX_EVENTS:
+                    break
+        if not added:
+            break
+    return selected
+
+
 def collect_macro_snapshot(timeout_sec: int = 10) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     events: list[dict[str, Any]] = []
@@ -202,7 +225,7 @@ def collect_macro_snapshot(timeout_sec: int = 10) -> dict[str, Any]:
         except Exception as exc:
             errors.append({"series": series, "error": type(exc).__name__})
 
-    events.sort(key=lambda item: (item["hours_to_close"], -item["volume_total"]))
+    events = _select_diverse_events(events)
     if events:
         status = "PARTIAL" if errors else "OK"
     else:
@@ -215,7 +238,7 @@ def collect_macro_snapshot(timeout_sec: int = 10) -> dict[str, Any]:
         "status": status,
         "fetched_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "max_quote_age_hours": float(MAX_MARKET_AGE_HOURS),
-        "events": events[:MAX_EVENTS],
+        "events": events,
         "errors": errors,
     }
 
