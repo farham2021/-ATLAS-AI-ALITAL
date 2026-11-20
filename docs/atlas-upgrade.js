@@ -63,7 +63,16 @@ async function refreshTickerFallback(){
    if(!Number.isFinite(price)||price<=0||!Number.isFinite(stamp)||now-stamp*1000>300000||stamp*1000>now+60000)continue;
    const el=document.getElementById('atlas-quote-'+symbol),prev=state.quotes.get(symbol);
    state.quotes.set(symbol,price);updated++;
-   if(el){el.textContent='
+   if(el){
+    el.textContent='$'+price.toLocaleString('en-US',{maximumFractionDigits:price<1?6:price<10?4:2});
+    el.className=prev==null?'atlas-stale':price>prev?'atlas-up':price<prev?'atlas-down':'atlas-stale';
+    el.title='CoinGecko reference · '+new Date(stamp*1000).toISOString();
+   }
+  }
+  if(updated){state.feed='fallback';state.checkedAt=now;renderStatus()}else markFeedStale();
+ }catch(_){markFeedStale()}
+ finally{fallbackPending=false}
+}
 function markFeedStale(){state.feed='warn';renderStatus();for(const el of document.querySelectorAll('#atlas-live-ticker [id^=atlas-quote-]'))el.classList.add('atlas-stale')}
 function reconnect(){clearReconnect();if(state.stopped||document.hidden)return;state.reconnectTimer=setTimeout(()=>{state.reconnectTimer=null;connect()},Math.min(30000,1000*2**Math.min(++state.retry,5)))}
 function connect(){
