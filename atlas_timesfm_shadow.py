@@ -194,8 +194,8 @@ class ShadowFilter:
         actual_close = [float(bar[4]) for bar in actual_bars]
         side = setup["side"]
         stop = float(setup["sl"])
-        model_rejects = min(forecast["q10"]) <= stop if side == "LONG" else max(forecast["q90"]) >= stop
-        rw_rejects = min(rw["q10"]) <= stop if side == "LONG" else max(rw["q90"]) >= stop
+        model_rejects = forecast["q10"][0] <= stop if side == "LONG" else forecast["q90"][0] >= stop
+        rw_rejects = rw["q10"][0] <= stop if side == "LONG" else rw["q90"][0] >= stop
         self.records.append({
             "symbol": setup["symbol"],
             "signal_at": setup["signal_at"],
@@ -280,6 +280,7 @@ def evaluate(
         "bar_interval": "4h",
         "forecast_horizon_hours": HORIZON * 4,
         "baseline_dataset_contract": "same provider-specific 4H perpetual bars, settled funding, and SHA-256 as accepted baseline",
+        "filter_rule": "Reject only when the first 4H marginal close q10 (LONG) or q90 (SHORT) reaches the setup stop; this is not a path-touch probability.",
         "oos_windows": windows,
         "symbols": {},
     }
@@ -362,8 +363,8 @@ def evaluate(
     result["timesfm_package_version"] = importlib.metadata.version("timesfm")
     result["promotion"] = "NOT_AUTOMATIC; compare OOS Net R, drawdown, sample size, and marginal quantile calibration"
     result["quantile_note"] = (
-        "Pointwise close quantiles do not represent the probability of touching a stop anywhere along the 12-bar path. "
-        "Calibration scores use log returns."
+        "The stop filter checks only the first 4H marginal close quantile, not stop touches across the 12-bar path. "
+        "Quantile coverage is evaluated by horizon using log returns."
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.json").write_text(
