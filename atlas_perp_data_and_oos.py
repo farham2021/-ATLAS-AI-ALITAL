@@ -26,6 +26,7 @@ UTC = timezone.utc
 FOUR_HOURS_MS = 4 * 60 * 60 * 1000
 BYBIT_BASE = "https://api.bybit.com"
 OKX_BASE = "https://www.okx.com"
+BINANCE_UM_BASE = "https://fapi.binance.com"
 
 
 class PerpetualDataError(RuntimeError):
@@ -209,7 +210,7 @@ class PerpetualDataFetcher:
         self.retries = retries
         self.sleep = sleep
 
-    def _get_json(self, url: str) -> dict[str, Any]:
+    def _get_json(self, url: str) -> Any:
         last_error: Exception | None = None
         for attempt in range(self.retries):
             req = urllib.request.Request(
@@ -221,12 +222,13 @@ class PerpetualDataFetcher:
                     if response.status != 200:
                         raise PerpetualDataError(f"HTTP_{response.status}")
                     payload = json.loads(response.read().decode("utf-8"))
-                if not isinstance(payload, dict):
-                    raise PerpetualDataError("INVALID_JSON_OBJECT")
-                if "retCode" in payload and int(payload.get("retCode", -1)) != 0:
-                    raise PerpetualDataError(f"BYBIT_{payload.get('retCode')}_{payload.get('retMsg')}")
-                if "code" in payload and str(payload.get("code")) != "0":
-                    raise PerpetualDataError(f"OKX_{payload.get('code')}_{payload.get('msg')}")
+                if not isinstance(payload, (dict, list)):
+                    raise PerpetualDataError("INVALID_JSON_RESPONSE")
+                if isinstance(payload, dict):
+                    if "retCode" in payload and int(payload.get("retCode", -1)) != 0:
+                        raise PerpetualDataError(f"BYBIT_{payload.get('retCode')}_{payload.get('retMsg')}")
+                    if "code" in payload and str(payload.get("code")) != "0":
+                        raise PerpetualDataError(f"EXCHANGE_{payload.get('code')}_{payload.get('msg')}")
                 return payload
             except urllib.error.HTTPError as exc:
                 last_error = exc
@@ -288,6 +290,32 @@ class PerpetualDataFetcher:
             self.sleep(0.12)
         return _parse_rows([result[ts] for ts in sorted(result)], end_ms, okx=True)
 
+    def _binance_candles(self, symbol: str, start_ms: int, end_ms: int) -> list[tuple[int, float, float, float, float, float]]:
+        """Fetch USDⓈ-M linear perpetual 4H klines in ascending pages."""
+        result: dict[int, list[Any]] = {}
+        cursor = start_ms
+        while cursor < end_ms:
+            payload = self._get_json(self._url(BINANCE_UM_BASE, "/fapi/v1/klines", {
+                "symbol": symbol + "USDT", "interval": "4h", "startTime": cursor,
+                "endTime": end_ms - 1, "limit": 1500,
+            }))
+            if not isinstance(payload, list):
+                raise PerpetualDataError("BINANCE_INVALID_KLINE_RESPONSE")
+            if not payload:
+                break
+            for row in payload:
+                ts = int(row[0])
+                if start_ms <= ts < end_ms:
+                    result[ts] = row[:6]
+            newest = max(int(row[0]) for row in payload)
+            if newest < cursor:
+                raise PerpetualDataError("BINANCE_CANDLE_PAGINATION_DID_NOT_ADVANCE")
+            cursor = newest + FOUR_HOURS_MS
+            if len(payload) < 1500:
+                break
+            self.sleep(0.1)
+        return _parse_rows([result[ts] for ts in sorted(result)], end_ms, okx=False)
+
     def _bybit_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
         result: dict[int, float] = {}
         cursor = end_ms - 1
@@ -307,6 +335,33 @@ class PerpetualDataFetcher:
             if oldest >= cursor:
                 raise PerpetualDataError("BYBIT_FUNDING_PAGINATION_DID_NOT_ADVANCE")
             cursor = oldest - 1
+            self.sleep(0.1)
+        return sorted(result.items())
+
+    def _binance_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
+        """Fetch actual USDⓈ-M settled funding events in chronological pages."""
+        result: dict[int, float] = {}
+        cursor = start_ms
+        while cursor < end_ms:
+            payload = self._get_json(self._url(BINANCE_UM_BASE, "/fapi/v1/fundingRate", {
+                "symbol": symbol + "USDT", "startTime": cursor,
+                "endTime": end_ms - 1, "limit": 1000,
+            }))
+            if not isinstance(payload, list):
+                raise PerpetualDataError("BINANCE_INVALID_FUNDING_RESPONSE")
+            if not payload:
+                break
+            for item in payload:
+                ts = int(item["fundingTime"])
+                rate = float(item["fundingRate"])
+                if start_ms <= ts < end_ms and math.isfinite(rate):
+                    result[ts] = rate
+            newest = max(int(item["fundingTime"]) for item in payload)
+            if newest < cursor:
+                raise PerpetualDataError("BINANCE_FUNDING_PAGINATION_DID_NOT_ADVANCE")
+            cursor = newest + 1
+            if len(payload) < 1000:
+                break
             self.sleep(0.1)
         return sorted(result.items())
 
@@ -345,7 +400,7 @@ class PerpetualDataFetcher:
         symbol = _symbol(base_symbol)
         now_ms = now_ms or int(time.time() * 1000)
         errors: list[str] = []
-        sources = ("BYBIT_LINEAR", "OKX_SWAP")
+        sources = ("BYBIT_LINEAR", "OKX_SWAP", "BINANCE_USDM_PERP")
         for provider in sources:
             try:
                 if provider == "BYBIT_LINEAR":
@@ -354,11 +409,18 @@ class PerpetualDataFetcher:
                     }))
                     rows = payload.get("result", {}).get("list", [])
                     bars = _parse_rows(rows, now_ms, okx=False)
-                else:
+                elif provider == "OKX_SWAP":
                     payload = self._get_json(self._url(OKX_BASE, "/api/v5/market/candles", {
                         "instId": f"{symbol}-USDT-SWAP", "bar": "4H", "limit": min(limit, 300),
                     }))
                     bars = _parse_rows(payload.get("data", []), now_ms, okx=True)
+                else:
+                    payload = self._get_json(self._url(BINANCE_UM_BASE, "/fapi/v1/klines", {
+                        "symbol": symbol + "USDT", "interval": "4h", "limit": min(limit, 1500),
+                    }))
+                    if not isinstance(payload, list):
+                        raise PerpetualDataError("BINANCE_INVALID_KLINE_RESPONSE")
+                    bars = _parse_rows(payload, now_ms, okx=False)
                 if len(bars) < min_bars:
                     raise PerpetualDataError(f"INSUFFICIENT_CLOSED_CANDLES_{len(bars)}")
                 if any(right[0] - left[0] != FOUR_HOURS_MS for left, right in zip(bars[-min_bars:], bars[-min_bars + 1:])):
@@ -381,6 +443,7 @@ class PerpetualDataFetcher:
         sources = (
             ("BYBIT_LINEAR", f"{symbol}USDT", self._bybit_candles, self._bybit_funding),
             ("OKX_SWAP", f"{symbol}-USDT-SWAP", self._okx_candles, self._okx_funding),
+            ("BINANCE_USDM_PERP", f"{symbol}USDT", self._binance_candles, self._binance_funding),
         )
         for provider, instrument, candle_fn, funding_fn in sources:
             try:
@@ -418,7 +481,17 @@ class PerpetualDataFetcher:
         if candidates:
             # Preserve the best actual same-exchange snapshot, but its scenario
             # funding cannot be counted as empirical validation evidence.
-            return max(candidates, key=lambda item: (item.funding_complete, len(item.funding_rates)))
+            best = max(candidates, key=lambda item: (item.funding_complete, len(item.funding_rates)))
+            return PerpetualDataset(
+                symbol=best.symbol,
+                provider=best.provider,
+                instrument_id=best.instrument_id,
+                bars=best.bars,
+                funding_rates=best.funding_rates,
+                funding_complete=best.funding_complete,
+                metadata={**best.metadata, "alternate_source_errors": errors},
+                dataset_sha256=best.dataset_sha256,
+            )
         raise PerpetualDataError("NO_COMPLETE_PERPETUAL_CANDLE_SOURCE: " + "; ".join(errors))
 
 
@@ -433,3 +506,4 @@ def fetch_latest_perp_4h(
     min_bars: int = 220,
 ) -> tuple[str, list[tuple[int, float, float, float, float, float]]]:
     return PerpetualDataFetcher().fetch_latest_perp_4h(base_symbol, now_ms, limit, min_bars)
+
