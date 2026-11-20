@@ -18,9 +18,11 @@ export function normalizeUsdIrr(row) {
 export function normalizeTomanMarket(row) {
   if (!row || !finitePositive(row.price)) return null;
   const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
-  const unit = String(payload.unit_canonical || "").toUpperCase();
-  if (unit !== "TOMAN") return null;
-  return Number(row.price);
+  const unit = String(payload.unit_canonical || payload.unit_raw || "").trim().toUpperCase();
+  if (unit === "TOMAN" || unit === "TOMANS" || unit === "IRT" ||
+      unit === "TOMAN_PROVIDER_QUOTE" || unit === "تومان") return Number(row.price);
+  if (unit === "IRR" || unit === "RIAL" || unit === "ریال") return Number(row.price) / 10;
+  return null;
 }
 export function normalizeUsdMetal(row, expectedUnit) {
   if (!row || !finitePositive(row.price)) return null;
