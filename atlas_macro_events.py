@@ -17,17 +17,19 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-API_URL = "https://external-api.kalshi.com/trade-api/v2/markets"
+API_BASE = "https://external-api.kalshi.com/trade-api/v2"
+MARKETS_URL = f"{API_BASE}/markets"
 TARGET_SERIES = {
     "KXFED": "Fed funds rate",
     "KXFEDDECISION": "Fed meeting decision",
     "KXCPI": "US CPI",
     "KXBTC": "Bitcoin hourly range",
 }
-MAX_MARKET_AGE_HOURS = Decimal("6")
 MAX_SPREAD_DOLLARS = Decimal("0.10")
 MAX_EVENTS = 8
-PAGE_SIZE = 100
+MARKETS_PER_SERIES = 100
+ORDERBOOKS_PER_SERIES = 6
+DISPLAY_STALE_AFTER_HOURS = 3.0
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -52,12 +54,9 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _get_markets(series: str, timeout_sec: int, retries: int = 2) -> list[dict[str, Any]]:
-    query = urllib.parse.urlencode(
-        {"series_ticker": series, "status": "open", "limit": PAGE_SIZE}
-    )
+def _get_json(url: str, timeout_sec: int, retries: int = 2) -> dict[str, Any]:
     request = urllib.request.Request(
-        f"{API_URL}?{query}",
+        url,
         headers={
             "Accept": "application/json",
             "User-Agent": "ATLAS-Macro-Event-Risk/1.0",
@@ -73,10 +72,9 @@ def _get_markets(series: str, timeout_sec: int, retries: int = 2) -> list[dict[s
                 if len(raw) > 3_000_000:
                     raise RuntimeError("RESPONSE_TOO_LARGE")
             payload = json.loads(raw.decode("utf-8"))
-            markets = payload.get("markets")
-            if not isinstance(markets, list):
-                raise RuntimeError("INVALID_MARKETS_RESPONSE")
-            return [item for item in markets if isinstance(item, dict)]
+            if not isinstance(payload, dict):
+                raise RuntimeError("INVALID_JSON_OBJECT")
+            return payload
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt < retries:
@@ -84,62 +82,85 @@ def _get_markets(series: str, timeout_sec: int, retries: int = 2) -> list[dict[s
     raise RuntimeError(type(last_error).__name__ if last_error else "FETCH_FAILED")
 
 
-def _price_dollars(market: dict[str, Any], field: str, legacy_field: str) -> Decimal | None:
-    value = _decimal(market.get(field))
-    if value is not None:
-        return value
-    # Compatibility for older API responses that expressed prices in cents.
-    cents = _decimal(market.get(legacy_field))
-    return cents / Decimal("100") if cents is not None else None
+def _get_markets(series: str, timeout_sec: int) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"series_ticker": series, "status": "open", "limit": MARKETS_PER_SERIES}
+    )
+    payload = _get_json(f"{MARKETS_URL}?{query}", timeout_sec)
+    markets = payload.get("markets")
+    if not isinstance(markets, list):
+        raise RuntimeError("INVALID_MARKETS_RESPONSE")
+    return [item for item in markets if isinstance(item, dict)]
 
 
-def _volume(market: dict[str, Any], field: str, legacy_field: str) -> Decimal | None:
-    value = _decimal(market.get(field))
-    return value if value is not None else _decimal(market.get(legacy_field))
+def _market_candidates(
+    markets: list[dict[str, Any]], now: datetime
+) -> list[dict[str, Any]]:
+    candidates: list[tuple[Decimal, Decimal, dict[str, Any]]] = []
+    for market in markets:
+        status = str(market.get("status") or "").lower()
+        if status in {"closed", "settled", "paused", "unopened", "initialized"}:
+            continue
+        if market.get("market_type") not in (None, "binary"):
+            continue
+        close_time = _timestamp(market.get("close_time"))
+        volume = _decimal(market.get("volume_fp", market.get("volume")))
+        if close_time is None or close_time <= now or volume is None or volume <= 0:
+            continue
+        hours_left = Decimal(str((close_time - now).total_seconds())) / Decimal("3600")
+        candidates.append((hours_left, -volume, market))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in candidates[:ORDERBOOKS_PER_SERIES]]
+
+
+def _best_level(levels: Any) -> tuple[Decimal, Decimal] | None:
+    if not isinstance(levels, list):
+        return None
+    valid: list[tuple[Decimal, Decimal]] = []
+    for level in levels:
+        if not isinstance(level, (list, tuple)) or len(level) < 2:
+            continue
+        price, size = _decimal(level[0]), _decimal(level[1])
+        if price is not None and size is not None and size > 0:
+            valid.append((price, size))
+    return max(valid, key=lambda item: item[0]) if valid else None
+
+
+def _get_orderbook(
+    ticker: str, timeout_sec: int
+) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
+    safe_ticker = urllib.parse.quote(ticker, safe="-")
+    payload = _get_json(f"{MARKETS_URL}/{safe_ticker}/orderbook", timeout_sec)
+    orderbook = payload.get("orderbook_fp")
+    if not isinstance(orderbook, dict):
+        return None
+    yes_bid = _best_level(orderbook.get("yes_dollars"))
+    no_bid = _best_level(orderbook.get("no_dollars"))
+    if yes_bid is None or no_bid is None:
+        return None
+    # Kalshi returns bids for both sides. In a binary market, YES ask = 1 - NO bid.
+    yes_ask = Decimal("1") - no_bid[0]
+    return yes_bid[0], yes_bid[1], yes_ask, no_bid[1]
 
 
 def _verify_market(
     market: dict[str, Any],
     series: str,
     series_label: str,
+    book: tuple[Decimal, Decimal, Decimal, Decimal],
     now: datetime,
 ) -> dict[str, Any] | None:
-    status = str(market.get("status") or "").lower()
-    if status in {"closed", "settled", "paused", "unopened", "initialized"}:
+    bid, bid_size, ask, ask_size = book
+    if not (Decimal("0.01") <= bid <= ask <= Decimal("0.99")):
+        return None
+    total_volume = _decimal(market.get("volume_fp", market.get("volume")))
+    if total_volume is None or total_volume <= 0 or bid_size <= 0 or ask_size <= 0:
         return None
 
-    bid = _price_dollars(market, "yes_bid_dollars", "yes_bid")
-    ask = _price_dollars(market, "yes_ask_dollars", "yes_ask")
-    if bid is None or ask is None or not (
-        Decimal("0.01") <= bid <= ask <= Decimal("0.99")
-    ):
-        return None
-
-    # Require a live two-sided quote with size, nonzero traded volume, and a
-    # recent exchange update. Total volume is used as the nonzero eligibility
-    # check; 24-hour volume is also emitted for inspection.
-    bid_size = _volume(market, "yes_bid_size_fp", "yes_bid_size")
-    ask_size = _volume(market, "yes_ask_size_fp", "yes_ask_size")
-    total_volume = _volume(market, "volume_fp", "volume")
-    if (
-        bid_size is None
-        or ask_size is None
-        or bid_size <= 0
-        or ask_size <= 0
-        or total_volume is None
-        or total_volume <= 0
-    ):
-        return None
-
-    updated = _timestamp(market.get("updated_time"))
     close_time = _timestamp(market.get("close_time"))
-    if updated is None or close_time is None:
+    if close_time is None or close_time <= now:
         return None
-    age_hours = Decimal(str((now - updated).total_seconds())) / Decimal("3600")
     hours_to_close = Decimal(str((close_time - now).total_seconds())) / Decimal("3600")
-    if age_hours < 0 or age_hours > MAX_MARKET_AGE_HOURS or hours_to_close <= 0:
-        return None
-
     spread = ask - bid
     midpoint = (bid + ask) / Decimal("2")
     probability_pct = midpoint * Decimal("100")
@@ -150,7 +171,7 @@ def _verify_market(
         hours_to_close <= Decimal("24")
         and Decimal("20") <= probability_pct <= Decimal("80")
     )
-    volume_24h = _volume(market, "volume_24h_fp", "volume_24h")
+    volume_24h = _decimal(market.get("volume_24h_fp", market.get("volume_24h")))
     title = str(market.get("title") or "").strip()
     subtitle = str(market.get("subtitle") or market.get("yes_sub_title") or "").strip()
     if subtitle and subtitle.lower() not in title.lower():
@@ -175,7 +196,7 @@ def _verify_market(
         "yes_ask_size": float(ask_size),
         "hours_to_close": round(float(hours_to_close), 2),
         "close_time_utc": close_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "updated_at_utc": updated.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "quote_snapshot_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "risk_flag": "HIGH_EVENT_RISK" if uncertain_near_expiry else "NORMAL",
         "risk_basis": (
             "close_within_24h_and_yes_mid_between_20_and_80_percent"
@@ -193,7 +214,6 @@ def _select_diverse_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]
             (event for event in events if event["series"] == series),
             key=lambda item: (item["hours_to_close"], -item["volume_total"]),
         )
-
     selected: list[dict[str, Any]] = []
     while len(selected) < MAX_EVENTS:
         added = False
@@ -209,7 +229,7 @@ def _select_diverse_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def collect_macro_snapshot(timeout_sec: int = 10) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
+    started = datetime.now(timezone.utc)
     events: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     successful_series = 0
@@ -218,26 +238,40 @@ def collect_macro_snapshot(timeout_sec: int = 10) -> dict[str, Any]:
         try:
             markets = _get_markets(series, timeout_sec)
             successful_series += 1
-            for market in markets:
-                verified = _verify_market(market, series, label, now)
-                if verified is not None:
-                    events.append(verified)
+            for market in _market_candidates(markets, started):
+                ticker = str(market.get("ticker") or "")
+                if not ticker:
+                    continue
+                try:
+                    book = _get_orderbook(ticker, timeout_sec)
+                    if book is None:
+                        continue
+                    snapshot_time = datetime.now(timezone.utc)
+                    verified = _verify_market(market, series, label, book, snapshot_time)
+                    if verified is not None:
+                        events.append(verified)
+                except Exception:
+                    errors.append({"series": series, "error": "ORDERBOOK_FETCH_FAILED"})
         except Exception as exc:
             errors.append({"series": series, "error": type(exc).__name__})
 
     events = _select_diverse_events(events)
     if events:
         status = "PARTIAL" if errors else "OK"
+    elif errors and successful_series == 0:
+        status = "UNAVAILABLE"
+    elif errors:
+        status = "DEGRADED"
     else:
-        status = "UNAVAILABLE" if successful_series == 0 else "EMPTY"
+        status = "EMPTY"
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "provider": "Kalshi public market-data API",
-        "source_url": API_URL,
+        "source_url": API_BASE,
         "status": status,
-        "fetched_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "max_quote_age_hours": float(MAX_MARKET_AGE_HOURS),
+        "fetched_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "display_stale_after_hours": DISPLAY_STALE_AFTER_HOURS,
         "events": events,
         "errors": errors,
     }
