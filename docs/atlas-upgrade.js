@@ -98,36 +98,3 @@ window.addEventListener('beforeunload',()=>{state.stopped=true;clearReconnect();
 setInterval(()=>{if(state.lastSeen&&Date.now()-state.lastSeen>60000)markFeedStale()},15000);
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
-+price.toLocaleString('en-US',{maximumFractionDigits:price<1?6:price<10?4:2});el.className=prev==null?'atlas-stale':price>prev?'atlas-up':price<prev?'atlas-down':'atlas-stale';el.title='CoinGecko reference · '+new Date(stamp*1000).toISOString()}
-  }
-  if(updated){state.feed='fallback';state.checkedAt=now;renderStatus()}
-  else markFeedStale();
- }catch(_){markFeedStale()}
- finally{fallbackPending=false}
-}
-function clearReconnect(){if(state.reconnectTimer!==null){clearTimeout(state.reconnectTimer);state.reconnectTimer=null}}
-function markFeedStale(){state.feed='warn';renderStatus();for(const el of document.querySelectorAll('#atlas-live-ticker [id^=atlas-quote-]'))el.classList.add('atlas-stale')}
-function reconnect(){clearReconnect();if(state.stopped||document.hidden)return;state.reconnectTimer=setTimeout(()=>{state.reconnectTimer=null;connect()},Math.min(30000,1000*2**Math.min(++state.retry,5)))}
-function connect(){
- if(state.stopped||document.hidden||state.ws&&(state.ws.readyState===0||state.ws.readyState===1))return;
- clearReconnect();
- try{
-  const ws=new WebSocket(EXCHANGE);state.ws=ws;
-  ws.onopen=()=>{if(state.ws!==ws)return;state.retry=0;state.lastSeen=0;markFeedStale()};
-  ws.onmessage=e=>{if(state.ws!==ws)return;try{
-   const data=JSON.parse(e.data).data;if(!data?.s||!data?.c)return;
-   const symbol=data.s.toUpperCase().replace(/USDT$/,'');if(!SYMBOLS.includes(symbol))return;
-   const price=Number(data.c);if(!Number.isFinite(price)||price<=0)return;
-   const node=document.getElementById('atlas-quote-'+symbol),prev=state.quotes.get(symbol);
-   state.quotes.set(symbol,price);state.lastSeen=Date.now();state.feed='ok';renderStatus();
-   if(node){node.textContent='$'+price.toLocaleString('en-US',{maximumFractionDigits:price<1?6:price<10?4:2});node.className=prev==null?'':price>prev?'atlas-up':price<prev?'atlas-down':''}
-  }catch(_){}};
-  ws.onerror=()=>{if(state.ws===ws)markFeedStale()};
-  ws.onclose=()=>{if(state.ws!==ws)return;state.ws=null;markFeedStale();reconnect()};
- }catch(_){state.ws=null;markFeedStale();reconnect()}
-}
-document.addEventListener('visibilitychange',()=>{if(document.hidden){clearReconnect();if(state.ws){const ws=state.ws;state.ws=null;ws.close()}markFeedStale()}else{connect();checkHealth()}});
-window.addEventListener('beforeunload',()=>{state.stopped=true;clearReconnect();if(state.ws)state.ws.close()});
-setInterval(()=>{if(state.lastSeen&&Date.now()-state.lastSeen>60000)markFeedStale()},15000);
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
-})();
