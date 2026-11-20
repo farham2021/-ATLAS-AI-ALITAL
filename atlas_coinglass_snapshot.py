@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed public-safe CoinGlass derivatives snapshot for ATLAS Pages."""
 from __future__ import annotations
-import json, os, sys, time, urllib.error, urllib.parse, urllib.request
+import json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,13 +24,20 @@ def _fetch(path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
             with urllib.request.urlopen(req, timeout=12) as response:
                 if response.status != 200: raise RuntimeError(f"HTTP_{response.status}")
                 payload = json.loads(response.read().decode("utf-8"))
-            if not isinstance(payload, dict) or str(payload.get("code")) != "0":
-                raise RuntimeError("COINGLASS_API_ERROR")
+            if not isinstance(payload, dict):
+                raise RuntimeError("INVALID_JSON_OBJECT")
+            if str(payload.get("code")) != "0":
+                code = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("code", "UNKNOWN")))[:32] or "UNKNOWN"
+                raise RuntimeError("COINGLASS_CODE_" + code)
             return payload
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
-            error = exc
+        except urllib.error.HTTPError as exc:
+            error = RuntimeError("HTTP_" + str(exc.code))
             if attempt < 2: time.sleep(0.5 * (attempt + 1))
-    raise RuntimeError(type(error).__name__ if error else "FETCH_FAILED")
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+            error = RuntimeError(str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__)
+            if attempt < 2: time.sleep(0.5 * (attempt + 1))
+    message = re.sub(r"[^A-Za-z0-9_:-]", "_", str(error or "FETCH_FAILED"))[:80]
+    raise RuntimeError(message or "FETCH_FAILED")
 
 def _num(value: Any) -> float | None:
     try:
@@ -69,11 +76,13 @@ def collect() -> dict[str, Any]:
                       "next_funding_time_ms":_num(x.get("next_funding_time"))}
                 row["status"]="OK" if row["open_interest_usd"] is not None or row["funding_by_exchange"] else "UNAVAILABLE"
                 good += row["status"]=="OK"
-            except Exception as exc: row["error"]=type(exc).__name__
+            except Exception as exc:
+                row["error"] = re.sub(r"[^A-Za-z0-9_:-]", "_", str(exc))[:80] or type(exc).__name__
             result["symbols"][symbol]=row
         result["status"]="OK" if good==len(SYMBOLS) else ("PARTIAL" if good else "UNAVAILABLE")
         if not good: result["error"]="NO_VERIFIED_SYMBOL_DATA"
-    except Exception as exc: result["error"]=type(exc).__name__
+    except Exception as exc:
+        result["error"] = re.sub(r"[^A-Za-z0-9_:-]", "_", str(exc))[:80] or type(exc).__name__
     return result
 
 def main() -> int:
