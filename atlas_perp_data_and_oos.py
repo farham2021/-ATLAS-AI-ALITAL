@@ -9,7 +9,9 @@ exchange endpoints retain less history than the price-candle endpoints.
 from __future__ import annotations
 
 import calendar
+import csv
 import hashlib
+import io
 import json
 import math
 import statistics
@@ -17,8 +19,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -211,6 +214,9 @@ class PerpetualDataFetcher:
         self.retries = retries
         self.sleep = sleep
         self.bybit_hosts_used: set[str] = set()
+        self.okx_funding_sources: set[str] = set()
+        self.okx_funding_archive_files: set[str] = set()
+        self.okx_funding_errors: list[str] = []
 
     def _get_json(self, url: str) -> Any:
         last_error: Exception | None = None
@@ -387,28 +393,183 @@ class PerpetualDataFetcher:
             self.sleep(0.1)
         return sorted(result.items())
 
+    @staticmethod
+    def _next_month(value: datetime) -> datetime:
+        if value.month == 12:
+            return value.replace(year=value.year + 1, month=1)
+        return value.replace(month=value.month + 1)
+
+    def _okx_archive_bytes(self, url: str) -> bytes:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != "static.okx.com":
+            raise PerpetualDataError("OKX_ARCHIVE_UNTRUSTED_DOWNLOAD_HOST")
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "ATLAS-Quant-Engine/2.2", "Accept": "application/zip"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_sec) as response:
+                    if response.status != 200:
+                        raise PerpetualDataError(f"OKX_ARCHIVE_HTTP_{response.status}")
+                    content = response.read(64 * 1024 * 1024 + 1)
+                if len(content) > 64 * 1024 * 1024:
+                    raise PerpetualDataError("OKX_ARCHIVE_FILE_TOO_LARGE")
+                if not content.startswith(b"PK"):
+                    raise PerpetualDataError("OKX_ARCHIVE_NOT_ZIP")
+                return content
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code < 500 and exc.code != 429:
+                    break
+            except (OSError, ValueError, PerpetualDataError) as exc:
+                last_error = exc
+                if isinstance(exc, PerpetualDataError) and not str(exc).startswith("OKX_ARCHIVE_HTTP_429"):
+                    break
+            if attempt + 1 < self.retries:
+                self.sleep(min(2 ** attempt, 8))
+        raise PerpetualDataError(f"OKX_ARCHIVE_DOWNLOAD_FAILED: {last_error}")
+
+    @staticmethod
+    def _parse_okx_funding_archive(content: bytes, start_ms: int, end_ms: int) -> dict[int, float]:
+        result: dict[int, float] = {}
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                damaged = archive.testzip()
+                if damaged:
+                    raise PerpetualDataError("OKX_ARCHIVE_CRC_FAILED")
+                csv_names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+                if not csv_names:
+                    raise PerpetualDataError("OKX_ARCHIVE_CSV_MISSING")
+                for name in csv_names:
+                    with archive.open(name) as source:
+                        text = source.read().decode("utf-8-sig")
+                    rows = csv.reader(io.StringIO(text))
+                    header = next(rows, None)
+                    if not header:
+                        continue
+                    normalized = [
+                        "".join(ch for ch in field.strip().lower() if ch.isalnum())
+                        for field in header
+                    ]
+                    time_keys = {"fundingtime", "fundingtimestamp", "funding_time", "timestamp", "time", "ts", "settlementtime"}
+                    rate_keys = {"fundingrate", "realizedrate", "realfundingrate", "funding_rate", "rate"}
+                    time_idx = next((i for i, key in enumerate(normalized) if key in time_keys), None)
+                    rate_idx = next((i for i, key in enumerate(normalized) if key in rate_keys), None)
+                    if time_idx is None or rate_idx is None:
+                        raise PerpetualDataError("OKX_ARCHIVE_UNRECOGNIZED_CSV_HEADER")
+                    for row in rows:
+                        if max(time_idx, rate_idx) >= len(row):
+                            continue
+                        try:
+                            ts = int(row[time_idx].strip())
+                            rate = float(row[rate_idx].strip())
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        if ts < 1_000_000_000_000 or not math.isfinite(rate) or abs(rate) >= 1:
+                            continue
+                        if start_ms <= ts < end_ms:
+                            previous = result.get(ts)
+                            if previous is not None and not math.isclose(previous, rate, rel_tol=1e-12, abs_tol=1e-15):
+                                raise PerpetualDataError("OKX_ARCHIVE_CONFLICTING_DUPLICATE_FUNDING")
+                            result[ts] = rate
+        except PerpetualDataError:
+            raise
+        except (OSError, UnicodeError, zipfile.BadZipFile, csv.Error) as exc:
+            raise PerpetualDataError(f"OKX_ARCHIVE_PARSE_FAILED: {type(exc).__name__}") from exc
+        return result
+
+    def _okx_archive_funding(self, symbol: str, start_ms: int, end_ms: int) -> dict[int, float]:
+        """Fetch OKX's official monthly settled-funding archive for one USDT swap family."""
+        utc8 = timezone(timedelta(hours=8))
+        first_local = datetime.fromtimestamp(start_ms / 1000, utc8).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        last_local = datetime.fromtimestamp((end_ms - 1) / 1000, utc8).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        months: list[datetime] = []
+        month = first_local
+        while month <= last_local:
+            months.append(month)
+            month = self._next_month(month)
+
+        family = f"{symbol}-USDT"
+        collected: dict[int, float] = {}
+        for offset in range(0, len(months), 9):
+            chunk = months[offset:offset + 9]
+            chunk_end = self._next_month(chunk[-1])
+            payload = self._get_json(self._url(OKX_BASE, "/api/v5/public/market-data-history", {
+                "module": "3",
+                "instType": "SWAP",
+                "instFamilyList": family,
+                "dateAggrType": "monthly",
+                "begin": int(chunk[0].timestamp() * 1000),
+                "end": int(chunk_end.timestamp() * 1000) - 1,
+            }))
+            urls: set[str] = set()
+            for batch in payload.get("data", []):
+                for detail in batch.get("details", []):
+                    if detail.get("instFamily") not in (None, "", family):
+                        continue
+                    for item in detail.get("groupDetails", []):
+                        url = item.get("url")
+                        if url:
+                            urls.add(str(url))
+            for url in sorted(urls):
+                if url in self.okx_funding_archive_files:
+                    continue
+                raw_zip = self._okx_archive_bytes(url)
+                parsed = self._parse_okx_funding_archive(raw_zip, start_ms, end_ms)
+                for ts, rate in parsed.items():
+                    previous = collected.get(ts)
+                    if previous is not None and not math.isclose(previous, rate, rel_tol=1e-12, abs_tol=1e-15):
+                        raise PerpetualDataError("OKX_ARCHIVE_CONFLICTING_DUPLICATE_FUNDING")
+                    collected[ts] = rate
+                self.okx_funding_archive_files.add(url)
+                self.sleep(0.05)
+        if collected:
+            self.okx_funding_sources.add("OKX_OFFICIAL_MONTHLY_ARCHIVE")
+        return collected
+
     def _okx_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
         instrument = f"{symbol}-USDT-SWAP"
         result: dict[int, float] = {}
-        cursor = end_ms
-        while cursor > start_ms:
-            payload = self._get_json(self._url(OKX_BASE, "/api/v5/public/funding-rate-history", {
-                "instId": instrument, "after": cursor, "limit": 400,
-            }))
-            rows = payload.get("data", [])
-            if not rows:
-                break
-            for row in rows:
-                ts = int(row["fundingTime"])
-                raw_rate = row.get("realizedRate") or row.get("fundingRate")
-                rate = float(raw_rate)
-                if start_ms <= ts < end_ms and math.isfinite(rate):
-                    result[ts] = rate
-            oldest = min(int(row["fundingTime"]) for row in rows)
-            if oldest >= cursor:
-                raise PerpetualDataError("OKX_FUNDING_PAGINATION_DID_NOT_ADVANCE")
-            cursor = oldest - 1
-            self.sleep(0.12)
+        try:
+            cursor = end_ms
+            while cursor > start_ms:
+                payload = self._get_json(self._url(OKX_BASE, "/api/v5/public/funding-rate-history", {
+                    "instId": instrument, "after": cursor, "limit": 400,
+                }))
+                rows = payload.get("data", [])
+                if not rows:
+                    break
+                for row in rows:
+                    ts = int(row["fundingTime"])
+                    raw_rate = row.get("realizedRate") or row.get("fundingRate")
+                    rate = float(raw_rate)
+                    if start_ms <= ts < end_ms and math.isfinite(rate):
+                        result[ts] = rate
+                oldest = min(int(row["fundingTime"]) for row in rows)
+                if oldest >= cursor:
+                    raise PerpetualDataError("OKX_FUNDING_PAGINATION_DID_NOT_ADVANCE")
+                cursor = oldest - 1
+                self.sleep(0.12)
+            if result:
+                self.okx_funding_sources.add("OKX_PUBLIC_FUNDING_RATE_HISTORY")
+        except Exception as exc:
+            self.okx_funding_errors.append(f"REST:{type(exc).__name__}:{str(exc)[:120]}")
+
+        try:
+            archive_rates = self._okx_archive_funding(symbol, start_ms, end_ms)
+            for ts, rate in archive_rates.items():
+                previous = result.get(ts)
+                if previous is not None and not math.isclose(previous, rate, rel_tol=1e-12, abs_tol=1e-15):
+                    raise PerpetualDataError("OKX_REST_ARCHIVE_FUNDING_MISMATCH")
+                result[ts] = rate
+        except Exception as exc:
+            self.okx_funding_errors.append(f"ARCHIVE:{type(exc).__name__}:{str(exc)[:160]}")
         return sorted(result.items())
 
     def fetch_latest_perp_4h(
@@ -477,6 +638,9 @@ class PerpetualDataFetcher:
                     "provider": provider,
                     "instrument_id": instrument,
                     "bybit_api_hosts": sorted(self.bybit_hosts_used) if provider == "BYBIT_LINEAR" else [],
+                    "okx_funding_sources": sorted(self.okx_funding_sources) if provider == "OKX_SWAP" else [],
+                    "okx_funding_archive_file_count": len(self.okx_funding_archive_files) if provider == "OKX_SWAP" else 0,
+                    "okx_funding_errors": self.okx_funding_errors if provider == "OKX_SWAP" else [],
                     "market_type": "LINEAR_USDT_PERPETUAL",
                     "timeframe": "4h",
                     "start_ms": start_ms,
