@@ -247,22 +247,31 @@ Deno.serve(async(req:Request)=>{
     "atlas_iran_fx_snapshots?select=symbol,price,captured_at&order=captured_at.desc&limit=100",
     "atlas_deep_4h_snapshots?select=symbol,asset_group,direction,confidence,price,captured_at,public_signal,decision_state&order=captured_at.desc&limit=40"
    ];
-   const [runs,alerts,cryptorows,iranrows,mtfrows,opportunities,metalrows,fxrows,deepRows]=await Promise.all(queries.map(q=>readTable(base,key,q)));
+   const results=await Promise.all(queries.map(async query=>{
+    const source=query.split("?")[0];
+    try{const rows=await readTable(base,key,query);return {source,rows:Array.isArray(rows)?rows:[],ok:Array.isArray(rows)}}
+    catch(error){console.error("ATLAS overview source unavailable",source,String(error));return {source,rows:[],ok:false}}
+   }));
+   const [runs,alerts,cryptorows,iranrows,mtfrows,opportunities,metalrows,fxrows,deepRows]=results.map(x=>x.rows);
+   const unavailable_sources=results.filter(x=>!x.ok).map(x=>x.source);
    const unique=(rows:any[],limit:number)=>{const seen=new Set<string>();return rows.filter((x:any)=>{const k=String(x.symbol||"");if(!k||seen.has(k))return false;seen.add(k);return true}).slice(0,limit)};
    const cycles=["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].map(cycle=>({cycle,completed_at:runs.find((r:any)=>r.cycle===cycle)?.completed_at||null}));
-   return json({checked_at:new Date().toISOString(),cycles,alerts,crypto:unique(cryptorows,100),iran:unique(iranrows,100),mtf:unique(mtfrows,100),metals:unique([...metalrows,...fxrows].sort((a:any,b:any)=>String(b.captured_at).localeCompare(String(a.captured_at))),40),deep:deepRows,opportunities});
+   return json({status:unavailable_sources.length?"DEGRADED":"OK",unavailable_sources,checked_at:new Date().toISOString(),cycles,alerts,crypto:unique(cryptorows,100),iran:unique(iranrows,100),mtf:unique(mtfrows,100),metals:unique([...metalrows,...fxrows].sort((a:any,b:any)=>String(b.captured_at).localeCompare(String(a.captured_at))),40),deep:deepRows,opportunities});
   }catch(e){console.error("ATLAS overview unavailable",String(e));return json({error:"data_unavailable"},503)}
  }
  if(url.pathname.endsWith("/api/status")){
   const base=Deno.env.get("SUPABASE_URL")||"";const key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
   if(!base||!key)return json({error:"service_unavailable"},503);
   try{
-   const [runs,alerts]=await Promise.all([
-    readTable(base,key,"atlas_scheduler_runs?select=cycle,status,completed_at&status=eq.DONE&order=completed_at.desc&limit=120"),
-    readTable(base,key,"atlas_free_alert_events?select=symbol,direction,timeframe,severity,confidence,timestamp&telegram_status=eq.SENT&order=timestamp.desc&limit=12")
-   ]);
+   const statusSources=[
+    ["atlas_scheduler_runs","atlas_scheduler_runs?select=cycle,status,completed_at&status=eq.DONE&order=completed_at.desc&limit=120"],
+    ["atlas_free_alert_events","atlas_free_alert_events?select=symbol,direction,timeframe,severity,confidence,timestamp&telegram_status=eq.SENT&order=timestamp.desc&limit=12"]
+   ];
+   const statusResults=await Promise.all(statusSources.map(async ([source,query])=>{try{const rows=await readTable(base,key,query);return {source,rows:Array.isArray(rows)?rows:[],ok:Array.isArray(rows)}}catch(error){console.error("ATLAS status source unavailable",source,String(error));return {source,rows:[],ok:false}}}));
+   const [runs,alerts]=statusResults.map(x=>x.rows);
+   const unavailable_sources=statusResults.filter(x=>!x.ok).map(x=>x.source);
    const cycles=["HOURLY","DEEP4H","DAILY16","NIGHTLY23"].map(cycle=>({cycle,completed_at:runs.find((r:any)=>r.cycle===cycle)?.completed_at||null}));
-   return json({checked_at:new Date().toISOString(),cycles,alerts:alerts.map((r:any)=>({symbol:r.symbol,direction:r.direction,timeframe:r.timeframe,severity:r.severity,confidence:r.confidence,timestamp:r.timestamp}))});
+   return json({status:unavailable_sources.length?"DEGRADED":"OK",unavailable_sources,checked_at:new Date().toISOString(),cycles,alerts:alerts.map((r:any)=>({symbol:r.symbol,direction:r.direction,timeframe:r.timeframe,severity:r.severity,confidence:r.confidence,timestamp:r.timestamp}))});
   }catch(e){console.error("ATLAS web data unavailable",String(e));return json({error:"data_unavailable"},503)}
  }
  return new Response(HTML,{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"public, max-age=120","X-Content-Type-Options":"nosniff","Content-Security-Policy":"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}});
