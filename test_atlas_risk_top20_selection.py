@@ -13,4 +13,11 @@ class TestSelection(unittest.TestCase):
   result=select([])
   self.assertEqual(len(result),10)
   self.assertTrue(all(r["level"]=="NONE" for _,r in result))
+class TestCompatibility(unittest.TestCase):
+ def test_legacy_import_points_to_package(self):
+  import atlas_risk_top20_selection as legacy
+  from atlas import risk_top20_selection as canonical
+  self.assertIs(legacy.select, canonical.select)
+  self.assertIs(legacy.priority, canonical.priority)
+  self.assertEqual(legacy.DESK, canonical.DESK)
 if __name__=="__main__":unittest.main()
