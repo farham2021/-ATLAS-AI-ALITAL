@@ -55,7 +55,7 @@ def append(log_path,fields,kind="alert"):
    if prev and now<prev["ts_utc"]:raise LogIntegrityError("clock moved backwards")
    record={"seq":len(records)+1,"ts_utc":now,"kind":kind,"protocol_version":PROTOCOL_VERSION,**fields,"prev_record_hash":prev["record_hash"] if prev else GENESIS_HASH}
    record["record_hash"]=compute_hash(record)
-   f.seek(0,os.SEEK_END);f.write(json.dumps(record,sort_keys=True,ensure_ascii=False)+"\\n");f.flush();os.fsync(f.fileno())
+   f.seek(0,os.SEEK_END);f.write(json.dumps(record,sort_keys=True,ensure_ascii=False)+"\n");f.flush();os.fsync(f.fileno())
    return record
   finally:
    if fcntl:fcntl.flock(f,fcntl.LOCK_UN)
