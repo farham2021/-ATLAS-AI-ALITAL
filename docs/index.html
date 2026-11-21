@@ -60,9 +60,24 @@ async function metalAnalysis(){
  if(!sym){out.replaceChildren(node('div',currentLang==='en'?'No metal symbols found.':'نماد فلزی در داده‌ها یافت نشد.','warn'));return}
  out.replaceChildren(node('div',currentLang==='en'?'Loading recorded observations…':'در حال بررسی داده‌های واقعی ثبت‌شده…'));
  try{
-  const res=await fetch(BASE+'/api/metals-analysis?symbol='+encodeURIComponent(sym),{cache:'no-store',signal:AbortSignal.timeout(18000)});
-  if(!res.ok)throw Error('HTTP '+res.status);
-  const d=await res.json();if(requestId!==metalAnalysisRequest)return;const hours={'1h':1,'4h':4,'12h':12,'24h':24,'1w':168}[tf];
+  // A transient Edge Function 503 must not strand the panel in loading state.
+  // Retry only transport errors and 5xx; never invent or cache market prices.
+  let d, lastError;
+  for(let attempt=0;attempt<3;attempt++){
+   try{
+    const res=await fetch(BASE+'/api/metals-analysis?symbol='+encodeURIComponent(sym),{cache:'no-store',signal:AbortSignal.timeout(7000)});
+    if(!res.ok)throw Error('HTTP '+res.status);
+    d=await res.json();
+    if(d.symbol!==sym)throw Error('Unexpected metal symbol');
+    break;
+   }catch(err){
+    lastError=err;
+    if(requestId!==metalAnalysisRequest)return;
+    if(attempt===2||(/HTTP (4\\d\\d)/.test(String(err.message||err))))throw err;
+    await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));
+   }
+  }
+  if(!d)throw lastError||Error('No metal observations');if(requestId!==metalAnalysisRequest)return;const hours={'1h':1,'4h':4,'12h':12,'24h':24,'1w':168}[tf];
   const c=(d.changes||[]).find(x=>x.hours===hours);
   const isEn=currentLang==='en';
   const title=(isEn?'Recorded price: ':'قیمت ثبت‌شده: ')+(d.latest_price===null?'—':num(d.latest_price))+' '+d.unit;
