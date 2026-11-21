@@ -1,0 +1,57 @@
+name: ATLAS Quality Gate
+
+on:
+  pull_request:
+    paths:
+      - "**.py"
+      - "supabase/functions/**"
+      - "atlas-dashboard.html"
+      - "assets/**"
+      - ".github/workflows/quality.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "supabase/functions/**"
+      - "atlas-dashboard.html"
+      - "assets/**"
+      - ".github/workflows/quality.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install runtime requirements
+        run: python -m pip install -r requirements.txt
+      - name: Python compile
+        run: python -m py_compile bot.py atlas_schedule_guard.py atlas_futures_backtest_18m.py atlas_futures_costs.py
+      - name: Offline safety tests
+        run: python -m unittest -v test_atlas_futures_png.py test_atlas_scheduler_safety.py test_atlas_telegram_receipts.py
+      - name: Public dashboard contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          html = Path("atlas-dashboard.html").read_text(encoding="utf-8")
+          edge = Path("supabase/functions/atlas-web/index.ts").read_text(encoding="utf-8")
+          assert 'Research &amp; Paper Trading Only' in html
+          assert 'fa-IR-u-ca-persian' in html
+          assert 'source_verified' in html
+          assert '["TOP10","PERSONAL"]' in edge
+          assert 'source_verified' in edge
+          assert 'atlas_market_snapshots?select=symbol,asset,price,captured_at,payload' in edge
+          assert 'ATLAS_LIVE_TRADING' in Path(".github/workflows/atlas.yml").read_text(encoding="utf-8")
+          PY
