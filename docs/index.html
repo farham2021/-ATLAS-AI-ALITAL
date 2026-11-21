@@ -35,7 +35,7 @@ for(const [group,label,ids] of atlasGroups){const b=node('button',label);b.datas
 $('nav').before(atlasPrimary);$('nav').dataset.atlasGrouped='true';
 tabs.forEach(([id,label])=>{const b=node('button',label);b.dataset.tab=id;b.onclick=()=>switchTab(id);$('nav').append(b)});switchTab('home');
 const coins=['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','TRX','LINK','SUI','AVAX','LTC','DOT','TON','NEAR','TAO','ONDO','ZEC','XMR'];coins.forEach(c=>{const o=node('option',c);o.value=c;$('coin').append(o)});
-function analysis(){const sym=$('coin').value,tf=$('tf').value,r=(state.mtf||[]).find(x=>x.symbol===sym),p=(state.crypto||[]).find(x=>x.symbol===sym);const field={'1h':'h1','4h':'h4','24h':'d1','1w':'w1'}[tf];const trend=field?r?.[field]||'داده موجود نیست':'داده مستقیم این بازه هنوز موجود نیست';$('analysis').replaceChildren(node('div','قیمت ذخیره‌شده: '+num(p?.price)),node('div','روند '+tf+': '+trend),node('div','هم‌سویی چندبازه‌ای: '+(r?.agreement_pct??'—')+'٪'),node('small','زمان ثبت: '+fmt(r?.timestamp||p?.captured_at)))}
+function analysis(){const sym=$('coin').value,tf=$('tf').value,r=(state.mtf||[]).find(x=>x.symbol===sym),p=(state.crypto||[]).find(x=>x.symbol===sym);const field={'1h':'h1','4h':'h4','24h':'d1','1w':'w1'}[tf];const trend=field?r?.[field]||'داده موجود نیست':'داده مستقیم این بازه هنوز موجود نیست';$('analysis').replaceChildren(node('div','قیمت ذخیره‌شده: '+num(p?.price)),node('div','روند '+tf+': '+trend),node('div','هم‌سویی چندبازه‌ای: '+(r&&[r.h1,r.h4,r.d1,r.w1].filter(v=>typeof v==='string'&&/bull|bear|neutral|flat|sideways/i.test(v)).length>=2&&typeof r.agreement_pct==='number'?r.agreement_pct+'٪':'داده کافی نیست')),node('small','زمان ثبت: '+fmt(r?.timestamp||p?.captured_at)))}
 let metalAnalysisRequest=0;
 async function metalAnalysis(){
  const requestId=++metalAnalysisRequest;
@@ -77,9 +77,9 @@ $('analyze').onclick=analysis;$('iranAnalyze').onclick=iranAnalysis;$('refresh')
 async function load(){$('notice').textContent='';try{const r=await fetch(BASE+'/api/overview',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();Object.assign(state,d);if(d.status==='DEGRADED')$('notice').textContent=(currentLang==='en'?'Partial data: unavailable sources — ':'دادهٔ ناقص؛ منابع در دسترس نیستند — ')+(Array.isArray(d.unavailable_sources)?d.unavailable_sources.join(', '):'unknown');$('metrics').replaceChildren(...[['وضعیت موتور','فعال'],['تعداد هشدارهای نمایشی',String(d.alerts.length)],['نمادهای کریپتو',String(d.crypto.length)],['نمادهای بورس ایران',String(d.iran.length)]].map(([a,b])=>{const x=node('article','','card');x.append(node('small',a),node('div',b,'metric'));return x}));
 const cf=x=>[x.cycle,fmt(x.completed_at)];renderRows('cycles',d.cycles,cf);renderRows('allcycles',d.cycles,cf);
 const af=x=>[[x.symbol,x.direction,x.timeframe].filter(Boolean).join(' · '),fmt(x.timestamp),String(x.direction).toLowerCase().includes('bull')?'up':''];renderRows('latest',d.alerts.slice(0,6),af);renderRows('allalerts',d.alerts,af);
-renderRows('cryptolist',d.crypto.slice(0,30),x=>[x.symbol,num(x.price)+' USD · '+fmt(x.captured_at)]);renderRows('iranlist',d.iran.slice(0,35),x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_at)]);
+renderRows('cryptolist',d.crypto.slice(0,30),x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_at)]);renderRows('iranlist',d.iran.slice(0,35),x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_at)]);
 const metals=['XAUUSD','XAGUSD','COPPER','SILVER999_FAIR','GOLD18','COIN_EMAMI','USD_IRR','USDT_IRR'];const visible=(d.metals||[]).filter(x=>metals.includes(x.symbol));
-renderRows('metallist',visible,x=>[x.symbol,num(x.price)+' · '+fmt(x.captured_at)]);
+renderRows('metallist',visible,x=>[x.symbol,num(x.price)+' · '+(x.unit||'واحد تأیید نشده')+' · '+fmt(x.captured_at)]);
 const metalSelect=$('metalSymbol');const previousMetal=metalSelect.value;metalSelect.replaceChildren(...metals.slice(0,6).map(sym=>{const o=node('option',sym);o.value=sym;return o}));if(previousMetal)metalSelect.value=previousMetal;metalAnalysis();
 renderRows('deepreports',(d.deep||[]).slice(0,25),x=>[x.symbol+' · '+(x.asset_group||'')+' · '+(x.direction||'—')+' · '+(x.decision_state||'—'),'اطمینان '+num(x.confidence)+' | قیمت '+num(x.price)+' | '+fmt(x.captured_at)]);
 const deskConfirmedStates=new Set(['CONFIRMED','VALIDATED','EXECUTABLE','READY']);const safeOpportunities=(d.opportunities||[]).filter(x=>{const state=String(x.state||x.lifecycle_state||x.status||'').toUpperCase(),side=String(x.direction||'').toUpperCase(),entry=Number(x.entry),sl=Number(x.sl),tp=Number(x.tp1),confidence=Number(x.confidence),age=Date.now()-Date.parse(x.updated_at||x.timestamp||x.created_at||'');return deskConfirmedStates.has(state)&&Number.isFinite(age)&&age>=-300000&&age<=6*3600000&&[entry,sl,tp,confidence].every(Number.isFinite)&&entry>0&&sl>0&&tp>0&&confidence>=55&&(side==='LONG'?sl<entry&&entry<tp:side==='SHORT'?tp<entry&&entry<sl:false)});renderRows('signals',safeOpportunities,x=>[x.symbol+' · '+x.direction+' · '+(x.state||x.lifecycle_state||x.status),'ورود '+num(x.entry)+' | حدضرر '+num(x.sl)+' | هدف '+num(x.tp1)+' | اطمینان '+num(x.confidence)]);
@@ -314,10 +314,14 @@ async function loadFutures(){
    const a=document.createElement('a');a.href='https://www.tradingview.com/chart/?symbol='+encodeURIComponent('BINANCE:'+String(x.symbol).replace(/USDT$/,'')+'USDT');a.target='_blank';a.rel='noopener noreferrer';a.textContent='TradingView';a.style.cssText='display:inline-block;margin:8px;color:#8dd8ff';
    card.append(title,details,caution,a);panel.append(card);
   }
-  const sel=$('fSymbol');sel.replaceChildren(...futuresSignals.map(x=>{const o=node('option',x.symbol);o.value=x.symbol;return o}));
-  sel.onchange=()=>{const x=futuresSignals.find(x=>x.symbol===sel.value);if(!x)return;
+  const sel=$('fSymbol');
+  const symbols=[...new Set([...futuresSignals,...validated].map(x=>x.symbol).filter(s=>typeof s==='string'&&/^[A-Z0-9]{2,20}$/.test(s)))];
+  sel.replaceChildren(...symbols.map(sym=>{const o=node('option',sym);o.value=sym;return o}));
+  if(!symbols.length){const o=node('option',currentLang==='en'?'No instruments available':'نمادی دریافت نشد');o.value='';sel.append(o)}
+  sel.disabled=!symbols.length;
+  sel.onchange=()=>{const x=futuresSignals.find(x=>x.symbol===sel.value);if(!x){for(const id of ['fEntry','fSl','fTp1','fTp2'])$(id).value='';return;}
    $('fSide').value=x.side;$('fEntry').value=x.entry;$('fSl').value=x.sl;$('fTp1').value=x.tp1;$('fTp2').value=x.tp2??'';};
-  if(futuresSignals.length)sel.onchange();translateUI();
+  sel.onchange();translateUI();
  }catch(e){$('futuresSignals').replaceChildren(node('div',String(e.message),'warn'))}
 }
 function paperData(){return {action:'paper_order',symbol:$('fSymbol').value,side:$('fSide').value,
@@ -438,7 +442,7 @@ $('quantRiskRun').onclick=async()=>{
   const sym=$('quantRiskSymbol').value;
   const res=await fetch(BASE+'/api/quant-risk?symbol='+encodeURIComponent(sym),{cache:'no-store'});
   if(!res.ok)throw Error('HTTP '+res.status);
-  const d=await res.json(),valid=d.status==='ok';
+  const d=await res.json();if($('quantRiskSymbol').value!==sym)return;const valid=['observed','ok'].includes(d.status)&&d.symbol===sym&&d.return_observations>=30&&[d.var95,d.cvar95,d.max_drawdown].every(v=>typeof v==='number'&&Number.isFinite(v)&&v>=0);
   out.replaceChildren();
   const line=(label,value)=>{const el=document.createElement('p');el.textContent=label+': '+value;out.append(el)};
   const number=v=>Number.isFinite(Number(v))&&v!==null?Number(v).toLocaleString('fa-IR'):'ناموجود';
