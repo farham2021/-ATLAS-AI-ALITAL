@@ -1,4 +1,2 @@
-"""Legacy compatibility for shadow-only notification policy."""
-from atlas.delivery_policy_shadow import TEHRAN, CSV_SLOTS, policy
-
-__all__ = ["TEHRAN", "CSV_SLOTS", "policy"]
+"""Legacy compatibility: expose canonical public API."""
+from atlas.delivery_policy_shadow import *  # noqa: F401,F403
