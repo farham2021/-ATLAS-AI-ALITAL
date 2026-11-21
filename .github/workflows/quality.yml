@@ -49,6 +49,10 @@ jobs:
           edge = Path("supabase/functions/atlas-web/index.ts").read_text(encoding="utf-8")
           assert 'Research &amp; Paper Trading Only' in html
           assert 'fa-IR-u-ca-persian' in html
+          desk = Path('docs/index.html').read_text(encoding='utf-8')
+          assert "$('nav').hidden=visible<=1" in desk
+          assert "'operations']]]" in desk
+          assert 'Not Financial Advice' in desk
           assert 'source_verified' in html
           assert '["TOP10","PERSONAL"]' in edge
           assert 'source_verified' in edge
