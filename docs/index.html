@@ -73,7 +73,7 @@ async function metalAnalysis(){
    }catch(err){
     lastError=err;
     if(requestId!==metalAnalysisRequest)return;
-    if(attempt===2||(/HTTP (4\\d\\d)/.test(String(err.message||err))))throw err;
+    if(attempt===2||String(err.message||err).startsWith('HTTP 4'))throw err;
     await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));
    }
   }
