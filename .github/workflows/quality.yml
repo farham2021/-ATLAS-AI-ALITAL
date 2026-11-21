@@ -6,6 +6,7 @@ on:
       - "**.py"
       - "supabase/functions/**"
       - "atlas-dashboard.html"
+      - "docs/index.html"
       - "assets/**"
       - ".github/workflows/quality.yml"
   push:
@@ -14,6 +15,7 @@ on:
       - "**.py"
       - "supabase/functions/**"
       - "atlas-dashboard.html"
+      - "docs/index.html"
       - "assets/**"
       - ".github/workflows/quality.yml"
   workflow_dispatch:
