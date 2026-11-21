@@ -1,31 +1,10 @@
-name: Publish ATLAS Dashboard to GitHub Pages
+name: ATLAS Dashboard Build Check (legacy publisher disabled)
 on:
-  schedule:
-    - cron: "19 * * * *"
-  push:
-    branches: [main]
-    paths:
-      - atlas-dashboard.html
-      - atlas_macro_events.py
-      - atlas_coinglass_snapshot.py
-      - assets/atlas-coinglass-widget.js
-      - assets/**
-      - docs/**
-      - .github/workflows/publish-atlas-dashboard.yml
-      - .github/workflows/atlas-web-pages.yml
   workflow_dispatch:
 permissions:
   contents: read
-  pages: write
-  id-token: write
-concurrency:
-  group: atlas-pages
-  cancel-in-progress: false
 jobs:
   deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,10 +24,5 @@ jobs:
           COINGLASS_API_KEY: ${{ secrets.COINGLASS_API_KEY }}
         run: python atlas_coinglass_snapshot.py _site/coinglass_snapshot.json
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Validate generated site
+        run: test -s _site/index.html && test -s _site/desk/index.html
