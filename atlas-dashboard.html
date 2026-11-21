@@ -93,7 +93,7 @@ async function loadFxParity(){
  const q=el('fx-parity-quotes'),c=el('fx-parity-comparison');
  q.textContent='Loading...';c.replaceChildren();
  try{
-  const d=await api('/api/iran-relative-value');
+  const d=await api('/api/iran-relative-value?schema=2');
   q.replaceChildren();
   for(const x of d.quotes||[]){
    const price=x.price==null?'داده کافی نیست':num(x.price);
