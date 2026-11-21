@@ -385,7 +385,7 @@ Deno.serve(async(req:Request)=>{
    "atlas_free_alert_events?select=alert_key,timestamp,symbol,timeframe,event_type,direction,severity,rsi_value,confidence,telegram_status&order=timestamp.desc&limit=60",
    "atlas_market_guard_events?select=event_key,captured_at,event_type,symbol,pct_1h,reference_level,telegram_sent&order=captured_at.desc&limit=50",
    "atlas_hourly_signal_snapshots?select=symbol,asset_group,price,captured_at,public_signal&order=captured_at.desc&limit=300",
-   "atlas_market_snapshots?select=symbol,price,captured_at&order=captured_at.desc&limit=120",
+   "atlas_market_snapshots?select=symbol,asset,price,captured_at,payload&order=captured_at.desc&limit=350",
    "atlas_tse_snapshots?select=symbol,price,captured_at&order=captured_at.desc&limit=120"
   ];
   const [signals,alerts,guards,crypto,metals,iran]=await Promise.all(qs.map(q=>readTable(base,key,q)));
@@ -393,9 +393,21 @@ Deno.serve(async(req:Request)=>{
   const dedup=(rows:any[],limit=30)=>{const seen=new Set();return rows.filter(x=>{if(!x.symbol||seen.has(x.symbol))return false;seen.add(x.symbol);return true}).slice(0,limit)};
   const safeSignals=signals.map((x:any)=>({symbol:x.symbol,signal_id:x.signal_id,state:x.lifecycle_state,direction:x.direction,entry:x.entry,sl:x.sl,tp1:x.tp1,tp2:x.tp2,confidence:x.confidence,updated_at:x.updated_at,stale:!fresh(x.updated_at,24)}));
   const safeAlerts=[...alerts.map((x:any)=>({id:x.alert_key,at:x.timestamp,symbol:x.symbol,type:x.event_type,direction:x.direction,severity:x.severity,timeframe:x.timeframe,rsi:x.rsi_value,delivery:x.telegram_status,stale:!fresh(x.timestamp,12)})),...guards.map((x:any)=>({id:x.event_key,at:x.captured_at,symbol:x.symbol,type:x.event_type,severity:"GUARD",change_1h:x.pct_1h,reference_level:x.reference_level,delivery:x.telegram_sent?"SENT":"NOT_CONFIRMED",stale:!fresh(x.captured_at,12)}))].sort((a:any,b:any)=>String(b.at).localeCompare(String(a.at))).slice(0,80);
-  const summarize=(rows:any[],limit=20)=>{const list=dedup(rows,limit);return {count:list.length,updated_at:list[0]?.captured_at||null,status:!list.length?"INSUFFICIENT_DATA":fresh(list[0].captured_at,6)?"FRESH":"DELAYED",items:list.map((x:any)=>({symbol:x.symbol,price:x.price,at:x.captured_at,signal:x.public_signal||null}))}};
-  const c=summarize(crypto.filter((x:any)=>x.asset_group==="CRYPTO"),30);
-  const m=summarize(metals,20),i=summarize(iran,20);
+  const summarize=(rows:any[],limit=20)=>{const list=dedup(rows,limit);return {count:list.length,updated_at:list[0]?.captured_at||null,status:!list.length?"INSUFFICIENT_DATA":fresh(list[0].captured_at,6)?"FRESH":"DELAYED",items:list.map((x:any)=>({symbol:x.symbol,price:x.price,at:x.captured_at,signal:x.public_signal||null,source:x.source||x.payload?.source||"ATLAS snapshot",source_verified:x.source_verified===true}))}};
+  // CoinGecko spot snapshots are authoritative when the stored provenance is explicit.
+  // Hourly TOP10/PERSONAL records are a separately labeled fallback, not exchange quotes.
+  const spotCrypto=metals.filter((x:any)=>String(x.payload?.source||"").toLowerCase()==="coingecko"&&
+    !["GOLD","SILVER","COPPER"].includes(String(x.asset||"").toUpperCase())&&
+    /^[A-Z0-9]{2,15}$/.test(String(x.symbol||"").toUpperCase())&&Number(x.price)>0)
+    .map((x:any)=>({...x,source:"CoinGecko",source_verified:true}));
+  const hourlyCrypto=crypto.filter((x:any)=>["TOP10","PERSONAL"].includes(String(x.asset_group||"").toUpperCase())&&Number(x.price)>0)
+    .map((x:any)=>({...x,source:"ATLAS hourly cache (provider unverified)",source_verified:false}));
+  const cryptoRows=[...spotCrypto,...hourlyCrypto].sort((a:any,b:any)=>Date.parse(b.captured_at)-Date.parse(a.captured_at));
+  const metalRows=metals.filter((x:any)=>
+    ["GOLD","SILVER","COPPER"].includes(String(x.asset||"").toUpperCase())||
+    ["XAUUSD","XAGUSD","COPPER"].includes(String(x.symbol||"").toUpperCase()));
+  const c=summarize(cryptoRows,30);
+  const m=summarize(metalRows,20),i=summarize(iran,20);
   return json({checked_at:new Date().toISOString(),refresh_seconds:90,public_read_only:true,signals:safeSignals,alerts:safeAlerts,markets:{crypto:c,metals:m,iran:i,us:{count:0,updated_at:null,status:"EXTERNAL_CHART_ONLY",items:[]}},disclaimer:"Historical or delayed signals are not live orders. No verified OOS performance implied."});
  }catch(e){console.error("live-terminal unavailable",String(e));return json({error:"live_terminal_unavailable"},503)}
  }
