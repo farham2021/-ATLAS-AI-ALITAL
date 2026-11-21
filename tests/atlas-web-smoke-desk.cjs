@@ -27,7 +27,7 @@ const { chromium, devices } = require('playwright');
    await page.locator('#'+button).click();
    await page.waitForTimeout(2500);
    if(!(await page.locator('#'+output).isVisible()))failures.push(device+' hidden '+output);
-   if(tab==='metals'){await page.waitForTimeout(1000);const txt=await page.locator('#metalAnalysis').innerText();if(!txt.includes('XAUUSD')&&!txt.includes('XAGUSD'))failures.push(device+' metals analysis missing selected symbol: '+txt.slice(0,180));if(txt.includes('ناموفق')||txt.includes('unavailable'))console.warn(device+' metals panel degraded: '+txt.slice(0,200));}
+   if(tab==='metals'){await page.waitForFunction(()=>{const t=document.querySelector('#metalAnalysis')?.textContent||'';return /XAUUSD|XAGUSD|ناموفق|unavailable|نماد فلزی|No metal symbols/.test(t)},null,{timeout:18000}).catch(()=>{});const txt=await page.locator('#metalAnalysis').innerText();if(!txt.includes('XAUUSD')&&!txt.includes('XAGUSD'))failures.push(device+' metals analysis missing selected symbol: '+txt.slice(0,180));if(txt.includes('ناموفق')||txt.includes('unavailable'))console.warn(device+' metals panel degraded: '+txt.slice(0,200));}
   }
   const api=await page.request.get('https://onnyytvtfcvlzkagijzz.supabase.co/functions/v1/atlas-web/api/us-markets');
   if(!api.ok())console.warn(device+' US API degraded '+api.status());
