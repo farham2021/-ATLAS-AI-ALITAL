@@ -2,7 +2,7 @@
 
 [![ATLAS Quality Gate](https://github.com/farham2021/-ATLAS-AI-ALITAL/actions/workflows/quality.yml/badge.svg)](https://github.com/farham2021/-ATLAS-AI-ALITAL/actions/workflows/quality.yml)
 
-**ATLAS AI** is a research-first platform for **crypto, Iranian markets, metals and cross-market risk**. It collects market observations, performs quantitative screening and risk analysis, archives evidence, and presents read-only dashboards and Telegram reports. Its goal is to **expose risk and missing data before encouraging action**, not to sell guaranteed trading signals.
+**ATLAS AI** is a research-first platform for **crypto, Iranian markets, metals and cross-market risk**. It collects market observations, performs quantitative screening and risk analysis, archives evidence, and presents public read-only market views, authenticated portfolio/paper-journal tools where enabled, and Telegram reports. Its goal is to **expose risk and missing data before encouraging action**, not to sell guaranteed trading signals.
 
 > **Research / Paper Only. Not financial advice.** Do not interpret a score, scenario, dashboard status, or historical simulation as a verified profitable strategy or an order to trade. Live trading is disabled in the referenced GitHub Actions workflow.
 
@@ -40,7 +40,8 @@ flowchart TD
 - `atlas_futures_backtest_18m.py`, `atlas_futures_costs.py` — historical research and modeled costs
 - `test_atlas_*.py` — component safety and regression tests
 - `supabase/functions/atlas-web/index.ts` — public read-only API and hosted application
-- `atlas-dashboard.html`, `assets/` — static dashboard and widgets
+- `atlas-dashboard.html`, `assets/` — public research terminal and widgets
+- `docs/index.html` — separate GitHub Pages Market Desk, including authenticated portfolio interfaces; its public market panels are read-only
 - `docs/ARCHITECTURE.md` — deployment boundaries, status, source provenance, risks
 
 ## Local verification
@@ -54,6 +55,10 @@ python -m py_compile bot.py atlas_schedule_guard.py atlas_futures_backtest_18m.p
 ```
 
 **Do not run** `bot.py` as a live process without reviewing environment variables, secrets, delivery permissions and the paper-only gates. Manual GitHub workflow dispatch is configured for storage-only diagnostics.
+
+## User interfaces
+
+The [Market Desk](https://farham2021.github.io/-ATLAS-AI-ALITAL/desk/) is the existing interactive Pages workspace. The [Research Terminal](https://farham2021.github.io/-ATLAS-AI-ALITAL/atlas-dashboard.html) is a separate market-intelligence view. They share Supabase APIs but have different navigation and authentication surfaces. This distinction is temporary product debt, not a claim that the two interfaces are identical. Both must be tested after a repository rename.
 
 ## Research evidence
 
