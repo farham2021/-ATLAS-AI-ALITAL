@@ -52,6 +52,8 @@ jobs:
           assert 'source_verified' in html
           assert '["TOP10","PERSONAL"]' in edge
           assert 'source_verified' in edge
+          assert '["CONFIRMED","VALIDATED","EXECUTABLE","READY"]' in edge
+          assert 'Number.isFinite(v)&&v>0' in edge
           assert 'atlas_market_snapshots?select=symbol,asset,price,captured_at,payload' in edge
           assert 'ATLAS_LIVE_TRADING' in Path(".github/workflows/atlas.yml").read_text(encoding="utf-8")
           PY
