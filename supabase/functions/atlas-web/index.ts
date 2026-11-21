@@ -391,7 +391,14 @@ Deno.serve(async(req:Request)=>{
   const [signals,alerts,guards,crypto,metals,iran]=await Promise.all(qs.map(q=>readTable(base,key,q)));
   const fresh=(t:any,h=24)=>!!t&&Date.now()-new Date(t).getTime()<h*3600000&&Date.now()>=new Date(t).getTime()-300000;
   const dedup=(rows:any[],limit=30)=>{const seen=new Set();return rows.filter(x=>{if(!x.symbol||seen.has(x.symbol))return false;seen.add(x.symbol);return true}).slice(0,limit)};
-  const safeSignals=signals.map((x:any)=>({symbol:x.symbol,signal_id:x.signal_id,state:x.lifecycle_state,direction:x.direction,entry:x.entry,sl:x.sl,tp1:x.tp1,tp2:x.tp2,confidence:x.confidence,updated_at:x.updated_at,stale:!fresh(x.updated_at,24)}));
+  const safeSignals=signals.map((x:any)=>({symbol:x.symbol,signal_id:x.signal_id,state:x.lifecycle_state,direction:x.direction,entry:x.entry,sl:x.sl,tp1:x.tp1,tp2:x.tp2,confidence:x.confidence,updated_at:x.updated_at,stale:!fresh(x.updated_at,24)}))
+    .filter((x:any)=>{
+      const state=String(x.state||"").toUpperCase(),side=String(x.direction||"").toUpperCase();
+      const entry=Number(x.entry),stop=Number(x.sl),target=Number(x.tp1);
+      if(x.stale||!["CONFIRMED","VALIDATED","EXECUTABLE","READY"].includes(state))return false;
+      if(![entry,stop,target].every(v=>Number.isFinite(v)&&v>0))return false;
+      return side==="LONG"?stop<entry&&entry<target:side==="SHORT"?target<entry&&entry<stop:false;
+    });
   const safeAlerts=[...alerts.map((x:any)=>({id:x.alert_key,at:x.timestamp,symbol:x.symbol,type:x.event_type,direction:x.direction,severity:x.severity,timeframe:x.timeframe,rsi:x.rsi_value,delivery:x.telegram_status,stale:!fresh(x.timestamp,12)})),...guards.map((x:any)=>({id:x.event_key,at:x.captured_at,symbol:x.symbol,type:x.event_type,severity:"GUARD",change_1h:x.pct_1h,reference_level:x.reference_level,delivery:x.telegram_sent?"SENT":"NOT_CONFIRMED",stale:!fresh(x.captured_at,12)}))].sort((a:any,b:any)=>String(b.at).localeCompare(String(a.at))).slice(0,80);
   const summarize=(rows:any[],limit=20)=>{const list=dedup(rows,limit);return {count:list.length,updated_at:list[0]?.captured_at||null,status:!list.length?"INSUFFICIENT_DATA":fresh(list[0].captured_at,6)?"FRESH":"DELAYED",items:list.map((x:any)=>({symbol:x.symbol,price:x.price,at:x.captured_at,signal:x.public_signal||null,source:x.source||x.payload?.source||"ATLAS snapshot",source_verified:x.source_verified===true}))}};
   // CoinGecko spot snapshots are authoritative when the stored provenance is explicit.
