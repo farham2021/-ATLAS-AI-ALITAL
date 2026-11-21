@@ -1,5 +1,7 @@
 # ATLAS AI — Risk-First Quant Research & Market Intelligence
 
+[![ATLAS Quality Gate](https://github.com/farham2021/-ATLAS-AI-ALITAL/actions/workflows/quality.yml/badge.svg)](https://github.com/farham2021/-ATLAS-AI-ALITAL/actions/workflows/quality.yml)
+
 **ATLAS AI** is a research-first platform for **crypto, Iranian markets, metals and cross-market risk**. It collects market observations, performs quantitative screening and risk analysis, archives evidence, and presents read-only dashboards and Telegram reports. Its goal is to **expose risk and missing data before encouraging action**, not to sell guaranteed trading signals.
 
 > **Research / Paper Only. Not financial advice.** Do not interpret a score, scenario, dashboard status, or historical simulation as a verified profitable strategy or an order to trade. Live trading is disabled in the referenced GitHub Actions workflow.
