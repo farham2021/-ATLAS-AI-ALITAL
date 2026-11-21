@@ -1,2 +1,4 @@
-"""Compatibility facade; canonical implementation: atlas.delivery.risk_csv_digest."""
-from atlas.delivery.risk_csv_digest import *  # noqa: F401,F403
+"""Compatibility alias: legacy patches and canonical calls share one module object."""
+import sys
+from atlas.delivery import risk_csv_digest as _canonical
+sys.modules[__name__] = _canonical
