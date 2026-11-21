@@ -21,7 +21,7 @@ Edge Function `atlas-web` **v80** corrected the public grouping:
 - Retain each observation's original timestamp; no invented price change or inferred derivative funding.
 - Reject empty coverage with `INSUFFICIENT_DATA` and mark records as `DELAYED` beyond the existing age threshold.
 
-**Validation status:** Supabase confirmed deployment of v80 and the source was compared byte-for-byte with the repository fix. A fresh end-to-end HTTP response was not available to the audit session. The endpoint's runtime output and live user interface still need confirmation.
+**Verification:** The v80 grouping repair was later independently exercised through the actual public API: HTTP 200, 30 CoinGecko-tagged fresh crypto entries and 4 metal entries at 2026-11-21 14:09 UTC. Subsequently v82 added a public signal gate: only fresh CONFIRMED / VALIDATED / EXECUTABLE / READY records with strictly positive and correctly ordered Entry/SL/TP1 may appear. At 14:12 UTC, the API returned HTTP 200, 30 fresh CoinGecko records and zero published signals. Negative-target CANDIDATE research rows still require upstream generation fixes; they were not deleted. These observations verify a point-in-time API response, not continuous availability, OOS profitability or Pages UI deployment.
 
 ## Data source and quality rules
 
