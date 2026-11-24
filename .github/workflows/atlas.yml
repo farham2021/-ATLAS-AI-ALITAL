@@ -8,7 +8,8 @@ on:
     # GitHub cron is UTC; Tehran is currently UTC+03:30. Primary/recovery wakes
     # run at +2/+32 minutes so delayed scheduled starts remain inside the guard window.
     # The guard is authoritative for mode selection, Tehran-local keys and dedupe.
-    - cron: "7,37 8,9,12,13,19,20 * * *"
+    - cron: "37 8,12,19 * * *"
+    - cron: "7 9,13,20 * * *"
   workflow_dispatch:
     inputs:
       cycle_mode:
@@ -57,7 +58,7 @@ jobs:
       - name: Claim slot lease
         id: claim
         if: steps.plan.outputs.scheduled == '1' && steps.plan.outputs.mode != 'NONE'
-        # Fail-open only for infrastructure/RPC failure. A successful DENIED claim still skips execution.
+        # Fail closed on RPC failure; never execute a scheduled slot without a lease.
         env:
           ATLAS_SCHEDULER_TABLE: atlas_scheduler_runs
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -67,7 +68,7 @@ jobs:
 
       # Single gate for all downstream steps (install / verify / run).
       # Manual (scheduled!=1) always runs when mode!=NONE.
-      # Scheduled runs only when CLAIMED, or when claim infrastructure failed (fail-open).
+      # Scheduled runs only when CLAIMED with a nonempty lease token.
       - name: Resolve should_run
         id: gate
         run: |
@@ -76,13 +77,14 @@ jobs:
           SCHED="${{ steps.plan.outputs.scheduled }}"
           CLAIMED="${{ steps.claim.outputs.claimed }}"
           CLAIM_OUTCOME="${{ steps.claim.outcome }}"
+          LEASE_TOKEN="${{ steps.claim.outputs.lease_token }}"
           SHOULD=0
           PATH_KIND=skip
           if [ "$MODE" != "NONE" ]; then
             if [ "$SCHED" != "1" ]; then
               SHOULD=1
               PATH_KIND=manual
-            elif [ "$CLAIMED" = "CLAIMED" ]; then
+            elif [ "$CLAIMED" = "CLAIMED" ] && [ -n "$LEASE_TOKEN" ]; then
               SHOULD=1
               PATH_KIND=claimed
             fi
