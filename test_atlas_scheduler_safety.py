@@ -8,6 +8,16 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 
 
 class SchedulerSafetyTests(unittest.TestCase):
+    def test_primary_and_recovery_cron_match_tehran_slots(self):
+        from pathlib import Path
+        workflow = (Path(__file__).parent / ".github/workflows/atlas.yml").read_text()
+        self.assertIn('cron: "37 8,12,19 * * *"', workflow)
+        self.assertIn('cron: "7 9,13,20 * * *"', workflow)
+        for hour, mode in ((8, "DEEP4H"), (12, "DAILY16"), (19, "NIGHTLY23")):
+            for h, minute in ((hour, 37), (hour + 1, 7)):
+                dt = datetime(2026, 11, 24, h, minute, tzinfo=timezone.utc)
+                self.assertEqual(choose_plan(dt, lambda key: False)["mode"], mode)
+
     def test_expired_lease_can_be_reclaimed(self):
         now = datetime(2026, 11, 13, tzinfo=timezone.utc)
         row = {"status": "RUNNING", "lease_until": (now - timedelta(minutes=1)).isoformat()}
