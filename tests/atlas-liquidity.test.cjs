@@ -1,0 +1,10 @@
+'use strict';
+const {test}=require('node:test'),a=require('node:assert/strict'),{radar}=require('../research/atlas-liquidity.cjs');
+const intervalMs=3600000,base=Date.UTC(2026,0,1);
+const rows=Array.from({length:40},(_,i)=>({time:new Date(base+i*intervalMs).toISOString(),open:100,high:102,low:98,close:100,volume:100}));
+const opts={asOf:base+39*intervalMs,intervalMs};
+test('closed candle bullish sweep and cost aware risk',()=>{const c=rows.map(x=>({...x}));Object.assign(c[39],{low:96,close:101,volume:200});const r=radar(c,opts);a.equal(r.status,'CONFIRMED');a.equal(r.direction,'LONG');a.ok(r.planned_loss<=15);a.equal(r.live_orders,false);a.equal(r.net_rr,2)});
+test('future candle cannot change result',()=>{const future={...rows[39],time:new Date(base+40*intervalMs).toISOString(),low:90};a.deepEqual(radar([...rows,future],opts),radar(rows,opts))});
+test('stale and missing data fail closed',()=>{a.equal(radar(rows,{...opts,asOf:opts.asOf+intervalMs}).status,'unavailable');a.equal(radar(rows.filter((_,i)=>i!==38),opts).status,'unavailable');a.equal(radar([],opts).status,'unavailable')});
+test('dual sweep invalidated',()=>{const c=rows.map(x=>({...x}));Object.assign(c[39],{low:96,high:104});a.equal(radar(c,opts).status,'INVALIDATED')});
+test('unconfirmed sweep is warning not trade',()=>{const c=rows.map(x=>({...x}));c[39].low=96;const r=radar(c,opts);a.equal(r.status,'EARLY_WARNING');a.equal(r.quantity,undefined)});
