@@ -14,6 +14,8 @@ on:
       - tests/atlas-relative-value.test.cjs
       - assets/atlas-relative-value.mjs
       - tests/atlas-quant-core.test.cjs
+      - research/atlas-liquidity.cjs
+      - tests/atlas-liquidity.test.cjs
       - research/quant-core.cjs
       - research/atlas-intelligence.cjs
       - tests/atlas-intelligence.test.cjs
@@ -54,7 +56,7 @@ jobs:
           if(!labSelect||(labSelect.match(/<option /g)||[]).length<50)throw Error('initial crypto menu has fewer than 50 symbols');
           NODE
       - name: Quantitative and metal parity unit tests (no live trading)
-        run: node --test tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs tests/atlas-relative-value.test.cjs
+        run: node --test tests/atlas-liquidity.test.cjs tests/atlas-quant-core.test.cjs tests/atlas-intelligence.test.cjs tests/atlas-risk-validation.test.cjs tests/atlas-relative-value.test.cjs
       - run: npm install --no-save playwright@1.58.2
       - run: npx playwright install --with-deps chromium
       - name: Prepare root and desk pages for exact-commit smoke
